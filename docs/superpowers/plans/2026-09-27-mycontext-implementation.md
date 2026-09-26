@@ -18,6 +18,7 @@
 - `strict: true` и `checkJs: true` не ослабляются. Если проверка падает, добавляется явная JSDoc-аннотация, а не `any`.
 - Всё, что попадает в `src/`, обязано иметь JSDoc-типы. Комментарии не пересказывают код.
 - Имя продукта — MyContext. Слово `velvet` из исходного ТЗ не используется нигде.
+- Публичные возвращаемые значения и параметры, представляющие структурированные данные, обязаны использовать именованный тип через `@typedef`, а не анонимный inline-объект. Это прямое правило проекта, и оно сильнее любых формулировок брифа. Имена типов из Interfaces-блока задачи обязательны: от них зависят последующие задачи.
 - CSS-переменная `--vc-padding` (8px) обязана совпадать с константой `SAFETY_PADDING` (8). Совпадение фиксируется тестом в Task 5.
 - Подменю — соседние элементы в `<body>`, а не потомки пункта. Перед каждым `showPopover()` элемент переносится в конец `<body>`.
 - Отложенный `hidePopover()` отменяется при повторном открытии того же элемента.
@@ -151,17 +152,33 @@ git commit -m "chore: инфраструктура репозитория, ко�
   - `src/positioner.js`:
     ```js
     /**
+     * @typedef {object} MenuPosition
+     * @property {number} left
+     * @property {number} top
+     */
+
+    /**
+     * @typedef {object} SubmenuPosition
+     * @property {number} left
+     * @property {number} top
+     * @property {boolean} flippedX
+     */
+
+    /**
      * @param {RootPositionParams} params
-     * @returns {{left: number, top: number}}
+     * @returns {MenuPosition}
      */
     export function calculateMenuPosition(params)
 
     /**
      * @param {SubmenuPositionParams} params
-     * @returns {{left: number, top: number, flippedX: boolean}}
+     * @returns {SubmenuPosition}
      */
     export function calculateSubmenuPosition(params)
     ```
+    Имена типов обязательны: анонимный inline-объект в возвращаемом типе запрещён
+    правилами проекта для публичного API, а `SubmenuPosition` — это то место, где
+    живёт контракт `flippedX`, на который подписан Task 7.
     `RootPositionParams`: `cursorX, cursorY, menuWidth, menuHeight, viewportWidth, viewportHeight` (все `number`, обязательные), `offset` (default `CURSOR_OFFSET`), `padding` (default `SAFETY_PADDING`).
     `SubmenuPositionParams`: `anchorRect` (`{left, top, right, bottom}`), `menuWidth, menuHeight, viewportWidth, viewportHeight`, `offset` (default `SUBMENU_OFFSET`), `padding` (default `SAFETY_PADDING`).
 
