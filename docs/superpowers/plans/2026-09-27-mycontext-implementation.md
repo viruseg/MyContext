@@ -12,7 +12,8 @@
 
 ## Global Constraints
 
-- Рантайм-зависимостей нет: в `package.json` отсутствует поле `dependencies` вообще. `devDependencies` ограничены инструментами тестирования и типизации: `@playwright/test`, `typescript`, `@types/node`. Последний нужен потому, что `scripts/serve.js` использует `node:http` и `node:fs`, а без типов `tsc` падает; в самом `serve.js` он подключается строкой `/// <reference types="node" />`, чтобы `tsconfig.json` не загромождался.
+- Рантайм-зависимостей нет: в `package.json` отсутствует поле `dependencies` вообще. `devDependencies` ограничены инструментами тестирования и типизации: `@playwright/test`, `typescript`, `@types/node`. Последний нужен потому, что `scripts/serve.js` использует `node:http` и `node:fs`.
+- Типовое окружение разделено на две программы, и это обязательно, а не деталь оформления. `tsconfig.json` покрывает `src/**` и `Demo/**` с `"types": []` — браузерный код не видит Node-глобалов и падает на `process`, `Buffer` и на Node-перегрузке `setTimeout`, возвращающей `NodeJS.Timeout`. `tsconfig.node.json` покрывает `scripts/**` и `tests/**` с `"types": ["node"]` и расширяет базовый. `npm run typecheck` запускает браузерную программу **первой** под `&&`, поэтому Node-глобал в `src/**` ломает проверку независимо от того, что node-программа подтвердила бы его при изолированном запуске. Никакой строки `/// <reference types="node" />` в `src/**` или `Demo/**` быть не должно.
 - `tsconfig.json` использует `"target": "ESNext"`, `"lib": ["ESNext", "DOM", "DOM.Iterable"]` — не `ES2026`, потому что TypeScript может не знать эту строку в `lib`.
 - `strict: true` и `checkJs: true` не ослабляются. Если проверка падает, добавляется явная JSDoc-аннотация, а не `any`.
 - Всё, что попадает в `src/`, обязано иметь JSDoc-типы. Комментарии не пересказывают код.
