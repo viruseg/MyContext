@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Рантайм-зависимостей нет: в `package.json` отсутствует поле `dependencies` вообще. Только `devDependencies` с `@playwright/test` и `typescript`.
+- Рантайм-зависимостей нет: в `package.json` отсутствует поле `dependencies` вообще. `devDependencies` ограничены инструментами тестирования и типизации: `@playwright/test`, `typescript`, `@types/node`. Последний нужен потому, что `scripts/serve.js` использует `node:http` и `node:fs`, а без типов `tsc` падает; в самом `serve.js` он подключается строкой `/// <reference types="node" />`, чтобы `tsconfig.json` не загромождался.
 - `tsconfig.json` использует `"target": "ESNext"`, `"lib": ["ESNext", "DOM", "DOM.Iterable"]` — не `ES2026`, потому что TypeScript может не знать эту строку в `lib`.
 - `strict: true` и `checkJs: true` не ослабляются. Если проверка падает, добавляется явная JSDoc-аннотация, а не `any`.
 - Всё, что попадает в `src/`, обязано иметь JSDoc-типы. Комментарии не пересказывают код.
@@ -23,6 +23,7 @@
 - `prefers-reduced-motion: reduce` отменяет и CSS-переход, и JS-задержку закрытия.
 - Правый клик вне дерева меню закрывает наше меню, но системное контекстное меню вне привязанного контейнера не подавляется.
 - Коммит после каждой задачи, без `--amend`, без force-push.
+- До Task 12 `index.html` содержит только заглушку демо из Task 1. Тесты e2e в Tasks 4–11 строят собственный DOM через `page.evaluate` и не зависят от демо-сценариев. Для страниц, которым нужен корректный базовый URL, порядок обязателен: сначала `page.goto('/')`, потом `page.setContent(...)` — иначе относительные ссылки не разрешатся.
 
 ## Review Focus
 
@@ -83,7 +84,7 @@ import { expect, test } from '@playwright/test';
 test('демо-страница отдаётся сервером', async ({ page }) => {
   const response = await page.goto('/');
   expect(response?.status()).toBe(200);
-  expect(await page.title()).toBe('MyContext — демо');
+  expect(await page.title()).toContain('MyContext');
 });
 ```
 
@@ -568,6 +569,7 @@ git commit -m "feat: рендерер уровней меню с фиксиро�
    * @property {HTMLElement} element
    * @property {RenderedItem[]} items
    * @property {LevelEntry|null} parent
+   * @property {RenderedItem|null} ownerItem  пункт, открывший этот уровень; null у корня
    * @property {LevelEntry[]} children
    * @property {boolean} open
    * @property {number} generation
@@ -575,8 +577,19 @@ git commit -m "feat: рендерер уровней меню с фиксиро�
    */
 
   /**
+   * @typedef {object} MenuLayerOptions
+   * @property {string} label
+   * @property {'auto'|'light'|'dark'} theme
+   * @property {number} animationDuration
+   * @property {Map<string, MenuItem>} actions  общий для всех уровней, передаётся по ссылке
+   * @property {(fn: () => void, ms: number) => unknown} [schedule]
+   * @property {(handle: unknown) => void} [cancel]
+   * @property {MediaQueryList} [reducedMotionQuery]
+   */
+
+  /**
    * @typedef {object} MenuLayer
-   * @property {(items, parent, levelIndex) => LevelEntry} ensureLevel
+   * @property {(items, parent, levelIndex, ownerItem) => LevelEntry} ensureLevel
    * @property {(entry: LevelEntry, anchor: {x: number, y: number}) => void} showRoot
    * @property {(entry: LevelEntry) => void} showSubmenu
    * @property {(entry: LevelEntry) => void} hide
@@ -591,7 +604,7 @@ git commit -m "feat: рендерер уровней меню с фиксиро�
    */
   export function createLayer(options)
   ```
-  `MenuLayerOptions`: `label`, `theme`, `animationDuration`, `schedule`, `cancel`, `reducedMotionQuery`.
+  `ensureLevel` создаёт уровень один раз и возвращает тот же `LevelEntry` при повторном вызове с теми же аргументами. `ownerItem` у корневого уровня — `null`, у подменю — `RenderedItem` пункта-владельца, через `.element` доступны `aria-owns`, `aria-expanded` и `data-chevron`.
 
 - [ ] **Step 1: Написать падающие тесты**
 
@@ -607,6 +620,8 @@ git commit -m "feat: рендерер уровней меню с фиксиро�
 - `reduced-motion: hidePopover вызывается немедленно, без задачи в планировщике`
 - `hideAll: скрывает всю цепочку, от глубоких к корню`
 - `chevron: showSubmenu у правого края разворачивает шеврон пункта-владельца` — `calculateSubmenuPosition` вернул `flippedX: true`, у пункта-владельца `data-chevron="left"`; у пункта слева остаётся `right`
+- `aria-owns: showSubmenu проставляет пункту-владельцу aria-owns со id подменю` — значение равно `id` элемента подменю; у корня `aria-owns` отсутствует
+- `aria-expanded: showSubmenu ставит пункту-владельцу aria-expanded=true`
 - `destroy: элементы удалены из DOM, document.body чист`
 
 - [ ] **Step 2: Убедиться, что тесты падают**
@@ -624,7 +639,7 @@ Expected: FAIL — модуль `src/layer.js` не найден.
 
 - [ ] **Step 5: Реализовать `hideAll`, `setFocusOwner` и `destroy`**
 
-`hideAll` обходит цепочку от глубоких уровней к корню. `destroy` снимает все висящие задачи, вызывает `hidePopover()` на каждом заведённом элементе и удаляет их из DOM.
+`hideAll` обходит цепочку от глубоких уровней к корню, у каждого скрытого уровня снимает `aria-expanded` с его `ownerItem.element`, если он есть. `destroy` снимает все висящие задачи, вызывает `hidePopover()` на каждом заведённом элементе и удаляет их из DOM.
 
 - [ ] **Step 6: Запустить тесты и убедиться, что проходят**
 
@@ -858,7 +873,7 @@ git commit -m "feat: класс MyContext с валидацией конфигу
 - `вложенность 4 уровней открывается целиком и все меню в пределах вьюпорта` — для каждого открытого уровня `getBoundingClientRect()` внутри вьюпорта минус 8
 - `вложенность 4 уровней закрывается по цепочке клавишей Escape` — четыре нажатия закрывают всё
 - `отключённый пункт-владелец не открывает подменю ни одним способом` (Review Focus 1, клавиатурный дубль)
-- `подменю не пересоздаётся при повторном наведении на тот же пункт` — `entry.children.length` не растёт, та же ссылка на элемент
+- `подменю не пересоздаётся при повторном наведении на тот же пункт` — id открытого подменю запоминается, меню закрывается и открывается снова, id совпадает; пересоздание выдало бы новый id
 - `aria-expanded возвращается в false после закрытия подменю` — открыть, навести соседний пункт, `aria-expanded` у закрытого владельца снова `false`
 - `aria-expanded у всех владельцев равен false при полном close()`
 
@@ -1037,7 +1052,7 @@ git commit -m "feat: демо со всеми сценариями провер�
 - `критерий 2: меню не выходит за границы вьюпорта ни в одной точке сетки` — сетка из `tests/unit/positioner.spec.js`, проверяется `getBoundingClientRect()` каждого открытого уровня
 - `критерий 3: вложенное меню открывается без ложных закрытий при диагональном движении`
 - `критерий 4: все три типа иконок работают, лейблы соосны независимо от наличия иконок`
-- `критерий 5: меню полностью управляется с клавиатуры` — сценарий без мыши: открыть, пройти четыре уровня стрелками, активировать, выйти по `Escape`
+- `критерий 5: меню полностью управляется с клавиатуры` — открытие выполняется программным `open({x, y})`, потому что `attach` слушает только `contextmenu` и клавиатурного способа вызвать его у API нет; после открытия сценарий не использует мышь: четыре уровня пройдены `ArrowRight` / `ArrowLeft`, пункт активирован `Enter`, выход четырьмя `Escape`
 - `критерий 6: при reducedMotion: reduce меню видно сразу и не анимируется`
 - `критерий 7: после destroy() в DOM не остаётся .vc-menu и контейнер не реагирует на правый клик`
 
