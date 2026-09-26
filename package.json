@@ -1,0 +1,19 @@
+{
+  "name": "mycontext",
+  "version": "0.1.0",
+  "description": "MyContext — контекстное меню для браузера на чистом ES2026 без runtime-зависимостей",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:unit": "playwright test --project=unit",
+    "test:e2e": "playwright test --project=chromium --project=firefox --project=webkit",
+    "typecheck": "tsc --noEmit",
+    "serve": "node scripts/serve.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^26.6.3",
+    "typescript": "^7.0.2"
+  }
+}
