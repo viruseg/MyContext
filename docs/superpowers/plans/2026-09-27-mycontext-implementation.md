@@ -508,9 +508,15 @@ git commit -m "feat: стили, темы и анимации с поддерж�
    */
 
   /**
+   * @typedef {object} RenderedLevel
+   * @property {HTMLElement} element
+   * @property {RenderedItem[]} items
+   */
+
+  /**
    * @param {Array<MenuItem | SeparatorItem>} items
    * @param {RenderContext} context
-   * @returns {{element: HTMLElement, items: RenderedItem[]}}
+   * @returns {RenderedLevel}
    */
   export function renderLevel(items, context)
 
