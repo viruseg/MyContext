@@ -8,6 +8,7 @@ const MENU_HEIGHT = 300;
 // Отступы и зазоры нигде не передаются явно: кейсы проверяют поведение
 // дефолтов — padding 8, offset 2 для корня и 4 для подменю.
 const PADDING = 8;
+const SUBMENU_OFFSET = 4;
 
 const GRID_X = [0, 1, 8, 9, 400, 500, 991, 999, 1000];
 const GRID_Y = [0, 1, 8, 9, 300, 500, 799, 800];
@@ -229,13 +230,14 @@ test.describe('calculateSubmenuPosition', () => {
       for (const anchorX of GRID_X) {
         for (const anchorY of GRID_Y) {
           const label = `меню ${menuWidth}x${menuHeight}, якорь (${anchorX}, ${anchorY})`;
-          const { left, top } = calculateSubmenuPosition({
-            anchorRect: {
-              left: anchorX,
-              top: anchorY,
-              right: anchorX + ANCHOR_WIDTH,
-              bottom: anchorY + ANCHOR_HEIGHT,
-            },
+          const anchorRect = {
+            left: anchorX,
+            top: anchorY,
+            right: anchorX + ANCHOR_WIDTH,
+            bottom: anchorY + ANCHOR_HEIGHT,
+          };
+          const { left, top, flippedX } = calculateSubmenuPosition({
+            anchorRect,
             menuWidth,
             menuHeight,
             viewportWidth: VIEWPORT_WIDTH,
@@ -243,6 +245,13 @@ test.describe('calculateSubmenuPosition', () => {
           });
           expectContainedAxis(left, menuWidth, VIEWPORT_WIDTH, label);
           expectContainedAxis(top, menuHeight, VIEWPORT_HEIGHT, label);
+          // Ожидание выведено из правила спецификации, а не из реализации:
+          // flippedX означает, что правый кандидат не поместился. Проверка
+          // вписывания здесь продублирована намеренно — иначе ожидание,
+          // посчитанное тем же предикатом, было бы тождественным.
+          const preferred = anchorRect.right + SUBMENU_OFFSET;
+          const rightSideFits = preferred >= PADDING && preferred + menuWidth + PADDING <= VIEWPORT_WIDTH;
+          expect(flippedX, `${label}: flippedX разошёлся с правым кандидатом`).toBe(!rightSideFits);
         }
       }
     }

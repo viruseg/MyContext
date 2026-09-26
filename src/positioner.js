@@ -7,7 +7,9 @@ import { CURSOR_OFFSET, SAFETY_PADDING, SUBMENU_OFFSET } from './constants.js';
  * @property {number} left левая граница пункта-владельца.
  * @property {number} top верхняя граница пункта-владельца.
  * @property {number} right правая граница пункта-владельца.
- * @property {number} bottom нижняя граница пункта-владельца.
+ * @property {number} bottom нижняя граница пункта-владельца. В расчёте не
+ *   участвует: подменю выравнивается по верхней границе, а по вертикали только
+ *   сдвигается вверх.
  */
 
 /**
@@ -39,8 +41,27 @@ import { CURSOR_OFFSET, SAFETY_PADDING, SUBMENU_OFFSET } from './constants.js';
  */
 
 /**
- * Единственный предикат вписывания: одинаков для всех осей и обоих меню.
+ * Позиция корневого меню в координатах вьюпорта.
  *
+ * @typedef {object} MenuPosition
+ * @property {number} left координата левого края меню.
+ * @property {number} top координата верхнего края меню.
+ */
+
+/**
+ * Позиция подменю в координатах вьюпорта.
+ *
+ * `flippedX` входит в контракт, потому что по нему вызывающий код разворачивает
+ * шеврон пункта-владельца.
+ *
+ * @typedef {object} SubmenuPosition
+ * @property {number} left координата левого края подменю.
+ * @property {number} top координата верхнего края подменю.
+ * @property {boolean} flippedX `true`, если правый кандидат не подошёл, то есть
+ *   подменю открылось слева от пункта-владельца либо прижато к `padding`.
+ */
+
+/**
  * @param {number} position начало координаты меню на оси.
  * @param {number} size размер меню на оси.
  * @param {number} viewport размер вьюпорта на оси.
@@ -52,9 +73,9 @@ function fitsWithin(position, size, viewport, padding) {
 }
 
 /**
- * Выбирает первую подходящую позицию из кандидатов, иначе последнюю.
- * Последний кандидат — всегда `padding`, то есть клампит для меню, которое
- * не помещается ни в одну из сторон.
+ * Последним кандидатом у обоих вызывающих всегда идёт `padding`, поэтому
+ * fallback один и тот же: клампит для меню, не помещающегося ни с одной
+ * стороны от курсора.
  *
  * @param {number[]} candidates кандидаты в порядке предпочтения.
  * @param {number} size размер меню на оси.
@@ -75,7 +96,7 @@ function pickAxisPosition(candidates, size, viewport, padding) {
  * стороны на ту же величину.
  *
  * @param {RootPositionParams} params входные данные расчёта.
- * @returns {{left: number, top: number}} координаты левого верхнего угла меню в вьюпорте.
+ * @returns {MenuPosition} координаты левого верхнего угла меню в вьюпорте.
  */
 export function calculateMenuPosition(params) {
   const {
@@ -115,10 +136,8 @@ export function calculateMenuPosition(params) {
  * по вертикали не применяется.
  *
  * @param {SubmenuPositionParams} params входные данные расчёта.
- * @returns {{left: number, top: number, flippedX: boolean}} координаты левого верхнего угла
- *   подменю в вьюпорте и признак разворота шеврона у пункта-владельца.
- *   `flippedX` — `true`, если правый кандидат не подошёл; в том числе когда
- *   не подошёл и левый, и подменю прижато к `padding`.
+ * @returns {SubmenuPosition} координаты левого верхнего угла подменю в вьюпорте
+ *   и признак разворота шеврона у пункта-владельца.
  */
 export function calculateSubmenuPosition(params) {
   const {
