@@ -417,6 +417,7 @@ git commit -m "feat: рендерер иконок трёх типов с сан
 - `item-height по умолчанию равен 28px`
 - `icon-size и chevron-size по умолчанию равны 16px и 12px`
 - `уровень ограничен по высоте: max-height равен 100dvh минус два padding` — сравнение с `calc(100dvh - 16px)`
+- `уровень ограничен по ширине: max-width равен 100dvw минус два padding` — сравнение с `calc(100dvw - 16px)`. Без этого длинный лейбл даёт меню шире вьюпорта, и гарантия «меню не выходит за границы» перестаёт быть безусловной
 - `фон полупрозрачный и присутствует backdrop-filter`
 - `поддержка без backdrop-filter: под @supports not есть непрозрачный запасной фон`
 - `auto при светлой системной схеме оставляет светлый фон` — `emulateMedia({ colorScheme: 'light' })`
@@ -439,6 +440,8 @@ Expected: FAIL — нет ни `styles/mycontext.css`, ни `src/theme.js`.
 - [ ] **Step 4: Реализовать `styles/mycontext.css`**
 
 Порядок правил важен. Базовые значения токенов — светлая тема. Затем `@media (prefers-color-scheme: dark)` переопределяет их только для `[data-vc-theme="auto"]`. Затем `[data-vc-theme="dark"]` переопределяет безусловно — специфичность атрибута выше медиазапроса, поэтому явная тема побеждает системную. Каскад: `padding`, `border-radius`, `box-shadow`, `backdrop-filter: blur(20px) saturate(180%)`, полупрозрачный фон из `color-mix`; `@supports not (backdrop-filter: blur(1px))` подставляет `--vc-bg-solid`. Сетка `.vc-item` — `grid-template-columns: var(--vc-icon-size) 1fr var(--vc-chevron-size)`, обе боковые колонки зарезервированы всегда. `.vc-label` — `overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0`. Активный пункт — селектор по `[data-active]`, не `:focus`. Вход через `@starting-style` + `transition-behavior: allow-discrete`; выход — `transition` по `opacity` и `transform`. Медиазапрос `prefers-reduced-motion: reduce` обнуляет `--vc-animation-duration` и отключает `transform`.
+
+Ограничение габаритов двумя слоями — обязательная часть, а не украшение. CSS задаёт каждому уровню `max-height: calc(100dvh - 2 * var(--vc-padding))` и `max-width: calc(100dvw - 2 * var(--vc-padding))`, поэтому элемент физически не может оказаться больше доступного места. Только после этого `positioner.js` получает от caller'а размер, который гарантированно влезает, и его инвариант «меню целиком внутри вьюпорта минус padding» становится безусловным. Без `max-width` длинный лейбл создаёт меню шире вьюпорта, и единственным оставшимся ответом движка будет clamp к `padding` — то есть меню вылезет за правый край, а критерий 2 окажется недостижим. Именно поэтому оба ограничения равны `calc(100d? - 2 * var(--vc-padding))`, а `SAFETY_PADDING` в JS обязан совпадать с `--vc-padding`.
 
 - [ ] **Step 5: Запустить тесты и убедиться, что проходят**
 
