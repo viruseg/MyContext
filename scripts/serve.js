@@ -1,10 +1,9 @@
-/// <reference types="node" />
 import { createReadStream, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, resolve, sep } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
-const PORT = Number(process.env.PORT ?? 4173);
+const DEFAULT_PORT = 4173;
 const HOST = '127.0.0.1';
 
 /** @type {Record<string, string>} */
@@ -38,6 +37,25 @@ function resolveFilePath(url) {
 }
 
 /**
+ * Разбирает порт из переменной окружения.
+ * Завершает процесс с кодом 1, если значение не является портом.
+ *
+ * @param {string | undefined} value
+ * @returns {number}
+ */
+function resolvePort(value) {
+  if (value === undefined) return DEFAULT_PORT;
+  const port = Number(value);
+  if (Number.isInteger(port) && port >= 1 && port <= 65535) return port;
+  process.stderr.write(`Некорректное значение PORT: ${value}\n`);
+  process.exit(1);
+}
+
+const PORT = resolvePort(process.env.PORT);
+
+/**
+ * `false`, если путь недоступен или не является обычным файлом.
+ *
  * @param {string} filePath
  * @returns {boolean}
  */
@@ -50,6 +68,8 @@ function isFile(filePath) {
 }
 
 /**
+ * Отвечает `403` за пределами корня, `404` для неизвестного пути, иначе отдаёт файл.
+ *
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
  * @returns {void}
@@ -79,11 +99,19 @@ function handleRequest(req, res) {
 
 const server = createServer(handleRequest);
 
+server.on('error', (error) => {
+  process.stderr.write(`Не удалось запустить сервер на ${HOST}:${PORT} — ${error.message}\n`);
+  process.exit(1);
+});
+
 server.listen(PORT, HOST, () => {
   process.stdout.write(`MyContext demo: http://${HOST}:${PORT}\n`);
 });
 
 process.on('SIGINT', () => {
+  // close() не трогает соединения с запросом в полёте — они держат процесс до
+  // headersTimeout; closeAllConnections() рвёт их, поэтому Ctrl-C не ждёт.
+  server.closeAllConnections();
   server.close(() => {
     process.exit(0);
   });

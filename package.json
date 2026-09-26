@@ -8,7 +8,7 @@
     "test": "playwright test",
     "test:unit": "playwright test --project=unit",
     "test:e2e": "playwright test --project=chromium --project=firefox --project=webkit",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "serve": "node scripts/serve.js"
   },
   "devDependencies": {

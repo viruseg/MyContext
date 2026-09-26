@@ -9,14 +9,17 @@ export default defineConfig({
     headless: true,
   },
   webServer: {
+    // Глобальная настройка: сервер поднимается и для `npm run test:unit`,
+    // хотя юнит-тесты HTTP-запросов не делают.
     command: 'node scripts/serve.js',
     url: BASE_URL,
     reuseExistingServer: true,
   },
   projects: [
     {
-      // Браузер не задаётся: тесты используют только expect и чистые функции,
-      // а фикстуры браузера в Playwright создаются лениво и не запускают его.
+      // Браузерные фикстуры Playwright создаются лениво, поэтому процесс браузера
+      // не стартует, пока тест их не запросит. Деструктуризация `{ page }` в тесте
+      // из tests/unit это свойство сломает.
       name: 'unit',
       testDir: 'tests/unit',
     },
