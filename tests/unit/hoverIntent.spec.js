@@ -171,16 +171,29 @@ test.describe('открытие', () => {
     expect(hover.isOpenPending()).toBe(false);
   });
 
-  test('itemPress открывает немедленно, без задачи в планировщике', () => {
-    const { clock, hover } = setup();
+  test('itemPress открывает немедленно, вызывая onOpen без задачи в планировщике', () => {
+    const { clock, hover, calls } = setup();
 
     hover.itemEnter();
     hover.itemPress();
 
-    // Контракт не отдаёт колбэка открытия, поэтому «открылось немедленно»
-    // наблюдается как «задачи открытия больше нет».
+    // Открытие происходит на самом нажатии: колбэк вызван синхронно, задачи
+    // больше нет, состояние уже согласованное.
+    expect(calls).toEqual(['open']);
     expect(hover.isOpenPending()).toBe(false);
     expect(clock.tasks).toHaveLength(0);
+  });
+
+  test('itemPress при уже висящей задаче не создаёт второй вызов onOpen', () => {
+    const { clock, hover, calls } = setup();
+
+    hover.itemEnter();
+    hover.itemPress();
+    clock.advance(1000);
+
+    // Нажатие забрало задачу, поэтому по истечении срока открываться нечему.
+    expect(calls).toEqual(['open']);
+    expect(hover.isOpenPending()).toBe(false);
   });
 
   test('повторный itemEnter не перезапускает задержку открытия', () => {
@@ -361,6 +374,50 @@ test.describe('обратная связь', () => {
 
     clock.advance(CLOSE_GRACE_MS * 5);
     expect(calls).toEqual([]);
+  });
+
+  test('внутри колбэков флаги ожидания уже сняты', () => {
+    const clock = createManualClock();
+    /** @type {boolean[][]} пары [isOpenPending, isClosePending] на момент вызова. */
+    const seen = [];
+    const hover = createHoverIntent({
+      schedule: clock.schedule,
+      cancel: clock.cancel,
+      onOpen: () => seen.push([hover.isOpenPending(), hover.isClosePending()]),
+      onClose: () => seen.push([hover.isOpenPending(), hover.isClosePending()]),
+    });
+
+    hover.itemEnter();
+    clock.advance(OPEN_GRACE_MS);
+    enterSubmenuFrom(hover, EXIT_POINT, ENTRY_POINT);
+    hover.pointerMove(FIRST_POINT);
+    hover.pointerMove(OUTSIDE_POINT);
+    clock.advance(CLOSE_GRACE_MS);
+
+    // Порядок «снять флаг, потом звать колбэк» зафиксирован: перестановка дала бы
+    // здесь [true, false] для открытия и [false, true] для закрытия.
+    expect(seen).toEqual([
+      [false, false],
+      [false, false],
+    ]);
+  });
+
+  test('без колбэков задачи срабатывают молча', () => {
+    const clock = createManualClock();
+    const hover = createHoverIntent({ schedule: clock.schedule, cancel: clock.cancel });
+
+    // Колбэки не переданы, значит работают их no-op дефолты: задача обязана
+    // сработать, а не упасть на отсутствии обработчика.
+    hover.itemEnter();
+    clock.advance(OPEN_GRACE_MS);
+    expect(hover.isOpenPending()).toBe(false);
+
+    enterSubmenuFrom(hover, EXIT_POINT, ENTRY_POINT);
+    hover.pointerMove(FIRST_POINT);
+    hover.pointerMove(OUTSIDE_POINT);
+    clock.advance(CLOSE_GRACE_MS);
+    expect(hover.isClosePending()).toBe(false);
+    expect(clock.tasks).toHaveLength(0);
   });
 });
 

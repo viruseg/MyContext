@@ -62,9 +62,10 @@ import { CLOSE_GRACE_MS, DEGENERATE_AREA, OPEN_GRACE_MS } from './constants.js';
  *   времени. Сбросить раньше времени может только `itemLeave` или `itemPress`.
  * @property {() => boolean} isClosePending `true`, пока задача закрытия ждёт своего
  *   времени.
- * @property {() => void} itemPress пункт нажат: открытие происходит немедленно,
- *   задача снимается. Колбэка открытия у контроллера нет, поэтому «немедленно»
- *   наблюдается как снятая задача и сброшенный `isOpenPending`.
+ * @property {() => void} itemPress пункт нажат: планировавшееся открытие происходит
+ *   немедленно — задача снимается, `onOpen` вызывается синхронно, и
+ *   `isOpenPending()` после этого `false`. Если открытие не планировалось, нажатие
+ *   ничего не делает: уже открытое подменю повторно не открывается.
  * @property {() => void} cancelAll снимает обе задачи, сбрасывает флаги и все
  *   опорные точки, включая источник якоря выхода.
  */
@@ -196,11 +197,21 @@ export function createHoverIntent(options = {}) {
       return;
     }
     closePending = true;
-    closeHandle = schedule(() => {
-      closeHandle = null;
-      closePending = false;
-      onClose();
-    }, closeDelayMs);
+    closeHandle = schedule(fireClose, closeDelayMs);
+  }
+
+  // Флаги снимаются до вызова колбэка: тот, кто открывает подменю из `onOpen`,
+  // должен увидеть уже согласованное состояние.
+  function fireOpen() {
+    openHandle = null;
+    openPending = false;
+    onOpen();
+  }
+
+  function fireClose() {
+    closeHandle = null;
+    closePending = false;
+    onClose();
   }
 
   function itemEnter() {
@@ -212,11 +223,7 @@ export function createHoverIntent(options = {}) {
       return;
     }
     openPending = true;
-    openHandle = schedule(() => {
-      openHandle = null;
-      openPending = false;
-      onOpen();
-    }, openDelayMs);
+    openHandle = schedule(fireOpen, openDelayMs);
   }
 
   function itemLeave() {
@@ -269,7 +276,11 @@ export function createHoverIntent(options = {}) {
   }
 
   function itemPress() {
+    if (!openPending) {
+      return;
+    }
     clearOpen();
+    fireOpen();
   }
 
   function cancelAll() {
