@@ -92,6 +92,24 @@ function validateIcon(icon, path) {
 }
 
 /**
+ * Расширение типа слушателя для таблицы глобальных обработчиков.
+ *
+ * `addEventListener` отдаёт обработчику `Event`, а наши обработчики объявлены с
+ * узкими типами — `PointerEvent`, `KeyboardEvent` — ради проверок внутри тела.
+ * Приводить приходится, и делается это здесь, ровно один раз на обработчик, а не в
+ * каждом месте установки: внутри тела тип остаётся узким, и ошибка в разборе
+ * события по-прежнему ловится компилятором. `never` в параметре делает приведение
+ * безопасным по направлению: принять такой обработчик может только функция, способная
+ * обработать любое событие, то есть ровно наш случай.
+ *
+ * @param {(event: never) => void} handler обработчик с узким типом события.
+ * @returns {EventListener} тот же обработчик с типом `EventListener`.
+ */
+function asListener(handler) {
+  return /** @type {EventListener} */ (/** @type {unknown} */ (handler));
+}
+
+/**
  * Требование платформы проверяется в `attach`, а не в конструкторе: без привязки
  * экземпляр пригоден для `open()` там, где автор и так работает со своим
  * поповером, и падать рано было бы невежливо.
@@ -236,6 +254,29 @@ export class MyContext {
 
   /** @type {HTMLElement | null} */
   #focusOwner = null;
+
+  /**
+   * Правда ли, что последнее движение курсора было в пустоте страницы — то есть
+   * вне дерева меню и вне привязанного контейнера. Это различает два исхода одного
+   * и того же сигнала `hoverIntent`: курсор ушёл с подменю, но ещё ходит по меню —
+   * тогда закрывается один уровень; курсор ушёл с дерева целиком — тогда цепочка.
+   * Сама геометрия различия не даёт: обе точки вне клина, и `hoverIntent` планирует
+   * закрытие одинаково, поэтому область закрытия решает оркестратор, читая цель
+   * события. Сбрасывается в `open()` вместе с отложенными задачами: после переноса
+   * меню прежняя точка ничего не значит.
+   *
+   * @type {boolean}
+   */
+  #pointerOutsideTree = false;
+
+  /**
+   * Глобальные слушатели: узел, имя события и сама функция. Снимаются все разом по
+   * списку, поэтому `detach()` и `destroy()` не могут оставить ни одного, а
+   * добавить обработчик, забыв его снять, structurally невозможно.
+   *
+   * @type {Array<{ target: EventTarget, type: string, handler: EventListener }>}
+   */
+  #globalHandlers = [];
 
   /** @type {boolean} */
   #destroyed = false;
@@ -423,6 +464,150 @@ export class MyContext {
   };
 
   /**
+   * Движение курсора в пустоте страницы. Внутри дерева движение разбирает
+   * `#onLevelPointerMove` — и намеренно не там, где стоит пункт-владелец, потому
+   * что по владельцу решать нечего. Этот обработчик берёт только то, чего уровни
+   * не видят: точку вне меню. Без него подменю переживало бы уход курсора на пустое
+   * место страницы, потому что планировать закрытие больше было некому.
+   *
+   * Над привязанным контейнером обработчик молчит по той же причине, по какой
+   * контейнер не входит в дерево: он и есть опора меню, и сносить каскад за то,
+   * что курсор вернулся на кнопку, от которой он и вырос, — неверно. Подменю при
+   * этом закроется как обычно: точка мимо клина, а `onClose` закроет один уровень.
+   *
+   * @type {(event: PointerEvent) => void}
+   */
+  #onGlobalPointerMove = (event) => {
+    if (this.#destroyed) {
+      return;
+    }
+    const target = event.target;
+    if (this.#isInsideTreeOrAnchor(target)) {
+      return;
+    }
+    this.#pointerOutsideTree = true;
+    this.#hover.pointerMove({ x: event.clientX, y: event.clientY });
+  };
+
+  /**
+   * Клик вне дерева. Контейнер исключён: правый клик по нему должен переоткрыть
+   * меню в новой точке, а не сперва снести его.
+   *
+   * @type {(event: PointerEvent) => void}
+   */
+  #onGlobalPointerDown = (event) => {
+    if (this.#destroyed || event.button !== PRIMARY_MOUSE_BUTTON) {
+      return;
+    }
+    if (this.#isInsideTreeOrAnchor(event.target)) {
+      return;
+    }
+    this.#closeMenu({ returnFocus: false });
+  };
+
+  /**
+   * Правый клик. Внутри меню системное меню подавляется, вне — нет: библиотека не
+   * перехватывает правый клик на чужой странице, и системное меню здесь правильный
+   * ответ. Порядок браузер отдаёт `pointerdown` раньше `contextmenu`, так что
+   * правый клик снаружи закрывает меню уже первым событием, а второе лишь
+   * подтверждает, что подавлять нечего.
+   *
+   * @type {(event: MouseEvent) => void}
+   */
+  #onGlobalContextMenu = (event) => {
+    if (this.#destroyed) {
+      return;
+    }
+    const target = event.target;
+    if (this.#isInsideMenu(target)) {
+      event.preventDefault();
+      return;
+    }
+    if (this.#isInsideAnchor(target)) {
+      return;
+    }
+    this.#closeMenu({ returnFocus: false });
+  };
+
+  /**
+   * `Escape` вне дерева. Внутри дерева клавишу разбирает движок на самом уровне,
+   * и второй разбор означал бы двойное закрытие: `#closeCurrentLevel` закрывает
+   * один уровень, а здесь закрылась бы цепочка — мимо `Escape` внутри меню, где
+   * пользователь имеет право закрыть один уровень и остаться в остальных.
+   *
+   * @type {(event: KeyboardEvent) => void}
+   */
+  #onGlobalKeydown = (event) => {
+    if (this.#destroyed || event.key !== 'Escape' || event.defaultPrevented) {
+      return;
+    }
+    if (this.#isInsideTreeOrAnchor(event.target)) {
+      return;
+    }
+    this.#closeMenu({ returnFocus: false });
+  };
+
+  /**
+   * Скролл и `resize` закрывают меню: показано оно было для старой геометрии.
+   *
+   * `scroll` ловится на `window` в capture-фазе, потому что `scroll` не всплывает
+   * и на элементе сбрасывает событие до цели, — а нужно узнать, что оно пришло из
+   *нутри меню: прокрутка длинного списка не должна его сносить. Признак внутренней
+   * прокрутки — цель не `document` и не `body`.
+   *
+   * @type {(event: Event) => void}
+   */
+  #onGlobalScroll = (event) => {
+    if (this.#destroyed) {
+      return;
+    }
+    const target = event.target;
+    if (target !== document && target !== document.body) {
+      return;
+    }
+    this.#closeMenu({ returnFocus: false });
+  };
+
+  /**
+   * @type {() => void}
+   */
+  #onGlobalResize = () => {
+    if (this.#destroyed) {
+      return;
+    }
+    this.#closeMenu({ returnFocus: false });
+  };
+
+  /**
+   * @param {EventTarget | null} target
+   * @returns {boolean} цель внутри элемента любого уровня меню.
+   */
+  #isInsideMenu(target) {
+    if (!(target instanceof Element)) {
+      return false;
+    }
+    const level = target.closest(MENU_SELECTOR);
+    return level instanceof HTMLElement && this.#levels.has(level);
+  }
+
+  /**
+   * @param {EventTarget | null} target
+   * @returns {boolean} цель внутри привязанного контейнера.
+   */
+  #isInsideAnchor(target) {
+    const anchor = this.#attachedTo;
+    return anchor !== null && target instanceof Node && anchor.contains(target);
+  }
+
+  /**
+   * @param {EventTarget | null} target
+   * @returns {boolean} цель в дереве меню либо на его опоре.
+   */
+  #isInsideTreeOrAnchor(target) {
+    return this.#isInsideMenu(target) || this.#isInsideAnchor(target);
+  }
+
+  /**
    * Создаёт меню. Слушателей на страницу не вешает: `attach` делает это отдельно,
    * и до него экземпляр пригоден для программного `open()`.
    *
@@ -467,6 +652,14 @@ export class MyContext {
         }
       },
       onClose: () => {
+        // Область закрытия решает оркестратор, а не `hoverIntent`: геометрия клина
+        // одинаково говорит «курсор ушёл» и в том случае, когда ушло лишь подменю,
+        // и в том, когда ушло дерево целиком. Различие — в цели последнего
+        // `pointermove`, и её читает `#pointerOutsideTree`.
+        if (this.#pointerOutsideTree) {
+          this.#closeMenu({ returnFocus: false });
+          return;
+        }
         const deepest = this.#deepestChainEntry();
         if (deepest !== null && deepest.ownerItem !== null) {
           this.#hideSubmenuFor(deepest.ownerItem);
@@ -492,6 +685,7 @@ export class MyContext {
     this.#unbind();
     this.#attachedTo = element;
     element.addEventListener('contextmenu', this.#onContextMenu);
+    this.#bindGlobalHandlers();
   }
 
   /**
@@ -535,6 +729,7 @@ export class MyContext {
     // открытие сорвало бы отсчёт задержки, начатый до переноса.
     this.#hover.cancelAll();
     this.#hoverOwner = null;
+    this.#pointerOutsideTree = false;
     const root = this.#ensureLevel(this.#items, null, 0, null);
     this.#root = root;
     this.#chain.push(root);
@@ -557,12 +752,30 @@ export class MyContext {
    */
   close() {
     this.#assertAlive();
+    this.#closeMenu({ returnFocus: true });
+  }
+
+  /**
+   * Закрытие без возврата фокуса — путь внешних событий: клик по странице, скролл,
+   * `resize`, уход курсора в пустоту. Фокус здесь не наш: он либо остался там, где
+   * пользователь его оставил, либо уйдёт по своему пути в браузере, и наш возврат
+   * был бы невежливостью — он перехватывал бы фокус при каждом клике по странице.
+   * Публичный `close()` и есть этот же путь с `returnFocus: true`, так что
+   * контракт Task 9 не меняется, а появляется ровно один новый внутренний.
+   *
+   * @param {{ returnFocus: boolean }} options вернуть ли фокус привязанному контейнеру.
+   * @returns {void}
+   */
+  #closeMenu({ returnFocus }) {
     this.#hover.cancelAll();
     this.#layer.hideAll();
     this.#chain.length = 0;
     this.#hoverOwner = null;
+    this.#pointerOutsideTree = false;
     this.#keyboard.reset();
-    this.#returnFocus();
+    if (returnFocus) {
+      this.#returnFocus();
+    }
   }
 
   /**
@@ -914,12 +1127,54 @@ export class MyContext {
    * @returns {void}
    */
   #unbind() {
+    this.#unbindGlobalHandlers();
     const target = this.#attachedTo;
     if (target === null) {
       return;
     }
     target.removeEventListener('contextmenu', this.#onContextMenu);
     this.#attachedTo = null;
+  }
+
+  /**
+   * Навешивает глобальные слушатели. Capture-фаза у документа и окна выбрана одна:
+   * событие разбирается раньше любого обработчика страницы, поэтому меню успевает
+   * среагировать до того, как авторский код что-то предотвратит. Для `keydown`
+   * это ещё и единственный способ закрыть меню, когда фокус ушёл из дерева.
+   *
+   * Слушатели заводятся на `attach`, а не в конструкторе: до привязки экземпляр
+   * пригоден для программного `open()` и страницу трогать не должен.
+   *
+   * @returns {void}
+   */
+  #bindGlobalHandlers() {
+    /** @type {Array<{ target: EventTarget, type: string, handler: EventListener }>} */
+    const handlers = [
+      { target: document, type: 'pointermove', handler: asListener(this.#onGlobalPointerMove) },
+      { target: document, type: 'pointerdown', handler: asListener(this.#onGlobalPointerDown) },
+      { target: document, type: 'contextmenu', handler: asListener(this.#onGlobalContextMenu) },
+      { target: document, type: 'keydown', handler: asListener(this.#onGlobalKeydown) },
+      { target: window, type: 'scroll', handler: asListener(this.#onGlobalScroll) },
+      { target: window, type: 'resize', handler: asListener(this.#onGlobalResize) },
+    ];
+    for (const entry of handlers) {
+      entry.target.addEventListener(entry.type, entry.handler, true);
+    }
+    this.#globalHandlers = handlers;
+  }
+
+  /**
+   * Снимает глобальные слушатели по тому же списку, по которому их вешали: иначе
+   * снятие разошлось бы с установкой поимённо, и `destroy()` оставил бы на
+   * документе живые обработчики закрытого экземпляра.
+   *
+   * @returns {void}
+   */
+  #unbindGlobalHandlers() {
+    for (const entry of this.#globalHandlers) {
+      entry.target.removeEventListener(entry.type, entry.handler, true);
+    }
+    this.#globalHandlers = [];
   }
 
   /**
