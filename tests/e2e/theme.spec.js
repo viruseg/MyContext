@@ -202,12 +202,29 @@ function readBlock(css, marker) {
  * @returns {string} содержимое блока.
  */
 function readBlockBody(css, marker) {
-  const at = css.indexOf(marker);
-  expect(at, `блок ${marker}`).toBeGreaterThan(-1);
-  const open = css.indexOf('{', at);
-  const end = blockEnd(css, open);
-  expect(end).toBeGreaterThan(open);
-  return css.slice(open + 1, end);
+  return readBlock(css, marker).slice(1, -1);
+}
+
+/**
+ * Вес селектора по числу классов, атрибутов и псевдоклассов.
+ *
+ * Считается по одной части списка селекторов, и это единственный способ получить
+ * осмысленный ответ. Подсчёт по всему списку даёт одинаковое число и при
+ * удвоении, и без него: в `.vc-menu, .vc-menu:popover-open, .vc-menu *` вхождений
+ * `.vc-menu` четыре в обоих случаях, и проверка «не меньше двух» проходила бы
+ * всегда.
+ *
+ * Псевдоэлементы не учитываются: `::before` веса не добавляет, и его нельзя
+ * считать. Отсюда `(?<!:)` в шаблоне — без него вторая двоеточие из `::` проходит
+ * проверку `(?!:)` и псевдоэлемент засчитывается как псевдокласс, а это ровно
+ * тот случай, в котором проверка молча проходит на сломанном CSS. Идентификаторы
+ * не учитываются по той же причине: в этом файле их нет.
+ *
+ * @param {string} component одна часть списка селекторов.
+ * @returns {number} число классов, атрибутов и псевдоклассов.
+ */
+function classWeight(component) {
+  return (component.match(/\.[\w-]+|\[[^\]]*\]|(?<!:):(?!:)[\w-]+/g) ?? []).length;
 }
 
 /**
@@ -1004,19 +1021,30 @@ test.describe('анимации', () => {
     expect(reduced.property).toBe('none');
     expect(reduced.duration).toBe('0s');
 
-    // Покрытие потомков держится на удвоенном классе, иначе будущее правило
-    // (0,2,0) — а такие в файле есть, `.vc-item:hover` это (0,2,0) — вернуло бы
-    // движение молча. Снятие удвоения роняет именно эту проверку.
+    // Покрытие потомков держится на удвоенном классе. Каждая часть списка
+    // селекторов проверяется отдельно: у `.vc-menu *` вес (0,1,0), и переход
+    // (0,2,0) у потомка перебил бы его молча, а счёт по всему списку целиком дал
+    // бы четыре вхождения и при удвоении, и без него, то есть не проверял бы
+    // ничего.
+    //
+    // Именно эту половину кейса ломает снятие удвоения, в том числе с одной
+    // руки списка. Поведенческая половина при этом остаётся зелёной: блок и так
+    // последний в файле, поэтому при равном весе выигрывает он, и шеврон по-прежнему
+    // считает переходы погашенными. Поведенческая половина ловит другое — пропажу
+    // покрытия целиком, когда не остаётся ни одной руки с `*`.
     const rules = readRules(readBlockBody(
       await readStylesheet(request),
       '@media (prefers-reduced-motion: reduce)',
     ));
     const blanket = rules.filter((rule) => rule.selector.includes('*'));
-    expect(blanket.length).toBeGreaterThan(0);
+    expect(blanket.length, 'руки покрытия потомков в блоке reduce').toBeGreaterThan(0);
     for (const rule of blanket) {
-      const classes = rule.selector.match(/\.vc-menu/g) ?? [];
-      expect(classes.length, `специфичность покрытия потомков: ${rule.selector}`)
-        .toBeGreaterThanOrEqual(2);
+      for (const component of rule.selector.split(',')) {
+        expect(
+          classWeight(component),
+          `вес покрытия потомков: ${component.trim()}`,
+        ).toBeGreaterThanOrEqual(2);
+      }
     }
 
     // Покрытие обязано быть и поведенческим, а не только структурным: нисходящее
