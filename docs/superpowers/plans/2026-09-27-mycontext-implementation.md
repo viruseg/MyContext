@@ -710,7 +710,6 @@ git commit -m "feat: рендерер уровней меню с фиксиро�
    * @property {(entry: LevelEntry) => void} showSubmenu
    * @property {(entry: LevelEntry) => void} hide
    * @property {() => void} hideAll
-   * @property {(entry: LevelEntry | null) => void} setFocusOwner
    * @property {() => void} destroy
    */
 
@@ -720,7 +719,9 @@ git commit -m "feat: рендерер уровней меню с фиксиро�
    */
   export function createLayer(options)
   ```
-  `ensureLevel` создаёт уровень один раз и возвращает тот же `LevelEntry` при повторном вызове с теми же аргументами. `ownerItem` у корневого уровня — `null`, у подменю — `RenderedItem` пункта-владельца, через `.element` доступны `aria-owns`, `aria-expanded` и `data-chevron`.
+  Фокус не входит в обязанности слоя: слой владеет Top Layer, а переводом фокуса занимается контроллер клавиатуры Task 8, у которого уже есть `entry.ownerItem`, и оркестратор Task 9, который помнит элемент, к которому привязан. Метод `setFocusOwner` в интерфейсе слоя отсутствует намеренно: он был бы второй ответственностью без владельца.
+
+`ensureLevel` создаёт уровень один раз и возвращает тот же `LevelEntry` при повторном вызове с теми же аргументами. `ownerItem` у корневого уровня — `null`, у подменю — `RenderedItem` пункта-владельца, через `.element` доступны `aria-owns`, `aria-expanded` и `data-chevron`.
 
 - [ ] **Step 1: Написать падающие тесты**
 
@@ -753,7 +754,7 @@ Expected: FAIL — модуль `src/layer.js` не найден.
 
 `hide(entry)` увеличивает `entry.generation`, запоминает текущое поколение, читает `options.reducedMotionQuery.matches`. Если включён — `hidePopover()` немедленно. Иначе планирует задачу через `options.schedule`, которая вызывает `hidePopover()` только если `entry.generation` совпадает с запомненным. `showSubmenu` и `showRoot` увеличивают поколение, что делает любую висящую задачу недействительной.
 
-- [ ] **Step 5: Реализовать `hideAll`, `setFocusOwner` и `destroy`**
+- [ ] **Step 5: Реализовать `hideAll` и `destroy`**
 
 `hideAll` обходит цепочку от глубоких уровней к корню, у каждого скрытого уровня снимает `aria-expanded` с его `ownerItem.element`, если он есть. `destroy` снимает все висящие задачи, вызывает `hidePopover()` на каждом заведённом элементе и удаляет их из DOM.
 
@@ -1033,7 +1034,7 @@ git commit -m "feat: показ подменю с hover intent и усечени
 - Test: `tests/e2e/globals.spec.js`
 
 **Interfaces:**
-- Consumes: `hideAll` и `setFocusOwner` из `src/layer.js` (Task 7), `handleKeydown` и `reset` из `src/keyboard.js` (Task 8), `cancelAll` из `src/hoverIntent.js` (Task 3)
+- Consumes: `hideAll` из `src/layer.js` (Task 7), `handleKeydown` и `reset` из `src/keyboard.js` (Task 8), `cancelAll` из `src/hoverIntent.js` (Task 3)
 - Produces: приватный `#bindGlobalHandlers()` в `src/MyContext.js` и симметричный `#unbindGlobalHandlers()`. Все обработчики хранятся в `#globalHandlers` как пары «событие, функция», чтобы сниматься по списку.
 
 - [ ] **Step 1: Написать падающие тесты**
