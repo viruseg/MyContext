@@ -73,6 +73,9 @@ const THEME_CASES = [
  * @property {string} transitionProperty вычисленный `transition-property` меню.
  * @property {string} transitionDuration вычисленный `transition-duration` меню.
  * @property {string} gridTemplateColumns вычисленные колонки сетки пункта.
+ * @property {string} flexShrink вычисленный `flex-shrink` пункта. Сорванное
+ *   переполнение: при `1` уровень длиннее `max-height` сожмётся вместо того, чтобы
+ *   переполниться, и `.vc-list` перестанет прокручиваться.
  */
 
 /**
@@ -421,6 +424,7 @@ async function readSnapshot(page) {
       transitionProperty: style.transitionProperty,
       transitionDuration: style.transitionDuration,
       gridTemplateColumns: getComputedStyle(item).gridTemplateColumns,
+      flexShrink: getComputedStyle(item).flexShrink,
     };
   });
 }
@@ -732,6 +736,13 @@ test.describe('ограничение габаритов', () => {
     // `toContain` по всему файлу нашло бы его там, оставив меню без ограничения.
     const css = await readStylesheet(page.request);
     expect(readRule(css, '.vc-menu')).toContain('max-height: calc(100dvh - 2 * var(--vc-padding))');
+
+    // Ограничение списка имеет смысл, только если уровень может переполниться.
+    // При `flex-shrink: 1` у пункта длинный уровень сжимается вместо переполнения:
+    // `scrollHeight` сравнялся бы с `clientHeight`, `.vc-list` не прокручивался бы,
+    // и `overflow-y: auto` вместе с `max-height` были бы мёртвыми объявлениями.
+    // Пункт — элемент списка, а не меню, поэтому и свойство другое.
+    expect(snapshot.flexShrink).toBe('0');
   });
 
   test('уровень ограничен по ширине: max-width равен 100dvw минус два padding', async ({ page }) => {

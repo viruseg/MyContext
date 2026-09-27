@@ -823,20 +823,6 @@ test.beforeEach(async ({ page }) => {
         if (buildSubmenus !== false) {
           buildTree(root, items, 0);
         }
-        // `long` — единственный набор, который должен переполнять `.vc-list`, и
-        // переполнение требует одного условия: пункты не должны сжиматься. Замер
-        // показал, что сегодня они сжимаются — `styles/mycontext.css` задаёт пункту
-        // `height: var(--vc-item-height)`, а `flex-shrink` у флекс-пункта по
-        // умолчанию `1`, и в колонке с ограниченной высотой 40 пунктов дают
-        // `clientHeight` 674 при высоте пункта 16.86 px, то есть `scrollHeight`
-        // равен `clientHeight` и список не прокручивается вовсе. Здесь сжатие снято,
-        // чтобы длинный список действительно прокручивался; про дефект таблицы
-        // стилей сказано в отчёте задачи.
-        if (set === 'long') {
-          for (const item of root.items) {
-            item.element.style.flexShrink = '0';
-          }
-        }
         openedLayer().showRoot(root, { x: 60, y: 60 });
         keyboard.focusFirst(root);
       },
@@ -1069,10 +1055,15 @@ test.describe('роуминг-фокус', () => {
       ],
     });
 
-    // Контроль: список действительно прокручивается, и последний пункт до нажатий
-    // за его нижним краем. Иначе `inView` был бы истинно у всех пунктов по
-    // построению, и утверждение ниже проверяло бы пустоту.
+    // Контроль: длинный уровень действительно переполняет `.vc-list` и последний
+    // пункт до нажатий за его нижним краем. Оба утверждения — про поставляемую
+    // таблицу стилей, а не про условие, построенное фикстурой: пока пункты
+    // сжимались, `scrollHeight` равнялся `clientHeight`, `inView` был истинно у всех
+    // пунктов по построению, и кейс проверял бы пустоту на мёртвом механизме.
     expect(result.before.levels.root.list.scrollable).toBe(true);
+    expect(result.before.levels.root.list.scrollHeight).toBeGreaterThan(
+      result.before.levels.root.list.clientHeight,
+    );
     expect(result.before.levels.root.items[39].inView).toBe(false);
     expect(result.before.levels.root.focusLabel).toBe('Пункт 1');
     // `End` уводит роуминг на последний пункт, и список долистывается до него:
