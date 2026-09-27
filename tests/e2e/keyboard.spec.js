@@ -36,12 +36,13 @@ import { expect, test } from '@playwright/test';
  * `reset` зовёт `reset()` движка — вызывающий код делает это при закрытии меню.
  * `press-list` отправляет клавишу в прокручиваемый список уровня, а не в пункт:
  * цель внутри меню, но не под пунктом, и роуминг на такой цели не должен идти.
- * `clear` снимает отметки с корневого уровня руками, не забывая его: так ведёт
- * себя перерисовка уровня, и состояние без активного пункта обязано быть
- * определённым.
+ * `show-submenu` — то, что делает вызывающий код по наведению: открывает подменю
+ * пункта и отдаёт его движку, как обязан после каждого показа. `clear` снимает
+ * отметки с корневого уровня руками, не забывая его: так ведёт себя перерисовка
+ * уровня, и состояние без активного пункта обязано быть определённым.
  *
  * @typedef {object} Step
- * @property {'press' | 'press-outside' | 'press-list' | 'read' | 'reset' | 'clear'} command
+ * @property {'press' | 'press-outside' | 'press-list' | 'show-submenu' | 'read' | 'reset' | 'clear'} command
  * @property {string} [key]
  * @property {ItemAt} [at]
  */
@@ -65,6 +66,21 @@ import { expect, test } from '@playwright/test';
  * @property {string | null} haspopup `aria-haspopup`.
  * @property {string | null} expanded `aria-expanded`.
  * @property {string | null} owns `aria-owns` — зарезервированный адрес подменю.
+ * @property {boolean} inView помещается ли пункт в видимую часть прокручиваемого
+ *   списка. `focus` с `preventScroll` этого не делает: без отдельной прокрутки
+ *   активный пункт уходит под край списка вместе с фокусом.
+ */
+
+/**
+ * Состояние прокручиваемого списка уровня. Снято потому, что `inView` у всех
+ * пунктов короткого меню истинно по построению, и без этих полей утверждение о
+ * видимости было бы проверкой пустоты.
+ *
+ * @typedef {object} ListState
+ * @property {number} scrollTop
+ * @property {number} scrollHeight
+ * @property {number} clientHeight
+ * @property {boolean} scrollable `scrollHeight` больше `clientHeight`.
  */
 
 /**
@@ -79,6 +95,7 @@ import { expect, test } from '@playwright/test';
  * @property {number} tabStops сколько пунктов несут `tabindex="0"`.
  * @property {number} activeMarks сколько пунктов несут `data-active`.
  * @property {string | null} focusLabel подпись пункта с фокусом в этом уровне.
+ * @property {ListState} list
  * @property {ItemState[]} items
  */
 
@@ -263,6 +280,43 @@ test.beforeEach(async ({ page }) => {
     const deepest = [{ label: 'Самый нижний' }];
 
     /**
+     * Меню длиннее вьюпорта: `.vc-list` ограничен `max-height: calc(100dvh - 2 *
+     * var(--vc-padding))` и прокручивается, поэтому часть пунктов физически не
+     * помещается в кадр. Двадцать восемь пикселей на пункт против 684 доступных
+     * дают 24 пункта в кадре, а сорок — нет.
+     *
+     * @type {Array<MenuItem | SeparatorItem>}
+     */
+    const long = Array.from({ length: 40 }, (unused, index) => {
+      return { label: `Пункт ${index + 1}` };
+    });
+
+    /**
+     * Уровень без единого доступного пункта: отключённый пункт и разделитель.
+     * Помечать нечего, и `focusFirst` на таком уровне обязан закончиться
+     * молчанием, а не исключением.
+     *
+     * @type {Array<MenuItem | SeparatorItem>}
+     */
+    const dead = [
+      { label: 'Глухой', disabled: true },
+      { type: 'separator' },
+    ];
+
+    /**
+     * Отключённый владелец непустого подменю. `renderer.js` выставляет
+     * `hasSubmenu` независимо от `disabled`, поэтому такой пункт — полноценный
+     * владелец с шевроном, `aria-haspopup` и `aria-owns`, и слой заведёт его
+     * уровень. Роуминг к нему не приходит, и возвращать на него фокус тоже
+     * нельзя.
+     *
+     * @type {Array<MenuItem | SeparatorItem>}
+     */
+    const offLimits = [
+      { label: 'Живой' },
+      { label: 'Мёртвый владелец', disabled: true, submenu: [{ label: 'Внутрь' }] },
+    ];
+    /**
      * Вложенность: подменю подменю. `MenuItem[]`, а не со смешанным списком: у
      * пункта поле `submenu` объявлено как `MenuItem[]`, и разделитель в
      * подменю — это уже другая фикстура.
@@ -300,7 +354,7 @@ test.beforeEach(async ({ page }) => {
     ];
 
     /** @type {Record<string, Array<MenuItem | SeparatorItem>>} */
-    const sets = { cycle, tail, tree };
+    const sets = { cycle, tail, tree, long, dead, offLimits };
 
     /**
      * Проба `focus`: без неё утверждение «фокус всегда с `preventScroll`» было бы
@@ -530,6 +584,11 @@ test.beforeEach(async ({ page }) => {
      */
     function levelState(entry) {
       const active = document.activeElement;
+      const list = entry.element.querySelector('.vc-list');
+      if (list === null) {
+        throw new Error('у уровня нет списка');
+      }
+      const listRect = list.getBoundingClientRect();
       /** @type {ItemState[]} */
       const items = [];
       let tabStops = 0;
@@ -542,6 +601,7 @@ test.beforeEach(async ({ page }) => {
         if (isActive) {
           activeMarks += 1;
         }
+        const rect = item.element.getBoundingClientRect();
         items.push({
           label: labelIn(item.element),
           role: item.element.getAttribute('role'),
@@ -553,6 +613,10 @@ test.beforeEach(async ({ page }) => {
           haspopup: item.element.getAttribute('aria-haspopup'),
           expanded: item.element.getAttribute('aria-expanded'),
           owns: item.element.getAttribute('aria-owns'),
+          // Допуск в полпикселя на каждую границу: `scrollIntoView` совмещает
+          // край пункта с краем списка, а координаты во всех трёх движках
+          // округляются по-разному (в firefox — до 1/60 px).
+          inView: rect.top >= listRect.top - 0.5 && rect.bottom <= listRect.bottom + 0.5,
         });
       }
       const focused = items.find((item) => {
@@ -567,6 +631,12 @@ test.beforeEach(async ({ page }) => {
         tabStops,
         activeMarks,
         focusLabel: focused === undefined ? null : focused.label,
+        list: {
+          scrollTop: list.scrollTop,
+          scrollHeight: list.scrollHeight,
+          clientHeight: list.clientHeight,
+          scrollable: list.scrollHeight > list.clientHeight,
+        },
         items,
       };
     }
@@ -675,6 +745,27 @@ test.beforeEach(async ({ page }) => {
           levels: read(pathsOfRun).levels,
         };
       }
+      if (step.command === 'show-submenu') {
+        // Открытие по наведению: так поступает вызывающий код, и он же обязан
+        // отдать уровень движку, иначе уровень останется для клавиатуры мёртвым.
+        const at = step.at ?? { path: [], index: 0 };
+        const owner = itemAt(at);
+        const entry = levelOf(at.path);
+        const child = childOf(entry, owner);
+        if (child === null) {
+          throw new Error('у пункта нет заведённого подменю');
+        }
+        host.openSubmenu(child);
+        keyboard.focusFirst(child);
+        return {
+          command: step.command,
+          key: null,
+          prevented: false,
+          target: labelIn(owner.element),
+          focus: focusState(),
+          levels: read(pathsOfRun).levels,
+        };
+      }
       if (step.command === 'press-list') {
         // Цель внутри меню, но не под пунктом: прокручиваемый список.
         const list = openedRoot().element.querySelector('.vc-list');
@@ -731,6 +822,20 @@ test.beforeEach(async ({ page }) => {
         byElement.set(root.element, root);
         if (buildSubmenus !== false) {
           buildTree(root, items, 0);
+        }
+        // `long` — единственный набор, который должен переполнять `.vc-list`, и
+        // переполнение требует одного условия: пункты не должны сжиматься. Замер
+        // показал, что сегодня они сжимаются — `styles/mycontext.css` задаёт пункту
+        // `height: var(--vc-item-height)`, а `flex-shrink` у флекс-пункта по
+        // умолчанию `1`, и в колонке с ограниченной высотой 40 пунктов дают
+        // `clientHeight` 674 при высоте пункта 16.86 px, то есть `scrollHeight`
+        // равен `clientHeight` и список не прокручивается вовсе. Здесь сжатие снято,
+        // чтобы длинный список действительно прокручивался; про дефект таблицы
+        // стилей сказано в отчёте задачи.
+        if (set === 'long') {
+          for (const item of root.items) {
+            item.element.style.flexShrink = '0';
+          }
         }
         openedLayer().showRoot(root, { x: 60, y: 60 });
         keyboard.focusFirst(root);
@@ -954,6 +1059,69 @@ test.describe('роуминг-фокус', () => {
     // `activeIndex` совпадает с активным пунктом по индексу в `entry.items`.
     expect(level.activeIndex).toBe(2);
   });
+  test('длинный уровень: активный пункт долистывается в видимую часть списка', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'long',
+      paths: { root: [] },
+      steps: [
+        { command: 'press', key: 'End' },
+        { command: 'press', key: 'ArrowUp' },
+      ],
+    });
+
+    // Контроль: список действительно прокручивается, и последний пункт до нажатий
+    // за его нижним краем. Иначе `inView` был бы истинно у всех пунктов по
+    // построению, и утверждение ниже проверяло бы пустоту.
+    expect(result.before.levels.root.list.scrollable).toBe(true);
+    expect(result.before.levels.root.items[39].inView).toBe(false);
+    expect(result.before.levels.root.focusLabel).toBe('Пункт 1');
+    // `End` уводит роуминг на последний пункт, и список долистывается до него:
+    // `focus({ preventScroll: true })` не прокручивает `.vc-list`, поэтому без
+    // `scrollIntoView` отметка, `tabindex="0"` и фокус оказались бы на пункте под
+    // нижним краем списка, и меню осталось бы заперто в рамке.
+    expect(result.steps[0].levels.root.focusLabel).toBe('Пункт 40');
+    expect(result.steps[0].levels.root.items[39].inView).toBe(true);
+    expect(result.steps[0].levels.root.list.scrollTop).toBeGreaterThan(0);
+    expect(result.steps[0].levels.root.tabStops).toBe(1);
+    expect(result.steps[0].levels.root.activeMarks).toBe(1);
+    // Обратный шаг тоже остаётся в кадре: `block: 'nearest'` долистывает ровно
+    // настолько, чтобы пункт стал виден, и не прокручивает список заново.
+    expect(result.after.levels.root.focusLabel).toBe('Пункт 39');
+    expect(result.after.levels.root.items[38].inView).toBe(true);
+    expect(result.after.levels.root.list.scrollable).toBe(true);
+  });
+
+  test('уровень без доступных пунктов остаётся нетронутым', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'dead',
+      paths: { root: [] },
+      steps: [
+        // Клавиши адресованы пункту отключённого: он лежит внутри `.vc-item`, и
+        // уровень из цели события разрешается, — помечать в нём просто нечего.
+        { command: 'press', key: 'ArrowDown', at: { path: [], index: 0 } },
+        { command: 'press', key: 'End', at: { path: [], index: 0 } },
+      ],
+    });
+
+    expect(result.after.levels.root).toEqual(result.before.levels.root);
+    expect(result.after.levels.root.tabStops).toBe(0);
+    expect(result.after.levels.root.activeMarks).toBe(0);
+    expect(result.after.levels.root.activeIndex).toBe(-1);
+    // Фокус в меню не встал: вставать некуда, и `focusFirst` обязан закончиться
+    // молчанием, а не исключением.
+    expect(result.after.focus.inMenu).toBe(false);
+    expect(result.after.focus.label).toBe(null);
+    // Ничего не активировано и хост не тронут.
+    expect(result.after.calls).toEqual({
+      closeAll: 0,
+      closeCurrentLevel: 0,
+      openSubmenu: 0,
+      openSubmenuIds: [],
+      focusOwner: 0,
+      order: [],
+    });
+    expect(result.after.actions).toEqual([]);
+  });
 });
 
 test.describe('переходы между уровнями', () => {
@@ -1077,14 +1245,66 @@ test.describe('переходы между уровнями', () => {
       `openSubmenu:${result.before.levels.sub.id}`,
       'closeCurrentLevel',
       'closeAll',
+      'focusOwner',
     ]);
     // `closeAll` — цепочка целиком, поэтому закрыты оба уровня.
     expect(result.after.levels.root.open).toBe(false);
     expect(result.after.levels.sub.open).toBe(false);
     expect(result.after.levels.root.popoverOpen).toBe(false);
-    // Возврат фокуса на владельца — работа вызывающего кода, и на корневом уровне
-    // движок её не зовёт: `focusOwner` принадлежит только `Tab`.
-    expect(result.after.calls.focusOwner).toBe(0);
+    // Фокус ушёл элементу-владельцу, а не остался в гаснущем корне: закрытие
+    // отложено на `animationDuration`, и оставленный в нём фокус упал бы на
+    // `<body>`. Порядок в журнале выше: сначала закрыть, потом вернуть фокус.
+    expect(result.after.calls.focusOwner).toBe(1);
+    expect(result.after.focus.onInvoker).toBe(true);
+    expect(result.after.focus.inMenu).toBe(false);
+  });
+
+  test('ArrowLeft не возвращает фокус на отключённого владельца подменю', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'offLimits',
+      paths: { root: [], sub: [1] },
+      steps: [
+        // Вызывающий код открывает подменю отключённого владельца и отдаёт его
+        // движку — ровно то, что он обязан делать после показа.
+        { command: 'show-submenu', at: { path: [], index: 1 } },
+        { command: 'press', key: 'ArrowLeft' },
+      ],
+    });
+
+    // Состояние действительно опасное, иначе кейс проверял бы пустоту: пункт
+    // отключён, но подменю у него непустое, поэтому шеврон, `aria-haspopup` и
+    // `aria-owns` на месте, а уровень за ним заведён и открыт.
+    const owner = result.steps[0].levels.root.items[1];
+    expect(owner.focusable).toBe(false);
+    expect(owner.hasSubmenu).toBe(true);
+    expect(owner.haspopup).toBe('menu');
+    expect(owner.owns).toBe(result.steps[0].levels.sub.id);
+    expect(result.steps[0].levels.sub.open).toBe(true);
+    expect(result.steps[0].levels.sub.focusLabel).toBe('Внутрь');
+    // Уровень закрыт — а возврата фокуса на владельца не было.
+    expect(result.after.calls.closeCurrentLevel).toBe(1);
+    expect(result.after.levels.sub.open).toBe(false);
+    expect(result.after.calls.closeAll).toBe(0);
+    // Роуминг остался на живом пункте, а у отключённого владельца не появилось ни
+    // отметки, ни `tabindex="0"`, ни фокуса: он вне цикла, и возврат на него
+    // сделал бы его целью табуляции и получателем подсветки. Сравнение снимка
+    // уровня с его состоянием до `show-submenu` было бы сравнением с состоянием,
+    // в котором подменю ещё не открывали.
+    expect(result.after.levels.root.activeIndex).toBe(0);
+    expect(result.after.levels.root.tabStops).toBe(1);
+    expect(result.after.levels.root.activeMarks).toBe(1);
+    // Отметка развёрнутости снята закрытым уровнем, а `aria-owns` остался.
+    expect(result.after.levels.root.items[1].expanded).toBe(null);
+    expect(result.after.levels.root.items[1].owns).toBe(result.before.levels.sub.id);
+    expect(rovingOf(result.after.levels.root)).toEqual([
+      ['Живой', '0', true, false],
+      ['Мёртвый владелец', '-1', false, false],
+    ]);
+    // Куда именно ушёл фокус — вопрос платформы (в одних движках элемент внутри
+    // `display: none` остаётся активным, в других фокус падает на `<body>`), и
+    // утверждать его нельзя. Утверждается одно: он не на отключённом владельце —
+    // иначе неактивный пункт получил бы фокус и стал бы целью табуляции.
+    expect(result.after.focus.label).not.toBe('Мёртвый владелец');
   });
 
   test('уровень берётся из цели события, а не из последнего тронутого уровня', async ({ page }) => {
@@ -1272,13 +1492,21 @@ test.describe('активация', () => {
     expect(result.after.levels.sub.open).toBe(true);
     expect(result.after.levels.sub.popoverOpen).toBe(true);
     expect(result.after.levels.root.items[1].expanded).toBe('true');
-    // Фокус остался на владельце: бриф велит открыть подменю и не вел переносить
-    // фокус в него — в отличие от `ArrowRight`. Так `Enter` не выбирает за
-    // пользователя уровень, а `ArrowRight` выбирает.
-    expect(focusTrail(result.steps)).toEqual(['Экспорт', 'Экспорт']);
+    // Фокус ушёл в подменю, как при `ArrowRight`: подменю открыто и видимо, а без
+    // отметок в нём роуминга нет — стрелки двигали бы родителя при открытом
+    // ребёнке, и `Enter` лишь переоткрывал бы его.
+    expect(focusTrail(result.steps)).toEqual(['Экспорт', 'PDF']);
     expect(result.after.levels.root.activeIndex).toBe(1);
-    expect(result.after.levels.sub.tabStops).toBe(0);
-    expect(result.after.levels.sub.activeMarks).toBe(0);
+    expect(result.after.levels.sub.activeIndex).toBe(0);
+    expect(result.after.levels.sub.tabStops).toBe(1);
+    expect(result.after.levels.sub.activeMarks).toBe(1);
+    expect(rovingOf(result.after.levels.sub)).toEqual([
+      ['PDF', '0', true, true],
+      ['PNG', '-1', false, false],
+    ]);
+    // Владелец в своём уровне остался единственным активным: по одному на уровень,
+    // а не по одному на всё меню.
+    expect(rovingOf(result.after.levels.root)[1]).toEqual(['Экспорт', '0', true, false]);
   });
 
   test('Space вызывает action', async ({ page }) => {
@@ -1321,6 +1549,10 @@ test.describe('активация', () => {
     expect(result.after.calls.openSubmenuIds).toEqual([result.after.levels.sub.id]);
     expect(result.after.levels.sub.open).toBe(true);
     expect(result.after.calls.closeAll).toBe(0);
+    // Фокус перенесён туда же, куда его уводит `Enter` у владельца.
+    expect(result.after.focus.label).toBe('Глубже');
+    expect(result.after.levels.sub.tabStops).toBe(1);
+    expect(result.after.levels.sub.activeMarks).toBe(1);
   });
 
   test('подменю: [] не делает пункт владельцем: Enter активирует его', async ({ page }) => {
@@ -1362,6 +1594,7 @@ test.describe('активация', () => {
       haspopup: null,
       expanded: null,
       owns: null,
+      inView: true,
     });
     // И уровня под ним не заведено: у первых трёх пунктов подменю есть, у него —
     // нет, и `children` их считает.
@@ -1428,12 +1661,15 @@ test.describe('закрытие', () => {
       `openSubmenu:${result.before.levels.sub.id}`,
       'closeCurrentLevel',
       'closeAll',
+      'focusOwner',
     ]);
     expect(result.after.levels.root.open).toBe(false);
     expect(result.after.levels.sub.open).toBe(false);
-    // Как и `ArrowLeft` на корне, `Escape` фокус не возвращает: на корне владельца
-    // нет, а `focusOwner` принадлежит только `Tab`.
-    expect(result.after.calls.focusOwner).toBe(0);
+    // Как и `ArrowLeft` на корне, `Escape` возвращает фокус элементу-владельцу:
+    // на корне нет пункта-владельца, а оставить фокус в гаснущем меню нельзя.
+    expect(result.after.calls.focusOwner).toBe(1);
+    expect(result.after.focus.onInvoker).toBe(true);
+    expect(result.after.focus.inMenu).toBe(false);
   });
 
   test('Tab закрывает всё меню и вызывает focusOwner', async ({ page }) => {
