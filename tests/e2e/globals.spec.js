@@ -44,6 +44,15 @@ import { CLOSE_GRACE_MS, OPEN_GRACE_MS } from '../../src/constants.js';
  * @property {string[]} errors сообщения необработанных ошибок страницы.
  * @property {boolean[]} contextmenuPrevented по порядку событий `contextmenu`,
  *   дошедших до документа: видно, подавила ли привязка системное меню.
+ * @property {string[]} focusLog `id` узлов, получивших фокус, по порядку. Нужен
+ *   помимо `focusOwnerId`: браузер переносит фокус на нажатый элемент уже после
+ *   нашего `pointerdown`, и конечное состояние одинаково — вернёт меню фокус на
+ *   контейнер или нет. Различие видно только по тому, получил ли контейнер фокус
+ *   хоть на мгновение.
+ * @property {number} hideCount сколько раз вызван `hidePopover`. Различает
+ *   «переоткрылось» и «закрылось и тут же открылось заново»: конечное состояние
+ *   у обоих одинаково, а второе означает мигание выхода и лишний цикл работы
+ *   на каждый правый клик по контейнеру.
  * @property {string[]} removed снятия слушателей в виде «событие@узел».
  */
 
@@ -263,6 +272,19 @@ test.describe('глобальные слушатели', () => {
       const contextmenuPrevented = [];
       /** @type {string[]} */
       const removed = [];
+      /** @type {string[]} */
+      const focusLog = [];
+      /** @type {number[]} */
+      const hideLog = [];
+
+      // Счётчик `hidePopover`: состояние после правого клика по контейнеру
+      // одинаково и при «просто переоткрылось», и при «закрылось и открылось
+      // заново», поэтому различает их только число скрытий.
+      const nativeHide = HTMLElement.prototype.hidePopover;
+      HTMLElement.prototype.hidePopover = function patchedHide() {
+        hideLog.push(Date.now());
+        return nativeHide.call(this);
+      };
 
       globalThis.addEventListener('error', (event) => {
         errors.push(String(event.message));
@@ -316,6 +338,8 @@ test.describe('глобальные слушатели', () => {
           log,
           errors,
           contextmenuPrevented,
+          focusLog,
+          hideCount: hideLog.length,
           removed,
         };
       }
@@ -386,6 +410,16 @@ test.describe('глобальные слушатели', () => {
             if (element === null) {
               throw new Error(`нет узла #${containerId}`);
             }
+            // `focus` без всплытия, поэтому слушатель смотрит на фазу захвата
+            // каждого контейнера: иначе всплытие от нажатого элемента записало бы
+            // в журнал не то, что его коснулось.
+            element.addEventListener(
+              'focus',
+              () => {
+                focusLog.push(element.id);
+              },
+              true,
+            );
             menu.attach(element);
           }
           instances.set(slot, menu);
@@ -435,10 +469,14 @@ test.describe('глобальные слушатели', () => {
     const after = await readMenu(page);
     expect(after.openCount, 'меню закрыто').toBe(0);
     // Фокус после клика по `#far` остаётся на самом `#far` — элемент, который
-    // пользователь и нажал. Возврат на контейнер здесь означал бы, что каждый
-    // клик по странице перехватывает фокус, и Tab после него начинал бы не с
-    // того места.
+    // пользователь и нажал.
     expect(after.focusOwnerId, 'фокус остался там, где кликнули').toBe('far');
+    // И, что важнее, контейнер не получал фокус ни на мгновение. Одного
+    // `focusOwnerId` мало: браузер переносит фокус на нажатый узел уже после
+    // нашего `pointerdown`, и вариант с возвратом фокуса на контейнер дал бы в
+    // итоге тот же `far`. Журнал слушает только контейнеры, и пустой журнал здесь
+    // — ровно то утверждение, которое различает два варианта.
+    expect(after.focusLog, 'контейнер ни разу не получил фокус').toEqual([]);
     expect(after.errors, 'страница без ошибок').toEqual([]);
   });
 
@@ -530,6 +568,10 @@ test.describe('глобальные слушатели', () => {
 
     const after = await readMenu(page);
     expect(after.openCount, 'меню осталось открытым, а не снеслось и не задвоилось').toBe(1);
+    // Меню не просто оказалось открытым в новой точке, а ни разу не исчезало на
+    // пути: закрытие и немедленное переоткрытие дали бы то же самое состояние,
+    // но с миганием выхода и лишним циклом работы на каждый правый клик.
+    expect(after.hideCount, 'меню не скрывалось ни разу').toBe(before.hideCount);
     const rootAfter = /** @type {LevelView} */ (after.levels.find((entry) => entry.id === rootBefore.id));
     // Перенос виден по рамке: `open()` идемпотентен и двигает уже показанный
     // уровень. Прежняя точка и новая отличаются на 150 px по каждой оси.
@@ -593,12 +635,27 @@ test.describe('глобальные слушатели', () => {
     });
     expect(scrollable, 'список длинного меню прокручивается').toBe(true);
 
-    await page.evaluate(() => {
-      const list = document.querySelector('.vc-list');
-      if (list instanceof HTMLElement) {
+    // Событие `scroll` не всплывает, и доставляется уже после возврата из
+    // `evaluate`. Поэтому ожидание не «стало `scrollTop` больше», а «событие
+    // доставлено»: слушатель на самом списке стоит в фазе цели, а наш глобальный
+    // обработчик — в capture на `window`, то есть к этому моменту отработал уже.
+    // Ожидание состояния здесь было бы ожиданием, что меню не закрылось, и
+    // прошло бы на мутации, которая закрывает его по любому скроллу.
+    const delivered = await page.evaluate(() => {
+      return new Promise((resolve) => {
+        const list = document.querySelector('.vc-list');
+        if (!(list instanceof HTMLElement)) {
+          resolve('нет списка');
+          return;
+        }
+        list.addEventListener('scroll', () => resolve('доставлено'), { once: true });
         list.scrollTop = 120;
-      }
+        // Страховка на случай, когда прокрутка невозможна и событие не придёт
+        // вовсе: без неё `evaluate` висел бы до истечения таймаута пробы.
+        setTimeout(() => resolve('не пришло'), 1000);
+      });
     });
+    expect(delivered, 'событие внутреннего скролла доставлено').toBe('доставлено');
 
     const after = await readMenu(page);
     expect(after.openCount, 'внутренний скролл не закрыл меню').toBe(1);
