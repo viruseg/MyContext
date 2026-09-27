@@ -282,14 +282,16 @@ export function createKeyboard(host) {
     const active = activeItemOf(entry);
     switch (event.key) {
       case 'ArrowDown': {
-        const position = positionOf(entry);
-        // Без активного пункта движение вниз начинается с первого: иначе
-        // `ArrowDown` на неразмеченном уровне уводил бы на минус один элемент.
-        moveTo(entry, position < 0 ? 0 : position + 1);
+        // Случай «активного пункта нет» разбирать не нужно: у такого уровня
+        // позиция равна `-1`, и `-1 + 1` — это ноль, то есть первый доступный
+        // пункт. Отдельная ветка здесь была бы вторым ответом на один вопрос.
+        moveTo(entry, positionOf(entry) + 1);
         break;
       }
       case 'ArrowUp': {
         const position = positionOf(entry);
+        // А вот здесь отдельная ветка нужна: `-1 - 1` — это минус два элемента
+        // списка, то есть предпоследний вместо последнего.
         moveTo(entry, position < 0 ? -1 : position - 1);
         break;
       }

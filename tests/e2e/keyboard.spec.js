@@ -34,12 +34,14 @@ import { expect, test } from '@playwright/test';
  * в элемент рядом с ним. `read` ничего не делает и снимает состояние на
  * середине сценария, когда сравнивать «до» и «после» нужно не на краях.
  * `reset` зовёт `reset()` движка — вызывающий код делает это при закрытии меню.
+ * `press-list` отправляет клавишу в прокручиваемый список уровня, а не в пункт:
+ * цель внутри меню, но не под пунктом, и роуминг на такой цели не должен идти.
  * `clear` снимает отметки с корневого уровня руками, не забывая его: так ведёт
  * себя перерисовка уровня, и состояние без активного пункта обязано быть
  * определённым.
  *
  * @typedef {object} Step
- * @property {'press' | 'press-outside' | 'read' | 'reset' | 'clear'} command
+ * @property {'press' | 'press-outside' | 'press-list' | 'read' | 'reset' | 'clear'} command
  * @property {string} [key]
  * @property {ItemAt} [at]
  */
@@ -669,6 +671,27 @@ test.beforeEach(async ({ page }) => {
           key: step.key ?? null,
           prevented: event.defaultPrevented,
           target: outside.id,
+          focus: focusState(),
+          levels: read(pathsOfRun).levels,
+        };
+      }
+      if (step.command === 'press-list') {
+        // Цель внутри меню, но не под пунктом: прокручиваемый список.
+        const list = openedRoot().element.querySelector('.vc-list');
+        if (list === null) {
+          throw new Error('у уровня нет списка');
+        }
+        const event = new KeyboardEvent('keydown', {
+          key: step.key ?? '',
+          bubbles: true,
+          cancelable: true,
+        });
+        list.dispatchEvent(event);
+        return {
+          command: step.command,
+          key: step.key ?? null,
+          prevented: event.defaultPrevented,
+          target: 'vc-list',
           focus: focusState(),
           levels: read(pathsOfRun).levels,
         };
@@ -1486,6 +1509,32 @@ test.describe('границы разбора', () => {
     expect(result.after.focus.onInvoker).toBe(true);
     expect(result.after.focus.inMenu).toBe(false);
     expect(result.after.actions).toEqual([]);
+  });
+
+  test('клавиша в прокручиваемый список, а не в пункт, роуминг не двигает', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'tree',
+      paths: { root: [], sub: [1] },
+      steps: [
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'press-list', key: 'ArrowDown' },
+        { command: 'press-list', key: 'End' },
+        { command: 'press-list', key: 'Escape' },
+      ],
+    });
+
+    expect(result.steps[0].focus.label).toBe('Экспорт');
+    // Цель внутри меню, но не под пунктом. Обработчик имеет право искать уровень по
+    // `.vc-menu` — но двигать роуминг по цели без пункта под ней нельзя: у прокрутки
+    // списка своя логика, и стрелка вверх там значит «прокрутить», а не «встать на
+    // предыдущий пункт».
+    expect(result.steps.map((step) => step.target)).toEqual([
+      'Открыть', 'vc-list', 'vc-list', 'vc-list',
+    ]);
+    expect(result.steps.map((step) => step.prevented)).toEqual([true, false, false, false]);
+    expect(result.after.levels.root.activeIndex).toBe(1);
+    expect(result.after.levels.root.focusLabel).toBe('Экспорт');
+    expect(result.after.calls.order).toEqual([]);
   });
 
   test('клавиши без ветви не гасятся и состояние не трогают', async ({ page }) => {
