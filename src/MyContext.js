@@ -37,6 +37,7 @@ const SEPARATOR_TYPE = 'separator';
 const RASTER_TYPE = 'raster';
 const ICON_TYPES = new Set([RASTER_TYPE, 'emoji', 'svg']);
 const ITEMS_PATH = 'items';
+const CHAIN_ROOT_INDEX = 0;
 const DESTROYED_MESSAGE = 'MyContext: экземпляр уничтожен';
 const POPOVER_REQUIREMENT =
   'MyContext: браузер не поддерживает Popover API — нет HTMLElement.prototype.showPopover';
@@ -117,23 +118,42 @@ function assertPopoverSupport() {
  * клавиатуры не смешиваются. Правило зафиксировано решением ревью Task 9, а не выведено
  * из разметки: `hasSubmenu` у рендерера означает «есть подменю», а не «есть действие».
  *
+ * **Показ подменю по мыши — четыре разных события на четырёх разных узлах.**
+ * `pointerenter` и `pointerdown` на пункте-владельце, `pointermove` на элементе
+ * уровня и `pointerenter` на самом подменю. `pointerenter` и `pointerleave` не
+ * всплывают, поэтому пункт подписывается лично — и подписывается ровно тогда,
+ * когда рендерер назвал его владельцем, то есть отключённые пункты-владельцы не
+ * подписаны ни на что и не открываются ни одной дверью. Решение о том, когда
+ * показывать и когда скрывать, принимает `hoverIntent` и сообщает его колбэками
+ * `onOpen` и `onClose`; оркестратор не опрашивает `isOpenPending` никогда — опрос
+ * был бы вторым источником тиков и сдвинул бы показ относительно решения.
+ * `pointermove` передаётся в hover intent не по всему дереву, а мимо
+ * пунктов-владельцев: на владельце решать нечего, и там каждое движение курсора
+ * планировало бы закрытие подменю, которое только что открылось.
+ *
  * **Показанный уровень всегда отдаётся движку через `focusFirst`, а не только
  * корневой.** Движок берёт уровень из своего реестра, а не из DOM, поэтому уровень,
  * которому не звали `focusFirst`, не получает клавиш вовсе, и `close()` сбрасывает
  * реестр — значит повторный `open()` обязан отдать уровень заново. Отсюда же и
  * перенос фокуса в подменю, открытое мышью: регистрация уровня и фокус — один вызов,
- * а регистрации без фокуса у движка нет.
+ * а регистрации без фокуса у движка нет. Место у `#openSubmenu` одно, поэтому пути
+ * показа — наведение, нажатие, клик и клавиатура — не могут разойтись.
  *
  * **Уровень подменю заводится на шаг вперёд, но не глубже, и только для доступных
  * владельцев.** Движок ищет подменю по паре «родитель, владелец» и уровни не создаёт,
  * поэтому незаведённый уровень не открылся бы ни по `ArrowRight`, ни по клику — молча.
- * Отключённый владелец в цикл роуминга не входит и кликом не активируется, поэтому
- * уровень ему не заводится, и `aria-owns`, который рендерер на него резервирует,
- * остаётся висячим: отбирать чужой атрибут здесь нельзя, это был бы второй владелец.
- * Висячая ссылка уходит сама, когда Task 10 перестанет считать отключённого пункта
- * владельцем. Глубже шага заведение не идёт: следующий уровень появится, когда
- * покажется этот, — иначе ленивая постройка веток стала бы постройкой всего дерева
- * при первом открытии.
+ * Отключённый владелец в цикл роуминга не входит, кликом не активируется и владельцем
+ * не считается: рендерер ставит `hasSubmenu` по непустому подменю **и** доступности,
+ * поэтому у него нет ни шеврона, ни `aria-owns`, ни заводимого уровня — обещать
+ * раскрытие, которого не будет, не должен ни один слой. Глубже шага заведение не
+ * идёт: следующий уровень появится, когда покажется этот, — иначе ленивая постройка
+ * веток стала бы постройкой всего дерева при первом открытии.
+ *
+ * **Цепочка открытых уровней — единственный источник правды о том, что показано.**
+ * Слой знает состояние каждого уровня, но не знает, какой из них глубже текущего.
+ * Открытие подменю обрезает цепочку до его родителя, то есть уносит всё глубже
+ * открытое, — а не закрывает меню целиком: переход на соседний пункт должен оставить
+ * открытым уровень, из которого этот пункт и открыт.
  *
  * **Слушатель `keydown` висит на уровне, а не на документе.** Глобальные слушатели —
  * отдельная задача, и до их появления клавиши адресуются пункту, а не документу.
@@ -172,6 +192,37 @@ export class MyContext {
    * @type {Map<HTMLElement, LevelEntry>}
    */
   #levels;
+
+  /**
+   * Пункты, на которые подписан показ подменю, по узлу пункта. Это ровно те
+   * владельцы, которые роуминг может сделать активными: отключённые владельцы сюда
+   * не попадают, и наведение, нажатие и движение курсора по ним никуда не идут.
+   * Нужен и обработчикам показа, и проверке «курсор на пункте-владельце» в
+   * `pointermove` уровня.
+   *
+   * @type {Map<Element, RenderedItem>}
+   */
+  #showTargets;
+
+  /**
+   * Открытые уровни от корня к текущему. Единственный источник правды о том, что
+   * показано: `#layer` знает состояние каждого уровня, но не знает, какой из них
+   * глубже текущего, и без этой строки усечение цепочки было бы негде искать.
+   * Первый элемент — всегда корень.
+   *
+   * @type {LevelEntry[]}
+   */
+  #chain;
+
+  /**
+   * Владелец, под подменю которого зреет отложенное открытие. Заполняется
+   * наведением, читается колбэком `onOpen`: решение о показе принимает
+   * `hoverIntent` по своим таймерам, а предмет показа — оркестратор, и он не
+   * выводится из DOM заново.
+   *
+   * @type {RenderedItem | null}
+   */
+  #hoverOwner;
 
   /** @type {LevelEntry | null} */
   #root = null;
@@ -218,14 +269,10 @@ export class MyContext {
       return item.element === element;
     });
     // Ключ есть у пункта и отсутствует у разделителя, а `focusable: false` — у
-    // разделителя и у отключённого пункта. Отключённый пункт полноценный владелец
-    // подменю по разметке, но ни активироваться, ни открывать подменю не может: обе
-    // двери ведут через этот один фильтр.
+    // разделителя и у отключённого пункта. Фильтр доступности стоит раньше
+    // проверки подменю: отключённый пункт владельцем не является вовсе, но и
+    // активироваться он не может, и обе двери ведут через этот один фильтр.
     if (rendered === undefined || rendered.key === null || !rendered.focusable) {
-      return;
-    }
-    const item = this.#actions.get(rendered.key);
-    if (item === undefined) {
       return;
     }
     // Владелец непустого подменю по клику открывает подменю, а своё действие не
@@ -233,19 +280,13 @@ export class MyContext {
     // ревью Task 9, а не вывод из разметки: `hasSubmenu` у рендерера означает «есть
     // подменю», и наличие собственного действия этому не противоречит.
     if (rendered.hasSubmenu) {
-      if (item.submenu === undefined) {
-        return;
-      }
-      // Показанный уровень обязан достаться движку, иначе он не получит клавиш вовсе;
-      // `focusFirst` — единственная регистрация, и она же переносит фокус.
-      const submenu = this.#ensureLevel(
-        item.submenu,
-        entry,
-        this.#levelIndexOf(entry) + 1,
-        rendered,
-      );
-      this.#openSubmenu(submenu);
-      this.#keyboard.focusFirst(submenu);
+      // Открытие подменю — тот же путь, что и по наведению: одно тело, один
+      // `ensureLevel` и одно место, где показанный уровень отдаётся движку.
+      this.#showSubmenuFor(rendered);
+      return;
+    }
+    const item = this.#actions.get(rendered.key);
+    if (item === undefined) {
       return;
     }
     if (item.action === undefined) {
@@ -273,6 +314,90 @@ export class MyContext {
       return;
     }
     this.#keyboard.handleKeydown(event);
+  };
+
+  /**
+   * Движение курсора по дереву меню — только не по пункту-владельцу. По
+   * пункту-владельцу движение ничего не решает: там `entryPoint` ещё пуст, и
+   * `hoverIntent` запланировал бы закрытие подменю, которое вот-вот откроется или
+   * уже открыто, — мигание на месте. Позиция курсора при этом нужна: её читает
+   * `itemLeave` и делает якорем выхода для safe-triangle.
+   *
+   * @type {(event: PointerEvent) => void}
+   */
+  #onLevelPointerMove = (event) => {
+    if (this.#destroyed) {
+      return;
+    }
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const item = target.closest(ITEM_SELECTOR);
+    if (item !== null && this.#showTargets.has(item)) {
+      return;
+    }
+    this.#hover.pointerMove({ x: event.clientX, y: event.clientY });
+  };
+
+  /**
+   * Вход в показанное подменю: точка становится якорем входа, а запланированное
+   * закрытие снимается. Именно этот шаг держит подменю открытым на диагональном
+   * движении к нему.
+   *
+   * @type {(event: PointerEvent) => void}
+   */
+  #onSubmenuEnter = (event) => {
+    if (this.#destroyed) {
+      return;
+    }
+    this.#hover.submenuEnter({ x: event.clientX, y: event.clientY });
+  };
+
+  /**
+   * @type {(event: PointerEvent) => void}
+   */
+  #onItemEnter = (event) => {
+    if (this.#destroyed) {
+      return;
+    }
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const rendered = this.#showTargets.get(target);
+    if (rendered === undefined) {
+      return;
+    }
+    this.#hoverOwner = rendered;
+    this.#hover.itemEnter();
+  };
+
+  /**
+   * @type {(event: PointerEvent) => void}
+   */
+  #onItemLeave = (event) => {
+    if (this.#destroyed) {
+      return;
+    }
+    // Позиция курсора на пункте передаётся `hoverIntent` перед самым уходом: она
+    // становится якорем выхода, и без неё клин строился бы от точки предыдущего
+    // пункта.
+    this.#hover.pointerMove({ x: event.clientX, y: event.clientY });
+    this.#hover.itemLeave();
+  };
+
+  /**
+   * @type {(event: PointerEvent) => void}
+   */
+  #onItemDown = (event) => {
+    if (this.#destroyed) {
+      return;
+    }
+    // Удержание кнопки открывает подменю немедленно, минуя `openDelayMs`. Само
+    // событие не разбирается: `itemPress` молчит, если открытие не планировалось,
+    // и уже открытое подменю повторно не открывает.
+    this.#hover.itemPress();
   };
 
   /**
@@ -309,13 +434,34 @@ export class MyContext {
     };
     this.#actions = new Map();
     this.#levels = new Map();
+    this.#showTargets = new Map();
+    this.#chain = [];
+    this.#hoverOwner = null;
     this.#layer = createLayer({
       label: this.#options.label,
       theme: this.#options.theme,
       animationDuration: this.#options.animationDuration,
       actions: this.#actions,
     });
-    this.#hover = createHoverIntent();
+    // `hoverIntent` решает, когда показывать и когда скрывать, и решает это
+    // колбэками, а не опросом `isOpenPending`: опрос превратил бы модуль в
+    // источник тиков, и решение о показе принималось бы в другое мгновение, чем
+    // его вынес `hoverIntent`. Предмет показа — уже наш, `#hoverOwner` кладёт его
+    // наведение, а показывать и скрывать — тела ниже.
+    this.#hover = createHoverIntent({
+      onOpen: () => {
+        const owner = this.#hoverOwner;
+        if (owner !== null) {
+          this.#showSubmenuFor(owner);
+        }
+      },
+      onClose: () => {
+        const deepest = this.#deepestChainEntry();
+        if (deepest !== null && deepest.ownerItem !== null) {
+          this.#hideSubmenuFor(deepest.ownerItem);
+        }
+      },
+    });
     this.#keyboard = createKeyboard(this.#keyboardHost());
   }
 
@@ -363,8 +509,18 @@ export class MyContext {
     // Владельцем фокуса становится контейнер, а не вызвавший код: без привязки
     // возвращать фокус некуда, и `close()` обязан пережить это молча.
     this.#focusOwner = this.#attachedTo;
+    // Подменю прежней постановки привязаны к прямоугольникам своих
+    // пунктов-владельцев, а меню уезжает в новую точку, поэтому они скрываются —
+    // от глубоких к корню. Корень по индексу `0` остаётся: его переносит
+    // `showRoot`, и он же встаёт в новую цепочку.
+    for (let position = this.#chain.length - 1; position > CHAIN_ROOT_INDEX; position -= 1) {
+      this.#layer.hide(this.#chain[position]);
+    }
+    this.#chain.length = 0;
+    this.#hoverOwner = null;
     const root = this.#ensureLevel(this.#items, null, 0, null);
     this.#root = root;
+    this.#chain.push(root);
     this.#leadAhead(root);
     this.#layer.showRoot(root, params);
     // На каждый показ, а не на первый: после `close()` реестр движка пуст, и без
@@ -386,6 +542,8 @@ export class MyContext {
     this.#assertAlive();
     this.#hover.cancelAll();
     this.#layer.hideAll();
+    this.#chain.length = 0;
+    this.#hoverOwner = null;
     this.#keyboard.reset();
     this.#returnFocus();
   }
@@ -412,6 +570,9 @@ export class MyContext {
     // уровней, снесённых перестроением, и уровней, никогда не показанных.
     this.#actions.clear();
     this.#levels.clear();
+    this.#showTargets.clear();
+    this.#chain.length = 0;
+    this.#hoverOwner = null;
     this.#root = null;
     this.#focusOwner = null;
   }
@@ -441,7 +602,23 @@ export class MyContext {
   }
 
   /**
-   * Показывает заранее заведённый уровень-подменю и заводит шаг вперёд из него.
+   * Показывает уровень-подменю и заводит шаг вперёд из него.
+   *
+   * Здесь, а не в вызывающем коде, решаются три вещи сразу, и все три обязательны
+   * для любого пути показа — наведение, нажатие, клик и клавиатура:
+   *
+   * 1. **Усечение цепочки.** Подменю открывается на месте того, ради чего
+   *    нажали, а всё, что открыто глубже, уходит: иначе «Экспорт → PDF» осталось
+   *    бы висеть поверх подменю «Скачать». Порядок — от глубоких к корню.
+   * 2. **Завод уровня движку.** `focusFirst` — единственная регистрация уровня в
+   *    движке, и она же переносит фокус в показанный подменю. Движок берёт уровни
+   *    из своего реестра, а не из DOM, поэтому показанный уровень, которому не
+   *    звали `focusFirst`, не отвечает на клавиши вовсе: подменю, открытое мышью,
+   *    было бы видимо и мёртво. Это же снимает вопрос, переносить ли фокус при
+   *    показе мышью: не переносить — значит показать уровень вне реестра.
+   * 3. **Запись в цепочку.** Идентичность уровня задаёт пара «родитель,
+   *    владелец», поэтому повторный показ того же подменю после усечения
+   *    переиспользует и уровень, и его `id`.
    *
    * @param {LevelEntry} entry уровень-подменю.
    * @returns {void}
@@ -450,8 +627,104 @@ export class MyContext {
     if (this.#destroyed) {
       return;
     }
+    const parent = entry.parent;
+    if (parent !== null) {
+      this.#truncateChain(parent);
+    }
     this.#layer.showSubmenu(entry);
     this.#leadAhead(entry);
+    this.#chain.push(entry);
+    this.#keyboard.focusFirst(entry);
+  }
+
+  /**
+   * Показывает подменю пункта-владельца: находит уровень, из которого владелец
+   * открыт, и передаёт показ `#openSubmenu`.
+   *
+   * Уровень ищется по узлу владельца, а не берётся из аргумента: единственный
+   * вызов этого тела — колбэк `onOpen` плюс обработчик активации, и у первого
+   * под рукой нет ничего, кроме самого пункта.
+   *
+   * @param {RenderedItem} rendered пункт-владелец, каким его назвал рендерер.
+   * @returns {void}
+   */
+  #showSubmenuFor(rendered) {
+    if (this.#destroyed) {
+      return;
+    }
+    const level = rendered.element.closest(MENU_SELECTOR);
+    if (level === null) {
+      return;
+    }
+    const parent = this.#levels.get(/** @type {HTMLElement} */ (level));
+    if (parent === undefined || rendered.key === null) {
+      return;
+    }
+    const item = this.#actions.get(rendered.key);
+    if (item === undefined || item.submenu === undefined) {
+      return;
+    }
+    const submenu = this.#ensureLevel(
+      item.submenu,
+      parent,
+      this.#levelIndexOf(parent) + 1,
+      rendered,
+    );
+    this.#openSubmenu(submenu);
+  }
+
+  /**
+   * Скрывает подменю пункта-владельца и всё, что открыто из него глубже.
+   *
+   * Порядок — от глубоких к самому уровню: потомок уходит раньше предка всегда,
+   * иначе закрывающийся уровень оставил бы глубокий висеть поверх пустоты.
+   * Сама цепочка укорачивается, и следующее усечение отсчитается уже от неё.
+   *
+   * @param {RenderedItem} rendered пункт-владелец скрываемого подменю.
+   * @returns {void}
+   */
+  #hideSubmenuFor(rendered) {
+    const index = this.#chain.findIndex((entry) => {
+      return entry.ownerItem === rendered;
+    });
+    if (index < CHAIN_ROOT_INDEX) {
+      return;
+    }
+    for (let position = this.#chain.length - 1; position >= index; position -= 1) {
+      this.#layer.hide(this.#chain[position]);
+    }
+    this.#chain.length = index;
+  }
+
+  /**
+   * Обрезает цепочку до указанного уровня включительно: всё глубже него
+   * скрывается и исчезает из цепочки. Сам уровень остаётся открытым, и именно
+   * поэтому открытие его подменю не уносит родителя.
+   *
+   * @param {LevelEntry} levelEntry уровень, глубже которого обрезать.
+   * @returns {void}
+   */
+  #truncateChain(levelEntry) {
+    const index = this.#chain.indexOf(levelEntry);
+    if (index < CHAIN_ROOT_INDEX) {
+      return;
+    }
+    for (let position = this.#chain.length - 1; position > index; position -= 1) {
+      this.#layer.hide(this.#chain[position]);
+    }
+    this.#chain.length = index + 1;
+  }
+
+  /**
+   * Самый глубокий открытый уровень цепочки либо `null`, когда цепочка пуста.
+   *
+   * @returns {LevelEntry | null}
+   */
+  #deepestChainEntry() {
+    if (this.#chain.length === 0) {
+      return null;
+    }
+    return this.#chain[this.#chain.length - 1];
   }
 
   /**
@@ -512,12 +785,22 @@ export class MyContext {
     this.#levels.set(entry.element, entry);
     entry.element.addEventListener('click', this.#onLevelClick);
     entry.element.addEventListener('keydown', this.#onLevelKeydown);
+    entry.element.addEventListener('pointermove', this.#onLevelPointerMove);
+    // Якорь входа safe-triangle ставит только вход в подменю: у корня нет
+    // владельца, и вход в него не означает, что курсор идёт к подменю.
+    if (parent !== null) {
+      entry.element.addEventListener('pointerenter', this.#onSubmenuEnter);
+    }
     return entry;
   }
 
   /**
    * Заводит уровни подменю на шаг вперёд — ровно для тех пунктов уровня, которые
-   * рендерер назвал владельцами и которые роуминг может сделать активными.
+   * рендерер назвал владельцами и которые роуминг может сделать активными. На тех
+   * же пунктах вешается показ по наведению и по нажатию: подписка на показ и
+   * заведение уровня решаются одним проходом по одному условию, иначе они
+   * разошлись бы — либо у пункта появился бы шеврон, а подменю не открылось бы
+   * никогда, либо наоборот.
    *
    * Пункты берутся из карты действий по внутреннему ключу, а не из массива
    * конфигурации: у уровня есть только `RenderedItem`, и подменя у него нет.
@@ -532,13 +815,21 @@ export class MyContext {
         continue;
       }
       const item = this.#actions.get(rendered.key);
-      // `hasSubmenu` рендерер ставит только непустому подменю, а `submenu` у пункта
-      // обязано быть массивом — валидация прошла в конструкторе. Проверка оставлена
-      // потому, что карта действий принадлежит экземпляру, а лишнее условие стоит
-      // одного сравнения с `undefined` на каждом владельце.
+      // `hasSubmenu` рендерер ставит только непустому подменю доступного пункта, а
+      // `submenu` у пункта обязано быть массивом — валидация прошла в
+      // конструкторе. Проверка оставлена потому, что карта действий принадлежит
+      // экземпляру, а лишнее условие стоит одного сравнения с `undefined` на
+      // каждом владельце.
       if (item === undefined || item.submenu === undefined) {
         continue;
       }
+      // `addEventListener` не дублирует слушатель с той же ссылкой на том же
+      // узле, а показ уровня зовёт этот проход на каждом показе, — повторных
+      // подписок не будет.
+      this.#showTargets.set(rendered.element, rendered);
+      rendered.element.addEventListener('pointerenter', this.#onItemEnter);
+      rendered.element.addEventListener('pointerleave', this.#onItemLeave);
+      rendered.element.addEventListener('pointerdown', this.#onItemDown);
       this.#ensureLevel(item.submenu, entry, childIndex, rendered);
     }
   }

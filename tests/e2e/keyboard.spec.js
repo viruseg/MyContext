@@ -169,6 +169,9 @@ import { expect, test } from '@playwright/test';
 /**
  * @typedef {object} KeyboardProbe
  * @property {(set: string, buildSubmenus?: boolean) => void} open
+ * @property {(index: number) => string | null} ensureSubmenu пытается завести
+ *   уровень-подменю пункта по индексу и отдаёт сообщение слоя либо `null`, если
+ *   уровень заведён.
  * @property {(paths: Record<string, number[]>) => ProbeSnapshot} read
  * @property {(steps: Step[], paths: Record<string, number[]>) => StepResult[]} run
  */
@@ -305,17 +308,18 @@ test.beforeEach(async ({ page }) => {
     ];
 
     /**
-     * Отключённый владелец непустого подменю. `renderer.js` выставляет
-     * `hasSubmenu` независимо от `disabled`, поэтому такой пункт — полноценный
-     * владелец с шевроном, `aria-haspopup` и `aria-owns`, и слой заведёт его
-     * уровень. Роуминг к нему не приходит, и возвращать на него фокус тоже
-     * нельзя.
+     * Отключённый владелец непустого подменю. `renderer.js` ставит `hasSubmenu`
+     * только доступному владельцу непустого подменю, поэтому у такого пункта нет ни
+     * шеврона, ни `aria-owns`, и слой не заведёт ему уровень: `ensureLevel`
+     * требует зарезервированный адрес и бросит без него. Роуминг к пункту не
+     * приходит, и возвращать на него фокус тоже незачем.
      *
      * @type {Array<MenuItem | SeparatorItem>}
      */
     const offLimits = [
       { label: 'Живой' },
       { label: 'Мёртвый владелец', disabled: true, submenu: [{ label: 'Внутрь' }] },
+      { label: 'Живой владелец', submenu: [{ label: 'Тоже внутрь' }] },
     ];
     /**
      * Вложенность: подменю подменю. `MenuItem[]`, а не со смешанным списком: у
@@ -423,11 +427,19 @@ test.beforeEach(async ({ page }) => {
         if ('type' in item) {
           continue;
         }
+        // Владельца называет рендерер, и спрашивать надо у него, а не выводить
+        // владельца из `submenu` своими руками: отключённый пункт с непустым
+        // подменю владельцем не является, и `ensureLevel` такому уровень не
+        // заведёт. Ровно этот же фильтр держит оркестратор.
+        const owner = entry.items[index];
+        if (!owner.hasSubmenu) {
+          continue;
+        }
         const submenu = item.submenu;
         if (submenu === undefined || submenu.length === 0) {
           continue;
         }
-        const child = openedLayer().ensureLevel(submenu, entry, levelIndex + 1, entry.items[index]);
+        const child = openedLayer().ensureLevel(submenu, entry, levelIndex + 1, owner);
         levels.push(child);
         byElement.set(child.element, child);
         buildTree(child, submenu, levelIndex + 1);
@@ -826,6 +838,18 @@ test.beforeEach(async ({ page }) => {
         }
         openedLayer().showRoot(root, { x: 60, y: 60 });
         keyboard.focusFirst(root);
+      },
+      ensureSubmenu(index) {
+        const entry = openedRoot();
+        const owner = entry.items[index];
+        /** @type {string | null} */
+        let message = null;
+        try {
+          openedLayer().ensureLevel([{ label: 'Лист' }], entry, 1, owner);
+        } catch (error) {
+          message = error instanceof Error ? error.message : String(error);
+        }
+        return message;
       },
       read,
       run,
@@ -1259,52 +1283,44 @@ test.describe('переходы между уровнями', () => {
     expect(result.after.focus.inMenu).toBe(false);
   });
 
-  test('ArrowLeft не возвращает фокус на отключённого владельца подменю', async ({ page }) => {
-    const result = await runScenario(page, {
-      set: 'offLimits',
-      paths: { root: [], sub: [1] },
-      steps: [
-        // Вызывающий код открывает подменю отключённого владельца и отдаёт его
-        // движку — ровно то, что он обязан делать после показа.
-        { command: 'show-submenu', at: { path: [], index: 1 } },
-        { command: 'press', key: 'ArrowLeft' },
-      ],
+  test('слой не заводит уровень под отключённого владельца подменю', async ({ page }) => {
+    const result = await page.evaluate(() => {
+      const scope = /** @type {{ __vcKb: KeyboardProbe }} */ (/** @type {unknown} */ (globalThis));
+      const probe = scope.__vcKb;
+      probe.open('offLimits');
+      // Отключённый пункт с непустым подменю — не владелец, поэтому у него нет
+      // зарезервированного адреса, а `ensureLevel` без адреса бросает. Состояние
+      // «открытое подменю при неактивном владельце», ради которого прежний кейс
+      // этого места строил такой уровень руками, теперь недостижимо: сделать его
+      // может только слой, а он не согласится.
+      return {
+        deaf: probe.ensureSubmenu(1),
+        live: probe.ensureSubmenu(2),
+        snapshot: probe.read({ root: [] }),
+      };
     });
 
-    // Состояние действительно опасное, иначе кейс проверял бы пустоту: пункт
-    // отключён, но подменю у него непустое, поэтому шеврон, `aria-haspopup` и
-    // `aria-owns` на месте, а уровень за ним заведён и открыт.
-    const owner = result.steps[0].levels.root.items[1];
-    expect(owner.focusable).toBe(false);
-    expect(owner.hasSubmenu).toBe(true);
-    expect(owner.haspopup).toBe('menu');
-    expect(owner.owns).toBe(result.steps[0].levels.sub.id);
-    expect(result.steps[0].levels.sub.open).toBe(true);
-    expect(result.steps[0].levels.sub.focusLabel).toBe('Внутрь');
-    // Уровень закрыт — а возврата фокуса на владельца не было.
-    expect(result.after.calls.closeCurrentLevel).toBe(1);
-    expect(result.after.levels.sub.open).toBe(false);
-    expect(result.after.calls.closeAll).toBe(0);
-    // Роуминг остался на живом пункте, а у отключённого владельца не появилось ни
-    // отметки, ни `tabindex="0"`, ни фокуса: он вне цикла, и возврат на него
-    // сделал бы его целью табуляции и получателем подсветки. Сравнение снимка
-    // уровня с его состоянием до `show-submenu` было бы сравнением с состоянием,
-    // в котором подменю ещё не открывали.
-    expect(result.after.levels.root.activeIndex).toBe(0);
-    expect(result.after.levels.root.tabStops).toBe(1);
-    expect(result.after.levels.root.activeMarks).toBe(1);
-    // Отметка развёрнутости снята закрытым уровнем, а `aria-owns` остался.
-    expect(result.after.levels.root.items[1].expanded).toBe(null);
-    expect(result.after.levels.root.items[1].owns).toBe(result.before.levels.sub.id);
-    expect(rovingOf(result.after.levels.root)).toEqual([
-      ['Живой', '0', true, false],
+    // Отказ назван прямо: сообщение обязано называть причину, иначе «не завелось»
+    // не отличалось бы от «слой молча не нашёл».
+    expect(result.deaf, 'слой отказал').not.toBeNull();
+    expect(/** @type {string} */ (result.deaf)).toContain('зарезервированного id подменю');
+    // Контроль в обе стороны: у доступного пункта с непустым подменю уровень
+    // заводится, и отказ выше — про отключённого, а не про механизм слоя вовсе.
+    expect(result.live, 'доступный владелец заведён').toBeNull();
+    const deaf = result.snapshot.levels.root.items[1];
+    expect(deaf.focusable, 'отключённый пункт вне цикла роуминга').toBe(false);
+    expect(deaf.hasSubmenu, 'отключённый пункт не владелец').toBe(false);
+    expect(deaf.haspopup, 'нет `aria-haspopup`').toBe(null);
+    expect(deaf.owns, 'адрес подменю не зарезервирован').toBe(null);
+    // Роуминг остался на живом пункте, и у отключённого не появилось ни отметки,
+    // ни `tabindex="0"`, ни фокуса: он вне цикла, и отметка роуминга сделала бы
+    // его целью табуляции.
+    expect(rovingOf(result.snapshot.levels.root)).toEqual([
+      ['Живой', '0', true, true],
       ['Мёртвый владелец', '-1', false, false],
+      ['Живой владелец', '-1', false, false],
     ]);
-    // Куда именно ушёл фокус — вопрос платформы (в одних движках элемент внутри
-    // `display: none` остаётся активным, в других фокус падает на `<body>`), и
-    // утверждать его нельзя. Утверждается одно: он не на отключённом владельце —
-    // иначе неактивный пункт получил бы фокус и стал бы целью табуляции.
-    expect(result.after.focus.label).not.toBe('Мёртвый владелец');
+    expect(result.snapshot.levels.root.activeIndex).toBe(0);
   });
 
   test('уровень берётся из цели события, а не из последнего тронутого уровня', async ({ page }) => {

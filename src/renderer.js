@@ -32,6 +32,15 @@ import { renderIcon } from './icons.js';
  * владельцев подменю. Из этого следует и то, что открытие подменю не сдвигает
  * ни одного лейбла.
  *
+ * **Владелец — это одно условие: непустое подменю И не отключённый пункт.**
+ * Отключённый пункт с непустым подменю владельцем не является: раскрыть его
+ * нечем — ни мышью, ни с клавиатуры, ни кликом, — а шеврон, `aria-haspopup` и
+ * `aria-owns` обещали бы раскрытие, которого не будет. В родных меню у
+ * отключённого пункта признака подменю тоже нет. Отсюда и то, что решение
+ * принимается один раз, а не по двум независимым полям: `focusable` и
+ * `hasSubmenu` читают одну и ту же переменную `disabled`, поэтому пункт не может
+ * оказаться недоступным для роуминга и при этом обещать подменю.
+ *
  * **Каждый владелец подменю резервирует `id` подменю в `aria-owns`.** Подменю
  * лежат в `<body>` рядом с корневым меню, а не внутри пункта (спека 8.3):
  * `backdrop-filter` и анимация `scale` на родителе создают containing block и
@@ -49,11 +58,12 @@ import { renderIcon } from './icons.js';
  * @property {string} label текст пункта.
  * @property {import('./icons.js').IconConfig} [icon] иконка. Без неё слот
  *   остаётся пустым, но занимает место.
- * @property {boolean} [disabled] отключённый пункт не входит в цикл роуминга.
+ * @property {boolean} [disabled] отключённый пункт не входит в цикл роуминга и
+ *   не бывает владельцем подменю даже при непустом `submenu`.
  * @property {(event: MouseEvent | KeyboardEvent) => void} [action] вызывается по
  *   внутреннему ключу пункта, а не хранится на узле.
- * @property {MenuItem[]} [submenu] непустой массив — и только тогда пункт
- *   считается владельцем подменю.
+ * @property {MenuItem[]} [submenu] непустой массив — и только тогда, вместе с
+ *   отсутствием `disabled`, пункт считается владельцем подменю.
  */
 
 /**
@@ -95,6 +105,8 @@ import { renderIcon } from './icons.js';
  * @property {boolean} focusable входит ли пункт в цикл роуминга. `false` у
  *   разделителей и отключённых пунктов.
  * @property {boolean} hasSubmenu владелец ли пункт непустого подменю.
+ *   `false` у разделителей, у пунктов с пустым `submenu` и у отключённых:
+ *   признак один, и он означает «подменю можно раскрыть», а не «подменю есть».
  * @property {string | null} key внутренний ключ пункта; у разделителя `null`.
  */
 
@@ -127,6 +139,19 @@ function isSeparator(item) {
  */
 function hasSubmenuOf(item) {
   return Array.isArray(item.submenu) && item.submenu.length > 0;
+}
+
+/**
+ * Владелец подменю. Обе половины решения — непустота подменю и доступность
+ * пункта — проверяются здесь и nowhere ещё: `hasSubmenu` у `RenderedItem` и
+ * `focusable` обязаны считаться из одного ответа, иначе они разойдутся и у
+ * отключённого пункта останется признак раскрытия, которого не будет.
+ *
+ * @param {MenuItem} item
+ * @returns {boolean} `true`, если у пункта непустое подменю и он не отключён.
+ */
+function isSubmenuOwner(item) {
+  return item.disabled !== true && hasSubmenuOf(item);
 }
 
 /**
@@ -194,7 +219,11 @@ function renderSeparator() {
  * @returns {RenderedItem}
  */
 function renderMenuItem(item, context, itemIndex, setSize) {
-  const hasSubmenu = hasSubmenuOf(item);
+  // `disabled` читается один раз, и из него выходят оба поля: расхождение двух
+  // независимых проверок и было причиной того, что отключённый пункт обещал
+  // подменю, которое нечем было раскрыть.
+  const disabled = item.disabled === true;
+  const hasSubmenu = isSubmenuOwner(item);
   const element = document.createElement('div');
   element.className = 'vc-item';
   element.setAttribute('role', 'menuitem');
@@ -204,7 +233,7 @@ function renderMenuItem(item, context, itemIndex, setSize) {
   if (item.id !== undefined) {
     element.dataset.id = item.id;
   }
-  if (item.disabled === true) {
+  if (disabled) {
     element.setAttribute('aria-disabled', 'true');
   }
   if (hasSubmenu) {
@@ -237,7 +266,7 @@ function renderMenuItem(item, context, itemIndex, setSize) {
 
   return {
     element,
-    focusable: item.disabled !== true,
+    focusable: !disabled,
     hasSubmenu,
     key: keyOf(context, itemIndex),
   };
