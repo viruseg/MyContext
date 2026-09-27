@@ -66,6 +66,9 @@ import { CURSOR_OFFSET, SAFETY_PADDING } from '../../src/constants.js';
  * @property {string[]} errors сообщения необработанных ошибок страницы.
  * @property {ProbeContextMenu[]} contextmenu события `contextmenu`, дойденные до
  *   документа: видно, куда пришёл клик и подавила ли его привязка.
+ * @property {ProbeRemoved[]} removed снятия слушателей: после `destroy()` живой
+ *   обработчик `contextmenu` неотличим от снятого по поведению, он молчит на флаге
+ *   уничтожения.
  * @property {number} actionsSize размер карты действий экземпляра; `-1`, если
  *   проба её не увидела.
  */
@@ -75,6 +78,12 @@ import { CURSOR_OFFSET, SAFETY_PADDING } from '../../src/constants.js';
  * @property {string | null} container `id` контейнера под целью.
  * @property {boolean} prevented `defaultPrevented` к моменту всплытия на
  *   документ.
+ */
+
+/**
+ * @typedef {object} ProbeRemoved
+ * @property {string} type имя снятого события.
+ * @property {string} target `id` узла, с которого слушатель снят.
  */
 
 /**
@@ -326,6 +335,37 @@ test.beforeEach(async ({ page }) => {
     const actionsKey = /^vc-[\d-]*(?:sub-[\d-]+)?:\d+$/;
 
     /**
+     * Шпион на снятии слушателя. Поведение после `destroy()` доказать нечем: живой
+     * обработчик `contextmenu` после `destroy()` всё равно ничего не делает — он
+     * первым делом смотрит на флаг уничтожения, — и «меню не открылось» прошло бы
+     * и при слушателе на месте. Разница видна только на самом снятии, поэтому
+     * наблюдение ведётся за ним.
+     *
+     * @type {ProbeRemoved[]}
+     */
+    const removed = [];
+    const nativeRemove = EventTarget.prototype.removeEventListener;
+
+    /**
+     * @this {EventTarget}
+     * @param {string} type
+     * @param {EventListenerOrEventListenerObject | null} listener
+     * @param {boolean | AddEventListenerOptions | undefined} options
+     * @returns {void}
+     */
+    function removeSpy(type, listener, options) {
+      removed.push({
+        type,
+        target: this instanceof HTMLElement ? this.id : 'без id',
+      });
+      nativeRemove.call(this, type, listener, options);
+    }
+
+    EventTarget.prototype.removeEventListener = /** @type {typeof EventTarget.prototype.removeEventListener} */ (
+      /** @type {unknown} */ (removeSpy)
+    );
+
+    /**
      * @this {Map<string, unknown>}
      * @param {unknown} key
      * @param {unknown} value
@@ -492,6 +532,7 @@ test.beforeEach(async ({ page }) => {
         log: log.slice(),
         errors: errors.slice(),
         contextmenu: contextmenu.slice(),
+        removed: removed.slice(),
         actionsSize: actionMaps.length === 0 ? -1 : actionMaps[actionMaps.length - 1].size,
       };
     }
@@ -504,6 +545,7 @@ test.beforeEach(async ({ page }) => {
         log.length = 0;
         errors.length = 0;
         contextmenu.length = 0;
+        removed.length = 0;
         menu = new MyContext(itemsOf(setName), { label: 'Меню файла' });
         const container = containerOf(containerId);
         if (container !== null) {
@@ -878,7 +920,10 @@ test.describe('жизненный цикл MyContext', () => {
 
   test('destroy() снимает слушатель contextmenu с контейнера', async ({ page }) => {
     await makeMenu(page, 'flat', 'workspace');
-    await destroyMenu(page);
+    const removed = (await destroyMenu(page)).removed;
+    // Слушатель снят с самого контейнера, а не с документа и не с меню: иначе
+    // привязка пережила бы экземпляр и держала бы его замыканием.
+    expect(removed).toEqual([{ type: 'contextmenu', target: 'workspace' }]);
 
     await rightClick(page, WORKSPACE_POINT);
 
@@ -892,7 +937,10 @@ test.describe('жизненный цикл MyContext', () => {
 
   test('detach() снимает привязку: правый клик по контейнеру больше не открывает меню', async ({ page }) => {
     await makeMenu(page, 'flat', 'workspace');
-    await detachMenu(page);
+    const detached = await detachMenu(page);
+    expect(detached.removed, 'слушатель снят с контейнера').toEqual([
+      { type: 'contextmenu', target: 'workspace' },
+    ]);
 
     await rightClick(page, WORKSPACE_POINT);
 
