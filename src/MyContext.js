@@ -38,6 +38,7 @@ const RASTER_TYPE = 'raster';
 const ICON_TYPES = new Set([RASTER_TYPE, 'emoji', 'svg']);
 const ITEMS_PATH = 'items';
 const CHAIN_ROOT_INDEX = 0;
+const PRIMARY_MOUSE_BUTTON = 0;
 const DESTROYED_MESSAGE = 'MyContext: экземпляр уничтожен';
 const POPOVER_REQUIREMENT =
   'MyContext: браузер не поддерживает Popover API — нет HTMLElement.prototype.showPopover';
@@ -137,8 +138,11 @@ function assertPopoverSupport() {
  * реестр — значит повторный `open()` обязан отдать уровень заново. Отсюда же и
  * перенос фокуса в подменю, открытое мышью: регистрация уровня и фокус — один вызов,
  * а регистрации без фокуса у движка нет. Место у `#openSubmenu` одно, поэтому пути
- * показа — наведение, нажатие, клик и клавиатура — не могут разойтись.
+ * показа — наведение, нажатие, клик и клавиатура — не могут разойтись. Клавиатурный
+ * путь потому и не переносит фокус сам: `ArrowRight` и `Enter` зовут
+ * `host.openSubmenu` и всё, а перенос делает тот же `#openSubmenu`.
  *
+
  * **Уровень подменю заводится на шаг вперёд, но не глубже, и только для доступных
  * владельцев.** Движок ищет подменю по паре «родитель, владелец» и уровни не создаёт,
  * поэтому незаведённый уровень не открылся бы ни по `ArrowRight`, ни по клику — молча.
@@ -394,6 +398,13 @@ export class MyContext {
     if (this.#destroyed) {
       return;
     }
+    // Только основная кнопка. Правый клик подтверждается `contextmenu`, который
+    // зовёт `open()` и переносит меню: подменю, открытое нажатием, мигнуло бы
+    // ровно на один такт — а против чего safe-triangle и строится. Средняя кнопка
+    // не открывает ничего и по существу.
+    if (event.button !== PRIMARY_MOUSE_BUTTON) {
+      return;
+    }
     // Удержание кнопки открывает подменю немедленно, минуя `openDelayMs`. Само
     // событие не разбирается: `itemPress` молчит, если открытие не планировалось,
     // и уже открытое подменю повторно не открывает.
@@ -517,6 +528,12 @@ export class MyContext {
       this.#layer.hide(this.#chain[position]);
     }
     this.#chain.length = 0;
+    // Отложенные задачи и якоря относятся к прежней постановке меню: точки
+    // safe-triangle — это точки страницы, которых на новом месте нет. `close()`
+    // снимает их по той же причине, и `open()` не должен быть мягче: ушедшее
+    // закрытие снесло бы подменю, открытое уже на новом месте, а ушедшее
+    // открытие сорвало бы отсчёт задержки, начатый до переноса.
+    this.#hover.cancelAll();
     this.#hoverOwner = null;
     const root = this.#ensureLevel(this.#items, null, 0, null);
     this.#root = root;
@@ -652,6 +669,13 @@ export class MyContext {
     if (this.#destroyed) {
       return;
     }
+    // Правило владельца повторяется здесь намеренно. Вызывающие фильтруют
+    // доступность по своей нужде — подпиской на показ и активацией пункта, — но
+    // путь показа, оставленный без собственной проверки, откроет подменю
+    // отключённого пункта, как только у него появится хоть один новый вызывающий.
+    if (!rendered.hasSubmenu || !rendered.focusable) {
+      return;
+    }
     const level = rendered.element.closest(MENU_SELECTOR);
     if (level === null) {
       return;
@@ -664,13 +688,7 @@ export class MyContext {
     if (item === undefined || item.submenu === undefined) {
       return;
     }
-    const submenu = this.#ensureLevel(
-      item.submenu,
-      parent,
-      this.#levelIndexOf(parent) + 1,
-      rendered,
-    );
-    this.#openSubmenu(submenu);
+    this.#openSubmenu(this.#ensureSubmenuLevel(item.submenu, parent, rendered));
   }
 
   /**
@@ -731,6 +749,12 @@ export class MyContext {
    * Закрывает тот уровень, где стоит фокус. Уровень берётся из цели события, а не
    * из переменки «текущий»: подменю может быть открыто, а фокус стоять в родителе.
    *
+   * Закрытый уровень уходит и из цепочки: она — источник правды о том, что
+   * показано, а `Escape` и `ArrowLeft` закрывают уровень в обход `#hideSubmenuFor`.
+   * Оставшаяся запись сорвала бы следующую операцию по цепочке: усечение и уход
+   * курсора спрятали бы уже скрытый уровень вместо показанного, то есть унесли бы
+   * не то. Уровня вне цепочки скрывать нечем, и укорачивать там нечего.
+   *
    * @returns {void}
    */
   #closeCurrentLevel() {
@@ -743,8 +767,13 @@ export class MyContext {
       return;
     }
     const entry = this.#levels.get(/** @type {HTMLElement} */ (level));
-    if (entry !== undefined) {
-      this.#layer.hide(entry);
+    if (entry === undefined) {
+      return;
+    }
+    this.#layer.hide(entry);
+    const index = this.#chain.indexOf(entry);
+    if (index >= CHAIN_ROOT_INDEX) {
+      this.#chain.length = index;
     }
   }
 
@@ -809,7 +838,6 @@ export class MyContext {
    * @returns {void}
    */
   #leadAhead(entry) {
-    const childIndex = this.#levelIndexOf(entry) + 1;
     for (const rendered of entry.items) {
       if (!rendered.hasSubmenu || !rendered.focusable || rendered.key === null) {
         continue;
@@ -830,8 +858,26 @@ export class MyContext {
       rendered.element.addEventListener('pointerenter', this.#onItemEnter);
       rendered.element.addEventListener('pointerleave', this.#onItemLeave);
       rendered.element.addEventListener('pointerdown', this.#onItemDown);
-      this.#ensureLevel(item.submenu, entry, childIndex, rendered);
+      this.#ensureSubmenuLevel(item.submenu, entry, rendered);
     }
+  }
+
+  /**
+   * Заводит уровень-подменю пункта-владельца.
+   *
+   * Кортеж «пункты, родитель, глубина, владелец» собирается здесь, а не в двух
+   * местах: им задаётся идентичность уровня, и ошибка в глубине в одном из них
+   * не была бы видна нигде — уровень завелся бы, `aria-level` в нём оказался бы
+   * не тем, и разошлись бы только `aria-level` и цепочка.
+   *
+   * @param {Array<MenuItem | SeparatorItem>} items пункты подменю; непустота и
+   *   доступность владельца проверены вызывающим.
+   * @param {LevelEntry} parent уровень, из которого подменю открывается.
+   * @param {RenderedItem} ownerItem пункт-владелец подменю.
+   * @returns {LevelEntry} уровень подменю; тот же самый при повторном заведении.
+   */
+  #ensureSubmenuLevel(items, parent, ownerItem) {
+    return this.#ensureLevel(items, parent, this.#levelIndexOf(parent) + 1, ownerItem);
   }
 
   /**
