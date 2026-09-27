@@ -606,13 +606,13 @@ test.describe('показ подменю', () => {
     expect(isOpen(pressed, ownerId), 'средняя кнопка не открывает подменю').toBe(false);
     expect(pressed.openCount, 'открыт только корень').toBe(1);
 
-    // Показ всё равом остаётся замыслом наведения: отказ нажатию — не отказ
+    // Показ всё равно остаётся замыслом наведения: отказ нажатию — не отказ
     // показать. Снимается задача открытия, а не планирование.
     await page.clock.fastForward(OPEN_GRACE_MS);
     const shown = await readMenu(page);
     expect(isOpen(shown, ownerId), 'подменю открыто по наведению').toBe(true);
-    // `auxclick`, а не `click`: обработчик активации на владельце не зовётся, и
-    // его действие в журнале не появляется.
+    // `auxclick`, а не `click`: у обработчика активации на владельце свой путь,
+    // он уходит в показ подменю и до журнала действий не доходит.
     await page.mouse.up({ button: 'middle' });
     const after = await readMenu(page);
     expect(after.log, 'действие владельца не вызвано').toEqual([]);
