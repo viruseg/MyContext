@@ -59,10 +59,16 @@ import { DEFAULT_ANIMATION_DURATION, SAFETY_PADDING } from '../../src/constants.
  *   состояние. Настройки учитываются только при создании.
  * @property {() => MenuLayer} bare слой без `animationDuration` — значение по
  *   умолчанию достаёт себе слой, из константы.
+ * @property {() => MenuLayer} real слой на настоящих таймерах страницы вместо
+ *   заглушек. Задача, поставленная заглушкой, исполнилась бы по первому же
+ *   чтению списка, и срок закрытия по часам не был бы проверен.
  * @property {Map<string, MenuItem | SeparatorItem>} actions общая карта активов.
  * @property {ShowCall[]} shows вызовы `showPopover` в порядке вызовов.
  * @property {string[]} hides идентификаторы уровней в порядке вызовов
  *   `hidePopover`.
+ * @property {number[]} hiddenAt `performance.now()` в момент каждого вызова
+ *   `hidePopover`. Читается обёрткой, и момент выхода из Top Layer измеряется
+ *   теми же часами, которыми идёт отсчёт в кейсе.
  * @property {ScheduledTask[]} tasks висящие задачи в порядке постановки.
  * @property {unknown[]} cancelled жесты задач в порядке снятия.
  * @property {() => number} runTasks выполняет все висящие задачи по порядку и
@@ -94,6 +100,14 @@ const VIEWPORT = { width: 1000, height: 700 };
  * равенство со своим — нет.
  */
 const TEST_ANIMATION_DURATION = 137;
+
+/**
+ * Пауза перед `hide` внутри идущего перехода входа. Нужна, чтобы отличить таймер от
+ * слушателя `transitionend`: слушатель поймал бы конец перехода, начавшегося при
+ * показе, и закрыл бы уровень раньше срока. Взята заметно меньше длительности, иначе
+ * переход входа успел бы завершиться и разница со сроком таймера исчезла бы.
+ */
+const ENTRY_TRANSITION_WAIT_MS = 40;
 
 const ANCHOR_LEFT = 8;
 const ANCHOR_RIGHT_EDGE = 10;
@@ -149,19 +163,6 @@ const WIDE_ITEMS = [
   { label: 'Достаточно длинная подпись пункта' },
   { label: 'Вторая длинная подпись пункта' },
   { label: 'Третья длинная подпись пункта меню' },
-];
-
-/**
- * Фикстура для кейсов о фокусе. Отключённый пункт стоит первым, иначе выбор
- * первого доступного попытался бы попасть в него и кейс про отключённые пункты
- * ничего бы не различал.
- *
- * @type {Array<MenuItem | SeparatorItem>}
- */
-const FOCUS_ITEMS = [
-  { label: 'Отключённый', disabled: true },
-  { label: 'Первый доступный' },
-  { label: 'Второй доступный', submenu: [{ label: 'Внутри' }] },
 ];
 
 /**
@@ -249,9 +250,12 @@ test.beforeEach(async ({ page }) => {
       });
       nativeShow.call(this);
     };
+    /** @type {number[]} */
+    const hiddenAt = [];
     const nativeHide = globalThis.HTMLElement.prototype.hidePopover;
     globalThis.HTMLElement.prototype.hidePopover = function () {
       hides.push(this.id);
+      hiddenAt.push(globalThis.performance.now());
       nativeHide.call(this);
     };
 
@@ -310,6 +314,7 @@ test.beforeEach(async ({ page }) => {
       actions,
       shows,
       hides,
+      hiddenAt,
       tasks,
       cancelled,
       runTasks,
@@ -332,6 +337,10 @@ test.beforeEach(async ({ page }) => {
       },
       bare() {
         return createLayer(base);
+      },
+      real() {
+        const { schedule, cancel, ...rest } = base;
+        return createLayer({ ...rest, animationDuration: config.animationDuration });
       },
     });
 
@@ -965,54 +974,71 @@ test.describe('закрытие', () => {
     expect(result.afterFresh.hides).toBe(1);
   });
 
-  test('закрытие: переход самого уровня закрывает меню, переход потомка — нет', async ({ page }) => {
-    // Настоящее движение: под `reduce` отложенного закрытия нет вовсе, и
-    // `transitionend` нечего было бы слушать.
+  test('закрытие: уровень уходит из Top Layer ровно через animationDuration, и переход на это не влияет', async ({ page }) => {
+    // Настоящее движение и настоящие часы: под `reduce` отложенности нет вовсе, а
+    // задача, поставленная заглушкой, исполнилась бы по первому же чтению списка
+    // и ничего не сказала бы о сроке.
     await page.emulateMedia({ reducedMotion: 'no-preference' });
-    const result = await page.evaluate(({ rootItems, nestedItems }) => {
+    await page.evaluate(async ({ rootItems, subItems, duration, entryWait }) => {
       const host = /** @type { { __vcProbe: LayerProbe } } */ (/** @type { unknown } */ (globalThis));
-      const probe = host.__vcProbe;
-      const layer = probe.create();
+      const layer = host.__vcProbe.real();
       const root = layer.ensureLevel(rootItems, null, 0, null);
-      // Второй уровень строится из фикстуры с владельцем подменю: у пункта с
-      // непустым подменю есть шеврон, а у шеврона свой `transform` с переходом.
-      const sub = layer.ensureLevel(nestedItems, root, 1, root.items[0]);
+      const sub = layer.ensureLevel(subItems, root, 1, root.items[0]);
       layer.showRoot(root, { x: 40, y: 40 });
       layer.showSubmenu(sub);
-
+      /**
+       * @param {number} ms
+       * @returns {Promise<void>}
+       */
+      const wait = (ms) => {
+        return new Promise((resolve) => {
+          globalThis.setTimeout(resolve, ms);
+        });
+      };
+      // Закрытие назначается, пока переход входа ещё идёт. Именно этим отличается
+      // таймер от слушателя `transitionend`: слушатель поймал бы конец чужого,
+      // идущего с момента показа, перехода и закрыл бы уровень раньше срока.
+      await wait(entryWait);
+      const at = globalThis.performance.now();
+      // Контрольный таймер той же длительности ставится в ту же миллисекунду.
+      // Его срабатывание несёт всю задержку платформы: она одинакова для обоих
+      // таймеров, и потому вычитается, а не терпится допуском.
+      let control = 0;
+      globalThis.setTimeout(() => {
+        control = globalThis.performance.now() - at;
+      }, duration);
       layer.hide(sub);
-      const scheduled = probe.tasks.length;
-
-      // Переход потомка всплывает к уровню: шеврон крутит свой `transform` на
-      // `data-chevron` и его `transitionend` долетает до уровня. Закрывать по
-      // нему нельзя — меню ушло бы в момент чужой анимации.
-      const chevron = /** @type {HTMLElement} */ (
-        sub.element.querySelector('.vc-chevron')
+      await wait(duration * 4);
+      const marks = /** @type {{ __vcMarks: { control: number, hideAt: number } }} */ (
+        /** @type {unknown} */ (globalThis)
       );
-      chevron.dispatchEvent(new Event('transitionend', { bubbles: true }));
-      const afterDescendant = {
-        open: sub.element.matches(':popover-open'),
-        hides: probe.hides.length,
-        pending: probe.tasks.length,
+      marks.__vcMarks = { control, hideAt: at };
+    }, {
+      rootItems: ROOT_ITEMS,
+      subItems: SUB_ITEMS,
+      duration: TEST_ANIMATION_DURATION,
+      entryWait: ENTRY_TRANSITION_WAIT_MS,
+    });
+    const marks = await page.evaluate(() => {
+      const page_ = /** @type {{ __vcProbe: LayerProbe, __vcMarks: { control: number, hideAt: number } }} */ (
+        /** @type {unknown} */ (globalThis)
+      );
+      return {
+        control: page_.__vcMarks.control,
+        hideAt: page_.__vcMarks.hideAt,
+        hiddenAt: page_.__vcProbe.hiddenAt[page_.__vcProbe.hiddenAt.length - 1],
       };
+    });
 
-      // Переход самого уровня: `opacity` и `transform` в `styles/mycontext.css`.
-      sub.element.dispatchEvent(new Event('transitionend', { bubbles: true }));
-      const afterOwn = {
-        open: sub.element.matches(':popover-open'),
-        hides: probe.hides.length,
-        pending: probe.tasks.length,
-      };
-
-      return { scheduled, afterDescendant, afterOwn };
-    }, { rootItems: ROOT_ITEMS, nestedItems: NESTED_ITEMS });
-
-    // Задача-страховка стоит: закрывает уровень и она, если переход не придёт.
-    expect(result.scheduled).toBe(1);
-    expect(result.afterDescendant).toEqual({ open: true, hides: 0, pending: 1 });
-    // Свой переход закрывает сразу и снимает страховку: держать её после
-    // закрытия незачем.
-    expect(result.afterOwn).toEqual({ open: false, hides: 1, pending: 0 });
+    const elapsed = marks.hiddenAt - marks.hideAt;
+    // Уровень не ушёл из Top Layer мгновенно: до срока он в нём и остаётся, и
+    // переход `opacity` и `transform` всё это время идёт.
+    expect(elapsed).toBeGreaterThan(ENTRY_TRANSITION_WAIT_MS + 20);
+    // И ушёл не по чужому переходу: срок закрытия совпадает со сроком
+    // контрольного таймера той же длительности. Допуск в 8 мс — меньше сдвига в
+    // 10 мс, который кейс обязан ловить, и при этом заведомо больше разницы между
+    // двумя таймерами, поставленными в одну миллисекунду.
+    expect(Math.abs(elapsed - marks.control)).toBeLessThanOrEqual(8);
   });
 
   test('reduced-motion: hidePopover вызывается немедленно, без задачи в планировщике', async ({ page }) => {
@@ -1392,11 +1418,11 @@ test.describe('уровни', () => {
   });
 
   test('тема и длительность достаются до каждого уровня', async ({ page }) => {
-    const result = await page.evaluate(({ focusItems, subItems }) => {
+    const result = await page.evaluate(({ rootItems, subItems }) => {
       const host = /** @type { { __vcProbe: LayerProbe } } */ (/** @type { unknown } */ (globalThis));
       const probe = host.__vcProbe;
       const layer = probe.create({ theme: 'dark' });
-      const root = layer.ensureLevel(focusItems, null, 0, null);
+      const root = layer.ensureLevel(rootItems, null, 0, null);
       const sub = layer.ensureLevel(subItems, root, 1, root.items[2]);
       // Уровень обязан быть показан: у отцепленного узла `getComputedStyle` не
       // вычисляет и пользовательские свойства, и проверка была бы пустой.
@@ -1418,7 +1444,7 @@ test.describe('уровни', () => {
         // `applyAnimationDuration`.
         durations: [durationOf(root.element), durationOf(sub.element)],
       };
-    }, { focusItems: FOCUS_ITEMS, subItems: SUB_ITEMS });
+    }, { rootItems: ROOT_ITEMS, subItems: SUB_ITEMS });
 
     // Тема достаётся и до подменю: подменю — часть того же меню, и оформлено
     // оно тем же набором токенов.
@@ -1531,89 +1557,3 @@ test.describe('уровни', () => {
   });
 });
 
-test.describe('фокус', () => {
-  test('setFocusOwner: фокус уходит в первый доступный пункт, отметка не двоится, снятие её убирает', async ({ page }) => {
-    const result = await page.evaluate(({ focusItems, subItems }) => {
-      const host = /** @type { { __vcProbe: LayerProbe } } */ (/** @type { unknown } */ (globalThis));
-      const probe = host.__vcProbe;
-      const layer = probe.create();
-      const root = layer.ensureLevel(focusItems, null, 0, null);
-      layer.showRoot(root, { x: 40, y: 40 });
-      const sub = layer.ensureLevel(subItems, root, 1, root.items[2]);
-      layer.showSubmenu(sub);
-
-      layer.setFocusOwner(root);
-      // Отключённый пункт первым не встаёт: он вне цикла роуминга, иначе
-      // `tabindex="0"` достался бы неактивному элементу.
-      const afterRoot = {
-        activeIndex: root.activeIndex,
-        tabIndex: root.items[1].element.tabIndex,
-        disabledTabIndex: root.items[0].element.tabIndex,
-        focused: document.activeElement === root.items[1].element,
-        // Ровно один пункт уровня несёт `tabindex="0"`.
-        marked: root.items.filter((item) => {
-          return item.element.tabIndex === 0;
-        }).length,
-      };
-
-      // Передача фокуса подменю снимает отметку с предыдущего уровня, иначе в
-      // документе окажется два кандидата в цикл роуминга сразу.
-      layer.setFocusOwner(sub);
-      const afterSub = {
-        rootActiveIndex: root.activeIndex,
-        rootTabIndex: root.items[1].element.tabIndex,
-        subActiveIndex: sub.activeIndex,
-        subTabIndex: sub.items[0].element.tabIndex,
-        subFocused: document.activeElement === sub.items[0].element,
-        marked: [root, sub].map((entry) => {
-          return entry.items.filter((item) => {
-            return item.element.tabIndex === 0;
-          }).length;
-        }),
-      };
-
-      // `null` снимает отметку и не трогает фокус: возврат фокуса на
-      // элемент-владелец меню делает вызывающий код, он знает этот элемент.
-      layer.setFocusOwner(null);
-      const afterNull = {
-        activeIndex: sub.activeIndex,
-        tabIndex: sub.items[0].element.tabIndex,
-        stillFocused: document.activeElement === sub.items[0].element,
-      };
-
-      // После `destroy` — no-op: узлы отцеплены, и ни отметка, ни фокус на них
-      // не встают.
-      layer.destroy();
-      let threw = false;
-      try {
-        layer.setFocusOwner(root);
-      } catch {
-        threw = true;
-      }
-      return {
-        afterRoot,
-        afterSub,
-        afterNull,
-        afterDestroy: { threw, activeIndex: root.activeIndex, tabIndex: root.items[1].element.tabIndex },
-      };
-    }, { focusItems: FOCUS_ITEMS, subItems: SUB_ITEMS });
-
-    expect(result.afterRoot).toEqual({
-      activeIndex: 1,
-      tabIndex: 0,
-      disabledTabIndex: -1,
-      focused: true,
-      marked: 1,
-    });
-    expect(result.afterSub).toEqual({
-      rootActiveIndex: -1,
-      rootTabIndex: -1,
-      subActiveIndex: 0,
-      subTabIndex: 0,
-      subFocused: true,
-      marked: [0, 1],
-    });
-    expect(result.afterNull).toEqual({ activeIndex: -1, tabIndex: -1, stillFocused: true });
-    expect(result.afterDestroy).toEqual({ threw: false, activeIndex: -1, tabIndex: -1 });
-  });
-});

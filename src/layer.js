@@ -45,12 +45,17 @@ import { applyAnimationDuration, applyTheme } from './theme.js';
  * означал бы, что позиция выведена из габаритов `0×0`.
  *
  * **`hidePopover()` убирает элемент из Top Layer мгновенно**, и выходной анимации
- * не было бы. Поэтому закрытие отложено на `animationDuration`, а закрывает его
- * либо `transitionend` по переходу самого меню, либо страховочный таймер:
- * прерванный переход и переход нулевой длительности не присылают `transitionend`
- * вовсе. Отложенное закрытие отменяется показом того же уровня, иначе только что
- * открытое меню исчезло бы, — отменяет его поколение: каждое действие с уровнем
- * увеличивает счётчик, а задача закрытия смотрит на тот, который запомнила.
+ * не было бы. Поэтому закрытие отложено ровно на `animationDuration`, и закрывает
+ * его таймер — единственный. `transitionend` в этом деле не участвует вовсе, и
+ * слушать его бессмысленно по устройству платформы: выходной переход *вызывается*
+ * `hidePopover()`, то есть единственным его источником был бы тот же таймер, а
+ * настоящее `transitionend` приходит на одну длительность позже — уже никому.
+ * Визуальный выход при этом есть: переход `opacity` и `transform` идёт, пока узел
+ * остаётся в Top Layer ровно на `animationDuration`.
+ *
+ * Отложенное закрытие отменяется показом того же уровня, иначе только что открытое
+ * меню исчезло бы, — отменяет его поколение: каждое действие с уровнем увеличивает
+ * счётчик, а задача закрытия смотрит на тот, который запомнила.
  *
  * **`prefers-reduced-motion: reduce` пропускает отложенность целиком, а не
  * сокращает её.** Медиазапрос читается в момент закрытия, а не при создании слоя.
@@ -108,9 +113,10 @@ import { applyAnimationDuration, applyTheme } from './theme.js';
  *   хотя до истечения отложенного закрытия узел ещё видим и лежит в Top Layer.
  * @property {number} generation счётчик поколений. Растёт на каждом показе и на
  *   каждом закрытии; отложенное закрытие действует только при совпадении.
- * @property {number} activeIndex индекс пункта, владеющего фокусом уровня, или
- *   `-1`, если такого пункта нет. Заполняет `setFocusOwner`; движок роуминга
- *   вправе вести его сам по этому же полю.
+ * @property {number} activeIndex индекс пункта, которому движок роуминга передал
+ *   фокус в уровне, или `-1`, если такого пункта нет. Слой инициализирует его и
+ *   больше не трогает: `tabindex` и фокус принадлежат движку роуминга, и второй
+ *   их владелец развёл бы состояние по двум писателям.
  */
 
 /**
@@ -158,8 +164,9 @@ import { applyAnimationDuration, applyTheme } from './theme.js';
  *   бросает `Error`.
  * @property {(entry: LevelEntry, anchor: Point) => void} showRoot
  *   Показывает корневой уровень в точке `anchor` вьюпорта. Отменяет отложенное
- *   закрытие этого уровня, снимает всякое состояние `data-active` с его пунктов и
- *   переносит уровень в конец `<body>`.
+ *   закрытие этого уровня и переносит его в конец `<body>`. Пункты не трогает:
+ *   `data-active` и `tabindex` принадлежат движку роуминга, и слой не должен
+ *   становиться их вторым владельцем.
  * @property {(entry: LevelEntry) => void} showSubmenu
  *   Показывает уровень-подменю относительно прямоугольника пункта-владельца.
  *   Отменяет отложенное закрытие уровня, ставит владельцу `aria-expanded="true"`,
@@ -170,11 +177,6 @@ import { applyAnimationDuration, applyTheme } from './theme.js';
  * @property {() => void} hideAll
  *   Закрывает всю цепочку, от глубоких уровней к корню. DOM не трогает: уровни
  *   переиспользуются при следующем открытии.
- * @property {(entry: LevelEntry | null) => void} setFocusOwner
- *   Передаёт фокус уровню: снимает `tabindex="0"` с предыдущего владельца фокуса,
- *   ставит его первому доступному фокусу пункту и фокусирует его. `null` снимает
- *   отметку с последнего владельца и ничего не фокусирует — возврат фокуса на
- *   элемент-владелец меню делает вызывающий код, он знает этот элемент.
  * @property {() => void} destroy
  *   Снимает висящие задачи, вызывает `hidePopover` на каждом заведённом уровне,
  *   удаляет их из DOM и чистит состояние. Повторный вызов безопасен, остальные
@@ -297,10 +299,6 @@ export function createLayer(options) {
   const levels = [];
   /** @type {Map<LevelEntry, unknown>} */
   const pendingHides = new Map();
-  /** @type {Map<LevelEntry, (event: Event) => void>} */
-  const pendingTransitions = new Map();
-  /** @type {LevelEntry | null} */
-  let focusOwner = null;
   let destroyed = false;
 
   /**
@@ -463,11 +461,6 @@ export function createLayer(options) {
    * @returns {void}
    */
   function clearPendingHide(entry) {
-    const listener = pendingTransitions.get(entry);
-    if (listener !== undefined) {
-      entry.element.removeEventListener('transitionend', listener);
-      pendingTransitions.delete(entry);
-    }
     const handle = pendingHides.get(entry);
     if (handle !== undefined) {
       cancel(handle);
@@ -510,31 +503,10 @@ export function createLayer(options) {
       return;
     }
     const element = entry.element;
-    /**
-     * Переход могут закончить и потомки, поэтому сворачивается только переход
-     * самого уровня. Слушатель снимается вручную, а не по `once`: чужая
-     * `transitionend` иначе унесла бы его, и страховка по таймеру осталась бы без
-     * перехода.
-     *
-     * @param {Event} event
-     * @returns {void}
-     */
-    const onTransitionEnd = (event) => {
-      if (event.target !== element) {
-        return;
-      }
-      clearPendingHide(entry);
-      if (entry.generation === generation) {
-        element.hidePopover();
-      }
-    };
-    pendingTransitions.set(entry, onTransitionEnd);
-    element.addEventListener('transitionend', onTransitionEnd);
-    // Таймер — страховка: прерванный переход и переход нулевой длительности не
-    // присылают `transitionend` вовсе.
+    // Единственный источник закрытия. Проверка поколения стоит ДО уборки: задача,
+    // чьё поколение устарело, не должна снять задачу нового, иначе меню осталось
+    // бы висеть навсегда — закрывать его больше некому.
     const handle = schedule(() => {
-      // Задача, чьё поколение устарело, не трогает ничего — включая висящую задачу
-      // нового поколения, которую иначе она сняла бы, и меню осталось бы висеть.
       if (entry.generation !== generation) {
         return;
       }
@@ -593,53 +565,6 @@ export function createLayer(options) {
     }
   }
 
-  /**
-   * @param {LevelEntry} entry
-   * @returns {void}
-   */
-  function clearRoving(entry) {
-    for (const item of entry.items) {
-      item.element.tabIndex = -1;
-    }
-    entry.activeIndex = -1;
-  }
-
-  /**
-   * @param {LevelEntry | null} entry уровень, которому передаётся фокус.
-   * @returns {void}
-   */
-  function setFocusOwner(entry) {
-    if (destroyed) {
-      return;
-    }
-    if (entry === null) {
-      if (focusOwner !== null) {
-        clearRoving(focusOwner);
-        focusOwner = null;
-      }
-      return;
-    }
-    if (focusOwner !== null && focusOwner !== entry) {
-      clearRoving(focusOwner);
-    }
-    focusOwner = entry;
-    // В цикл роуминга входят только доступные фокусу пункты: разделители и
-    // отключённые выпадают.
-    const index = entry.items.findIndex((item) => {
-      return item.focusable;
-    });
-    if (index === -1) {
-      entry.activeIndex = -1;
-      return;
-    }
-    entry.activeIndex = index;
-    const element = entry.items[index].element;
-    element.tabIndex = 0;
-    // `preventScroll` обязателен: выпадающий список уровня длиннее вьюпорта, и
-    // автопрокрутка утащила бы страницу к первому пункту.
-    element.focus({ preventScroll: true });
-  }
-
   function destroy() {
     if (destroyed) {
       return;
@@ -655,7 +580,6 @@ export function createLayer(options) {
     }
     levels.length = 0;
     root = null;
-    focusOwner = null;
   }
 
   return {
@@ -664,7 +588,6 @@ export function createLayer(options) {
     showSubmenu,
     hide,
     hideAll,
-    setFocusOwner,
     destroy,
   };
 }
