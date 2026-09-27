@@ -38,6 +38,7 @@ const PAGE_HTML = `<!doctype html>
 const LONG_SENTENCE = 'Очень длинный лейбл пункта меню, который обязан превратиться в многоточие';
 const LABEL_400 = LONG_SENTENCE.repeat(7).slice(0, 400);
 const LABEL_200 = LONG_SENTENCE.repeat(3).slice(0, 200);
+const NARROW_LABEL = 'Копировать';
 
 /** @type {IconConfig} */
 const EMOJI = { type: 'emoji', value: '📄' };
@@ -123,7 +124,7 @@ test.describe('пункт', () => {
       className: 'vc-item',
       tabindex: '-1',
       active: false,
-      key: '0:0',
+      key: 'vc-level-0:0',
       focusable: true,
       hasSubmenu: false,
       label: 'Открыть',
@@ -206,7 +207,7 @@ test.describe('пункт', () => {
       chevron: 'right',
       hasSubmenu: true,
       focusable: true,
-      key: '0:4',
+      key: 'vc-level-0:4',
       chevrons: 1,
       children: ['vc-icon-slot', 'vc-label', 'vc-chevron'],
       owns: 'vc-level-0-sub-4',
@@ -244,7 +245,7 @@ test.describe('пункт', () => {
         }).includes(item),
         children: item.element.children.length,
         // Ключа нет — значит, нет и записи в общей карте активов.
-        separatorKeyed: actions.has('0:2'),
+        separatorKeyed: actions.has('vc-level-0:2'),
       };
     }, FIXTURE_ITEMS);
 
@@ -328,8 +329,8 @@ test.describe('нумерация уровня', () => {
         posInSet: menuItems.map((element) => {
           return element.getAttribute('aria-posinset');
         }),
-        // Ключ внутренний — по позиции в исходном массиве, а не в
-        // не-разделительном ряду: сдвиг разделителя не обязан двигать ключ
+        // Ключ внутренний — `menuId` и позиция в исходном массиве, а не позиция
+        // в не-разделительном ряду: сдвиг разделителя не обязан двигать ключ
         // соседних пунктов.
         keys: level.items.map((entry) => {
           return entry.key;
@@ -342,11 +343,11 @@ test.describe('нумерация уровня', () => {
     expect(result).toEqual({
       setSize: ['3', '3', '3'],
       posInSet: ['1', '2', '3'],
-      keys: ['0:0', '0:1', null, '0:3'],
+      keys: ['vc-level-0:0', 'vc-level-0:1', null, 'vc-level-0:3'],
     });
   });
 
-  test('renderItem вне уровня: aria-setsize из аргумента, ключ из контекста, aria-posinset достаёт уровень', async ({ page }) => {
+  test('renderItem вне уровня: aria-setsize из аргумента, ключ из menuId, aria-posinset достаёт уровень', async ({ page }) => {
     const result = await page.evaluate(async () => {
       const { renderItem } = await import('../../src/renderer.js');
       const item = renderItem(
@@ -368,12 +369,16 @@ test.describe('нумерация уровня', () => {
     // Позицию в не-разделительном ряду знает только уровень: число разделителей
     // перед пунктом внутри `renderItem` недоступно, поэтому `aria-posinset`
     // проставляет `renderLevel`, а одиночный вызов остаётся без него.
+    //
+    // Ключ при этом `menuId` содержит, хотя `levelIndex` равно 2: идентификатор
+    // уровня, а не его глубина — иначе два экземпляра на странице столкнулись бы
+    // на корневых пунктах.
     expect(result).toEqual({
       role: 'menuitem',
       ariaLevel: '3',
       ariaSetSize: '5',
       ariaPosInSet: false,
-      key: '2:7',
+      key: 'vc-level-2:7',
       focusable: true,
     });
   });
@@ -494,7 +499,7 @@ test.describe('сетка пункта', () => {
   });
 
   test('иконки: лейблы с иконкой и без совпадают по координате X', async ({ page }) => {
-    const result = await page.evaluate(async (levelItems) => {
+    const result = await page.evaluate(async ({ levelItems, iconSize }) => {
       const { renderLevel } = await import('../../src/renderer.js');
       const level = renderLevel(levelItems, {
         levelIndex: 0,
@@ -506,33 +511,179 @@ test.describe('сетка пункта', () => {
       host.replaceChildren(level.element);
       level.element.showPopover();
       /**
+       * Координата, выведенная из геометрии сетки, а не из второго пункта:
+       * равенство «левая граница лейбла у пункта с иконкой равна такой же у
+       * пункта без» прошло бы и при `grid-template-columns` без иконной дорожки,
+       * потому что тогда оба лейбла начинались бы в одном месте — просто в
+       * другом. Опора на `padding + дорожка иконки + зазор` такой провал
+       * ловит.
+       *
        * @param {number} index
-       * @returns {number}
+       * @returns {{ labelX: number, expectedX: number }}
        */
-      const labelX = (index) => {
-        const label = /** @type {HTMLElement} */ (
-          level.items[index].element.querySelector('.vc-label')
-        );
-        return label.getBoundingClientRect().x;
+      const labelPlace = (index) => {
+        const item = level.items[index].element;
+        const label = /** @type {HTMLElement} */ (item.querySelector('.vc-label'));
+        const style = getComputedStyle(item);
+        return {
+          labelX: label.getBoundingClientRect().x,
+          expectedX: item.getBoundingClientRect().x
+            + Number.parseFloat(style.paddingLeft)
+            + iconSize
+            + Number.parseFloat(style.columnGap),
+        };
       };
       return {
         // Индексы 0 и 1 фикстуры: с иконкой и без.
-        withIcon: labelX(0),
-        withoutIcon: labelX(1),
+        withIcon: labelPlace(0),
+        withoutIcon: labelPlace(1),
       };
-    }, FIXTURE_ITEMS);
+    }, { levelItems: FIXTURE_ITEMS, iconSize: DEFAULT_ICON_SIZE });
 
-    expect(result.withIcon).toBe(result.withoutIcon);
+    expect(result.withIcon.labelX).toBe(result.withIcon.expectedX);
+    // Слот зарезервирован, поэтому у пункта без иконки координата та же самая, а
+    // не «какая получится».
+    expect(result.withoutIcon.labelX).toBe(result.withoutIcon.expectedX);
+    expect(result.withIcon.labelX).toBe(result.withoutIcon.labelX);
+  });
+
+  test('шеврон что-то рисует: у ::before есть ненулевая толщина рамки', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderLevel } = await import('../../src/renderer.js');
+      const level = renderLevel([{ label: 'Экспорт', submenu: [{ label: 'PDF' }] }], {
+        levelIndex: 0,
+        menuId: 'vc-level-0',
+        label: 'Меню файла',
+        actions: new Map(),
+      });
+      const host = /** @type {HTMLElement} */ (document.getElementById('host'));
+      host.replaceChildren(level.element);
+      level.element.showPopover();
+      const chevron = /** @type {HTMLElement} */ (
+        level.items[0].element.querySelector('.vc-chevron')
+      );
+      // Псевдоэлемент читается только через `getComputedStyle` со вторым
+      // аргументом: в разметке его нет, и `querySelector` его не увидит.
+      const glyph = getComputedStyle(chevron, '::before');
+      return {
+        // Псевдоэлемент обязан быть порождён, иначе все остальные значения были
+        // бы начальными, а не вычисленными.
+        content: glyph.content,
+        widths: [glyph.borderTopWidth, glyph.borderRightWidth,
+          glyph.borderBottomWidth, glyph.borderLeftWidth].map(Number.parseFloat),
+        styles: [glyph.borderTopStyle, glyph.borderRightStyle,
+          glyph.borderBottomStyle, glyph.borderLeftStyle],
+        colors: [glyph.borderTopColor, glyph.borderRightColor,
+          glyph.borderBottomColor, glyph.borderLeftColor],
+        size: [Number.parseFloat(glyph.width), Number.parseFloat(glyph.height)],
+        transform: glyph.transform,
+        // Глиф обязан переехать на цвет строки: на активном пункте шеврон
+        // наследует `--vc-accent-text`, и серая стрелка на заливке акцентом
+        // дала бы 1.05:1.
+        color: glyph.borderRightColor,
+        chevronColor: getComputedStyle(chevron).color,
+      };
+    });
+
+    expect(result.content, 'порождён ли ::before').not.toBe('none');
+    // Рамка непустая, видимая и покрывает ровно две соседние стороны: диагональ
+    // срезанного угла и есть глиф. Толщина без `style: solid` нарисовала бы
+    // ровно ничего.
+    const drawn = result.widths
+      .map((width, index) => {
+        return width > 0 && result.styles[index] === 'solid' ? index : -1;
+      })
+      .filter((index) => {
+        return index > -1;
+      });
+    expect(drawn).toEqual([1, 2]);
+    for (const color of result.colors) {
+      expect(color, `цвет рамки ${color}`).not.toBe('rgba(0, 0, 0, 0)');
+    }
+    // Квадрат, иначе угол получится не 45°, а что-то другое.
+    expect(result.size[0]).toBe(result.size[1]);
+    // Поворот глифа обязателен: квадрат без него — это угол, а не стрелка.
+    expect(result.transform).not.toBe('none');
+    expect(result.color).toBe(result.chevronColor);
+  });
+
+  test('шеврон реально разворачивается: transform в состояниях left и right различаются', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderLevel } = await import('../../src/renderer.js');
+      const level = renderLevel([
+        { label: 'Вправо', submenu: [{ label: 'A' }] },
+        { label: 'Влево', submenu: [{ label: 'B' }] },
+      ], {
+        levelIndex: 0,
+        menuId: 'vc-level-0',
+        label: 'Меню файла',
+        actions: new Map(),
+      });
+      const host = /** @type {HTMLElement} */ (document.getElementById('host'));
+      host.replaceChildren(level.element);
+      level.element.showPopover();
+      /**
+       * Угол поворота из вычисленного `transform`. Сравнение строк вида
+       * `matrix(1, 0, 0, 1, 0, 0)` против `matrix(-1, 0, 0, -1, 0, 0)` годно и
+       * для пустого шеврона, поэтому утверждение делается об угле: развернутый
+       * глиф обязан отличаться от базового на 180°, а не «быть не тождественным».
+       *
+       * Два движка хранят матрицу поворота на 180° точно, третий оставляет
+       * остаточные `-1.2e-16` вместо нуля, и угол приходит то `-π`, то `+π`.
+       * Знак нормализуется, иначе утверждение зависело бы от версии движка.
+       *
+       * @param {string} transform вычисленное значение `transform`.
+       * @returns {number} угол в радианах, 0..2π.
+       */
+      const angleOf = (transform) => {
+        const parts = /matrix\(([^)]+)\)/.exec(transform);
+        // База без объявленного поворота — тождественное преобразование, а не
+        // «нет преобразования»: глиф повёрнут внутри себя, на 45° рамками.
+        if (parts === null) {
+          return 0;
+        }
+        const numbers = /** @type {string[]} */ (/** @type {unknown} */ (parts))[1]
+          .split(',')
+          .map((part) => Number(part.trim()));
+        const angle = Math.atan2(numbers[1] ?? 0, numbers[0] ?? 1);
+        return angle < 0 ? angle + 2 * Math.PI : angle;
+      };
+      const right = /** @type {HTMLElement} */ (
+        level.items[0].element.querySelector('.vc-chevron')
+      );
+      const left = /** @type {HTMLElement} */ (
+        level.items[1].element.querySelector('.vc-chevron')
+      );
+      // `data-chevron="left"` ставит движок позициониции (задача 8), когда
+      // подменю пришлось открыть слева. Здесь состояние задаётся руками: кейс
+      // проверяет разворот, а не то, кто его инициировал.
+      level.items[1].element.dataset.chevron = 'left';
+      return {
+        rightAttribute: level.items[0].element.getAttribute('data-chevron'),
+        leftAttribute: level.items[1].element.getAttribute('data-chevron'),
+        right: angleOf(getComputedStyle(right).transform),
+        left: angleOf(getComputedStyle(left).transform),
+      };
+    });
+
+    // Состояния действительно разные, иначе поворот не о чем было бы читать.
+    expect(result.rightAttribute).toBe('right');
+    expect(result.leftAttribute).toBe('left');
+    // Базовое состояние — стрелка вправо, то есть без поворота: глиф повернут
+    // внутри себя, на 45° рамками квадрата.
+    expect(result.right).toBeCloseTo(0, 5);
+    expect(result.left).toBeCloseTo(Math.PI, 5);
+    expect(Math.abs(result.right - result.left)).toBeCloseTo(Math.PI, 5);
   });
 
   test('длинный лейбл уходит в многоточие, а ширина меню не растёт', async ({ page }) => {
-    // Вьюпорт сужается намеренно: `width: max-content` без `max-width` дал бы
-    // меню шириной во всю длину лейбла, и сравнивать его с эталоном из коротких
-    // подписей было бы бессмысленно — эталон просто оказался бы уже. Обе фикстуры
-    // обязаны упереться в одно и то же ограничение, и тогда равенство ширин
-    // говорит именно то, что проверяется: длина подписи на ширину не влияет.
+    // Вьюпорт сужается намеренно: при широком вьюпорте меню с длинным лейблом
+    // разошлось бы на всю длину подписи, многоточие не сработало бы вовсе, и
+    // кейс проверял бы только `max-width`. Обе фикстуры обязаны упереться в одно
+    // ограничение, и тогда равенство ширин говорит именно то, что проверяется:
+    // длина подписи не выводит меню за предел.
     await page.setViewportSize({ width: 360, height: 640 });
-    const result = await page.evaluate(async ({ long, short }) => {
+    const result = await page.evaluate(async ({ long, short, narrow, padding }) => {
       const { renderLevel } = await import('../../src/renderer.js');
       /**
        * @param {string} hostId
@@ -551,18 +702,27 @@ test.describe('сетка пункта', () => {
         level.element.showPopover();
         return level;
       };
-      // Оба меню остаются в документе до конца замера: узел, не вставленный в
+      // Все меню остаются в документе до конца замера: узел, не вставленный в
       // документ, не имеет габаритов, и `scrollWidth` у его лейбла совпал бы с
       // `clientWidth` — многоточие выглядело бы сработавшим, не сработав.
       const longLevel = open('host', [{ label: long }]);
-      const shortLevel = open('host-2', [{ label: short }]);
+      // Третье меню — короткая подпись. Оно умещается в предел целиком, и
+      // поэтому отвечает на вопрос, на который равенство ниже ответить не может:
+      // ширина идёт за содержимым, а предел остаётся пределом.
+      const narrowWidth = open('host-2', [{ label: narrow }]).element
+        .getBoundingClientRect().width;
+      const shortWidth = open('host-2', [{ label: short }]).element
+        .getBoundingClientRect().width;
       const label = /** @type {HTMLElement} */ (
         longLevel.items[0].element.querySelector('.vc-label')
       );
       return {
         longWidth: longLevel.element.getBoundingClientRect().width,
-        shortWidth: shortLevel.element.getBoundingClientRect().width,
-        limit: window.innerWidth - 2 * 8,
+        shortWidth,
+        narrowWidth,
+        // `SAFETY_PADDING` приходит из импорта снаружи, а не переписывается
+        // здесь константой: расхождение двух записанных чисел было бы незаметным.
+        limit: window.innerWidth - 2 * padding,
         // Многоточие обязано именно сработать: подрезанный по дорожке лейбл —
         // это и есть признак, что `min-width: 0` на месте.
         clipped: label.scrollWidth > label.clientWidth,
@@ -570,21 +730,30 @@ test.describe('сетка пункта', () => {
         whiteSpace: getComputedStyle(label).whiteSpace,
         itemHeight: longLevel.items[0].element.getBoundingClientRect().height,
       };
-    }, { long: LABEL_400, short: LABEL_200 });
+    }, { long: LABEL_400, short: LABEL_200, narrow: NARROW_LABEL, padding: SAFETY_PADDING });
 
     expect(result.clipped).toBe(true);
     expect(result.ellipsis).toBe('ellipsis');
     expect(result.whiteSpace).toBe('nowrap');
     // Строка не выросла: `height`, а не `min-height`, держит пункт.
     expect(result.itemHeight).toBe(DEFAULT_ITEM_HEIGHT);
-    // Оба меню упёрлись в `max-width`, и длина подписи на это не повлияла.
     expect(result.limit).toBe(360 - 2 * SAFETY_PADDING);
+    // Оба меню упёрлись в `max-width`, и длина подписи на это не повлияла.
     expect(result.longWidth).toBe(result.limit);
     expect(result.shortWidth).toBe(result.limit);
+    // Равенство ширин выше — слепое: его прошло бы и меню с фиксированной
+    // шириной в `100dvw - 2 * padding`. Опора одна — короткая подпись умещается
+    // в предел целиком, то есть предел остаётся пределом, а ширина идёт за
+    // содержимым. Обратное утверждение (`longWidth` строго уже предела)
+    // невозможно вместе с `clipped`: лейбл обрезается ровно тогда, когда меню
+    // упёрлось в `max-width`, иначе строка `1fr` дорожки равнялась бы
+    // max-content лейбла и обрезать было бы нечего.
+    expect(result.narrowWidth).toBeLessThan(result.limit);
+    expect(result.longWidth).toBeGreaterThan(result.narrowWidth);
   });
 
   test('колонки не сдвигаются: ширина меню одинакова для пунктов с иконкой и без', async ({ page }) => {
-    const result = await page.evaluate(async (square) => {
+    const result = await page.evaluate(async ({ square, padding }) => {
       const { renderLevel } = await import('../../src/renderer.js');
       /**
        * @param {Array<MenuItem | SeparatorItem>} items
@@ -612,12 +781,15 @@ test.describe('сетка пункта', () => {
         { label: 'Достаточно длинная подпись пункта' },
         { label: 'Короткая' },
       ]);
-      return { withIcon, withoutIcon };
-    }, SQUARE_SVG);
+      return { withIcon, withoutIcon, limit: window.innerWidth - 2 * padding };
+    }, { square: SQUARE_SVG, padding: SAFETY_PADDING });
 
     // Меню жмётся по содержимому, поэтому убрать иконку без последствий нельзя:
     // слот зарезервирован, и ширина не меняется.
     expect(result.withIcon).toBe(result.withoutIcon);
+    // Равенство выше слепое: меню с фиксированной шириной дало бы ровно его.
+    // Опора — ширина идёт за содержимым, то есть меню не растянуто до предела.
+    expect(result.withIcon).toBeLessThan(result.limit);
   });
 });
 
@@ -654,9 +826,9 @@ test.describe('ключи и коллбэки', () => {
     });
 
     expect(result).toEqual({
-      keys: ['0:0', '0:1', '0:2'],
+      keys: ['vc-level-0:0', 'vc-level-0:1', 'vc-level-0:2'],
       dataIds: ['x', 'x', null],
-      actionKeys: ['0:0', '0:1', '0:2'],
+      actionKeys: ['vc-level-0:0', 'vc-level-0:1', 'vc-level-0:2'],
       actionCount: 3,
     });
   });
@@ -692,7 +864,7 @@ test.describe('ключи и коллбэки', () => {
           return name.startsWith('on');
         });
       });
-      const first = actions.get('0:0');
+      const first = actions.get('vc-level-0:0');
       if (first !== undefined && first.action !== undefined) {
         first.action(new MouseEvent('click'));
       }
@@ -705,7 +877,7 @@ test.describe('ключи и коллбэки', () => {
           return entry.key;
         }),
         // Разделитель ключа не получает: коллбэка у него нет и быть не может.
-        separatorKeyed: actions.has('0:2'),
+        separatorKeyed: actions.has('vc-level-0:2'),
         handlerAttributes,
         calls: [...calls],
       };
@@ -713,9 +885,16 @@ test.describe('ключи и коллбэки', () => {
 
     // Коллбэк доступен по внутреннему ключу и не сработал сам при рендере.
     expect(result.size).toBe(3);
-    expect(result.keys).toEqual(['0:0', '0:1', '0:3']);
+    expect(result.keys).toEqual(['vc-level-0:0', 'vc-level-0:1', 'vc-level-0:3']);
     expect(result.separatorKeyed).toBe(false);
     expect(result.calls).toEqual(['первое']);
+    // Ключ на узле и ключ в карте — одна и та же строка, а не две записи одного
+    // инварианта: расхождение означало бы, что `level.items[i].key` не найдёт
+    // своего пункта в карте `actions`. `null` у разделителя в карте нет, поэтому
+    // сравниваются только ключи пунктов.
+    expect(result.itemKeys.filter((key) => {
+      return key !== null;
+    })).toEqual(result.keys);
     // Ни одного обработчика в разметке: элементы меню не несут функций.
     expect(result.handlerAttributes).toEqual([]);
   });
@@ -747,16 +926,70 @@ test.describe('ключи и коллбэки', () => {
         keys: [...actions.keys()],
         rootKey: root.items[0].key,
         childKey: child.items[0].key,
-        // Ключ уровня входит в ключ пункта, поэтому пункты разных уровней не
+        // `menuId` входит в ключ пункта, поэтому пункты разных уровней не
         // затёрли друг друга.
         distinct: root.items[0].key !== child.items[0].key,
       };
     });
 
-    expect(result.keys).toEqual(['0:0', '1:0']);
-    expect(result.rootKey).toBe('0:0');
-    expect(result.childKey).toBe('1:0');
+    expect(result.keys).toEqual(['vc-level-0:0', 'vc-level-1:0']);
+    expect(result.rootKey).toBe('vc-level-0:0');
+    expect(result.childKey).toBe('vc-level-1:0');
     expect(result.distinct).toBe(true);
+  });
+
+  test('внутренний ключ уникален между экземплярами: два меню с одинаковым levelIndex не сталкиваются в общей карте', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderLevel } = await import('../../src/renderer.js');
+      /** @type {string[]} */
+      const calls = [];
+      const actions = new Map();
+      /**
+       * @param {string} tag метка экземпляра: попадает в подпись и в `action`.
+       * @returns {import('../../src/renderer.js').RenderedLevel}
+       */
+      const build = (tag) => {
+        return renderLevel([
+          { label: `Первый ${tag}`, action: () => { calls.push(`первый:${tag}`); } },
+          { label: `Второй ${tag}`, action: () => { calls.push(`второй:${tag}`); } },
+        ], {
+          // Оба экземпляра — на глубине 0: различает их только `menuId`.
+          levelIndex: 0,
+          menuId: `vc-${tag}-0`,
+          label: 'Меню файла',
+          actions,
+        });
+      };
+      const first = build('a');
+      const second = build('b');
+      // Активация пункта `1` у второго экземпляра обязана вызвать его же
+      // обработчик: коллизия ключей необратима, ведь ключ не перевыводится из
+      // DOM в момент клика.
+      const target = actions.get(second.items[1].key);
+      if (target !== undefined && target.action !== undefined) {
+        target.action(new MouseEvent('click'));
+      }
+      return {
+        firstKeys: first.items.map((entry) => {
+          return entry.key;
+        }),
+        secondKeys: second.items.map((entry) => {
+          return entry.key;
+        }),
+        mapKeys: [...actions.keys()],
+        mapSize: actions.size,
+        calls: [...calls],
+      };
+    });
+
+    expect(result.firstKeys).toEqual(['vc-a-0:0', 'vc-a-0:1']);
+    expect(result.secondKeys).toEqual(['vc-b-0:0', 'vc-b-0:1']);
+    // Четыре записи, а не две: с ключом по `levelIndex` второй экземпляр
+    // перезаписал бы первый молча, и `0:1` остался бы один — с чужим действием.
+    expect(result.mapSize).toBe(4);
+    expect(result.mapKeys).toEqual(['vc-a-0:0', 'vc-a-0:1', 'vc-b-0:0', 'vc-b-0:1']);
+    expect(new Set(result.mapKeys).size).toBe(4);
+    expect(result.calls).toEqual(['второй:b']);
   });
 });
 
@@ -858,6 +1091,61 @@ test.describe('каркас уровня', () => {
     expect(result.owns).not.toContain('vc-level-1');
     expect(result.reservedExists).toEqual([false, false, false, false]);
     expect(result.prefixed).toBe(true);
+  });
+
+  test('aria-owns уникальны между экземплярами', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderLevel } = await import('../../src/renderer.js');
+      /**
+       * @param {string} hostId
+       * @param {string} menuId
+       * @returns {import('../../src/renderer.js').RenderedLevel}
+       */
+      const render = (hostId, menuId) => {
+        const level = renderLevel([
+          { label: 'Первый', submenu: [{ label: 'A' }] },
+          { label: 'Второй', submenu: [{ label: 'B' }] },
+        ], {
+          // Глубина у обоих экземпляров одна и та же, и различает их только
+          // `menuId` — из него выводится и адрес зарезервированного подменю.
+          levelIndex: 0,
+          menuId,
+          label: 'Меню файла',
+          actions: new Map(),
+        });
+        /** @type {HTMLElement} */ (document.getElementById(hostId))
+          .replaceChildren(level.element);
+        return level;
+      };
+      const first = render('host', 'vc-a-0');
+      const second = render('host-2', 'vc-b-0');
+      return {
+        first: first.items.map((entry) => {
+          return entry.element.getAttribute('aria-owns');
+        }),
+        second: second.items.map((entry) => {
+          return entry.element.getAttribute('aria-owns');
+        }),
+        levelIds: [first.element.id, second.element.id],
+        // Ни одна зарезервированная цель не совпадает с id чужого уровня: иначе
+        // `aria-owns` вёл бы на элемент другого экземпляра.
+        collidesWithLevelId: [
+          ...first.items, ...second.items,
+        ].some((entry) => {
+          const owns = entry.element.getAttribute('aria-owns');
+          return owns === first.element.id || owns === second.element.id;
+        }),
+      };
+    });
+
+    expect(result.levelIds).toEqual(['vc-a-0', 'vc-b-0']);
+    expect(result.first).toEqual(['vc-a-0-sub-0', 'vc-a-0-sub-1']);
+    expect(result.second).toEqual(['vc-b-0-sub-0', 'vc-b-0-sub-1']);
+    // Четыре адреса на два экземпляра: с производной только от позиции
+    // `vc-a-0-sub-0` повторился бы в обоих, и два подменю получили бы один id.
+    const all = [...result.first, ...result.second];
+    expect(new Set(all).size).toBe(4);
+    expect(result.collidesWithLevelId).toBe(false);
   });
 
   test('пустое подменю не считается подменю', async ({ page }) => {
