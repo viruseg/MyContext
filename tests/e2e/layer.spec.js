@@ -1134,7 +1134,26 @@ test.describe('закрытие', () => {
         open: element.matches(':popover-open'),
         pointerEvents: style.pointerEvents,
       };
-      return { before, hitBefore, atHide, midFade, subId: sub.element.id };
+
+      // Показ во время отложенного закрытия: отменяет задачу и снимает отметку,
+      // иначе переоткрытое меню осталось бы прозрачным и не принимало бы событий.
+      layer.showSubmenu(sub);
+      const atReshow = {
+        closing: element.hasAttribute('data-vc-closing'),
+        pointerEvents: style.pointerEvents,
+        open: element.matches(':popover-open'),
+      };
+      await wait(duration);
+      const afterReshow = { opacity: Number.parseFloat(style.opacity) };
+      return {
+        before,
+        hitBefore,
+        atHide,
+        midFade,
+        atReshow,
+        afterReshow,
+        subId: sub.element.id,
+      };
     }, { rootItems: ROOT_ITEMS, subItems: SUB_ITEMS, duration: TEST_ANIMATION_DURATION });
 
     // До закрытия уровень обычный: непрозрачный, принимает события, отметки нет.
@@ -1166,6 +1185,10 @@ test.describe('закрытие', () => {
     expect(marks.midFade.closing).toBe(true);
     expect(marks.midFade.open).toBe(true);
     expect(marks.midFade.pointerEvents).toBe('none');
+    // Показ снимает отметку закрытия: иначе переоткрытое меню осталось бы
+    // прозрачным и не принимало бы событий — то есть не открылось бы вовсе.
+    expect(marks.atReshow).toEqual({ closing: false, pointerEvents: 'auto', open: true });
+    expect(marks.afterReshow.opacity).toBeGreaterThan(0.98);
   });
 
   test('reduced-motion: hidePopover вызывается немедленно, без задачи в планировщике', async ({ page }) => {
@@ -1190,12 +1213,16 @@ test.describe('закрытие', () => {
         pending: probe.tasks.length,
         hides: probe.hides.length,
         entryOpen: sub.open,
+        // Отложенности нет — значит нет и состояния закрытия: под `reduce`
+        // переходов нет, и `data-vc-closing` погасил бы уровень мгновенно.
+        closing: sub.element.hasAttribute('data-vc-closing'),
       };
     }, { rootItems: ROOT_ITEMS, subItems: SUB_ITEMS });
 
     // Контроль: кейс обязан исполнить ветку `reduce`, иначе всё остальное
     // проверяло бы обычное отложенное закрытие.
     expect(result.reduced).toBe(true);
+    expect(result.closing).toBe(false);
     expect(result.open).toBe(false);
     expect(result.pending).toBe(0);
     expect(result.hides).toBe(1);
