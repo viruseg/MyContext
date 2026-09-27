@@ -285,7 +285,7 @@ git commit -m "feat: движок позиционирования с flip и cl
    * @property {() => void} cancelAll
    */
   ```
-  Время в модуле задаётся исключительно через `schedule`. Отдельной опции для
+  Время задаётся исключительно через `schedule`. Отдельной опции для
   чтения текущего времени не существует и не должно появляться: опция, которая
   принята в контракте, но не читается, — это обещание, которое модуль не держит.
 
@@ -697,7 +697,7 @@ git commit -m "feat: рендерер уровней меню с фиксиро�
    * @property {string} label
    * @property {'auto'|'light'|'dark'} theme
    * @property {number} animationDuration
-   * @property {Map<string, MenuItem>} actions  общий для всех уровней, передаётся по ссылке
+   * @property {Map<string, MenuItem>} actions  общий для всех уровней, передаётся по ссылке; принадлежит экземпляру и очищается в `MyContext.destroy()`
    * @property {(fn: () => void, ms: number) => unknown} [schedule]
    * @property {(handle: unknown) => void} [cancel]
    * @property {MediaQueryList} [reducedMotionQuery]
