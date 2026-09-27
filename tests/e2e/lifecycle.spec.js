@@ -240,6 +240,20 @@ function rightClick(page, point) {
 }
 
 /**
+ * Правый клик и снимок после него: короткая запись для кейсов, где важно только
+ * «меню открылось».
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {{ x: number, y: number }} [point]
+ * @returns {Promise<Snapshot>}
+ */
+function rightClickAndRead(page, point = WORKSPACE_POINT) {
+  return page.mouse.click(point.x, point.y, { button: 'right' }).then(() => {
+    return readMenu(page);
+  });
+}
+
+/**
  * @param {import('@playwright/test').Page} page
  * @param {string} label
  * @returns {import('@playwright/test').Locator}
@@ -437,6 +451,18 @@ test.beforeEach(async ({ page }) => {
         },
         { label: 'Пустой', submenu: [], action: () => log.push('пустой') },
         { label: 'Живой', submenu: [{ label: 'Под живым' }], action: () => log.push('живой') },
+      ],
+      // Пункт-владелец с собственным действием и лист в одном уровне: клик по
+      // владельцу открывает подменю и не зовёт его действие, клик по листу зовёт.
+      // Оба пункта в одном уровне — иначе «клик по владельцу ничего не зовёт» можно
+      // было бы объяснить тем, что обработчика активации нет вовсе.
+      mixed: [
+        {
+          label: 'Владелец',
+          submenu: [{ label: 'Под владельцем' }],
+          action: () => log.push('владелец'),
+        },
+        { label: 'Лист', action: () => log.push('лист') },
       ],
       // Первый пункт тихий, второй ломается: нажатие на обоих подряд отделяет
       // «исключение пробрасывается» от «меню закрывается».
@@ -655,13 +681,20 @@ test.describe('жизненный цикл MyContext', () => {
     expect(afterClick.openCount, 'подменю не открыто').toBe(1);
     expect(afterClick.actionsSize, 'уровень так и не появился').toBe(4);
 
-    // Контроль живости: клик по доступному пункту выполняет именно его действие.
-    // Без него пустой журнал ничего не доказывал бы — обработчика активации могло
-    // бы не быть вовсе.
+    // Клик по владельцу с непустым подменю открывает подменю, а его действие не
+    // зовёт: пустой журнал здесь — не «обработчика нет», а правило владельца.
     await itemByLabel(page, 'Живой').click();
-    const afterLive = await readMenu(page);
-    expect(afterLive.log).toEqual(['живой']);
-    expect(afterLive.openCount, 'меню закрылось после действия').toBe(0);
+    const afterOwner = await readMenu(page);
+    expect(afterOwner.log, 'действие владельца не вызвано').toEqual([]);
+    expect(afterOwner.openCount, 'подменю владельца открыто').toBe(2);
+
+    // Контроль живости: клик по пункту без подменю выполняет его действие и закрывает
+    // меню. Раньше контролем был клик по владельцу, и он доказывал не то.
+    await page.keyboard.press('Escape');
+    await itemByLabel(page, 'Пустой').click();
+    const afterLeaf = await readMenu(page);
+    expect(afterLeaf.log).toEqual(['пустой']);
+    expect(afterLeaf.openCount, 'меню закрылось после действия').toBe(0);
   });
 
   test('attach: пункт с disabled и подменю не открывает подменю по ArrowRight', async ({ page }) => {
@@ -879,7 +912,73 @@ test.describe('жизненный цикл MyContext', () => {
     expect(second.levels).toHaveLength(0);
   });
 
-  test('attach, open и close после destroy() бросают Error', async ({ page }) => {
+  test('клик по пункту-владельцу открывает подменю и не вызывает его action, а лист вызывает свой', async ({ page }) => {
+    await makeMenu(page, 'mixed', 'workspace');
+    await rightClick(page, WORKSPACE_POINT);
+
+    await itemByLabel(page, 'Владелец').click();
+    const afterOwner = await readMenu(page);
+    // Открылось подменю, а не «ничего»: уровень владельца заведён на шаг вперёд
+    // при показе корня, и клик по владельцу его показывает.
+    expect(afterOwner.openCount, 'подменю открыто').toBe(2);
+    expect(openIds(afterOwner), 'открыто подменю владельца').toEqual([
+      afterOwner.levels[0].id,
+      /** @type {string} */ (afterOwner.levels[0].items[0].owns),
+    ]);
+    // Правило владельца: его собственное действие не вызывается. Журнал пуст не
+    // потому, что обработчика нет, — вторая половина кейса это доказывает.
+    expect(afterOwner.log, 'action владельца не вызван').toEqual([]);
+    // Фокус ушёл в подменю: показанный уровень обязан быть отдан движку, а
+    // `focusFirst` — единственная его регистрация, и она же переносит фокус.
+    expect(afterOwner.focusLabel, 'фокус в подменю').toBe('Под владельцем');
+    expect(afterOwner.focusInMenu, 'фокус не покинул меню').toBe(true);
+
+    await page.keyboard.press('Escape');
+    await itemByLabel(page, 'Лист').click();
+    const afterLeaf = await readMenu(page);
+    // Пункт без подменю активируется как прежде и закрывает меню.
+    expect(afterLeaf.log, 'action листа вызван').toEqual(['лист']);
+    expect(afterLeaf.openCount, 'меню закрыто').toBe(0);
+  });
+
+  test('attach() бросает Error с названием требования, если браузер не умеет Popover API', async ({ page }) => {
+    await makeMenu(page, 'flat', 'workspace');
+
+    const result = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      const proto = /** @type {{ showPopover?: unknown }} */ (
+        /** @type {unknown} */ (globalThis.HTMLElement.prototype)
+      );
+      const native = proto.showPopover;
+      delete proto.showPopover;
+      /** @type {string | null} */
+      let message = null;
+      try {
+        scope.__mc.attach('workspace');
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      // Возврат настоящего метода в том же кадре и повторная привязка: без них кейс
+      // прошёл бы и на «attach бросает всегда», и не доказывал бы, что дело в
+      // проверке поддержки.
+      if (native !== undefined) {
+        proto.showPopover = native;
+      }
+      scope.__mc.attach('workspace');
+      return message;
+    });
+
+    expect(result, 'attach бросил').not.toBeNull();
+    expect(/** @type {string} */ (result)).toContain('showPopover');
+    expect(/** @type {string} */ (result)).toContain('Popover API');
+
+    // Возврат методов после кейса обязателен: следующие кейсы живут в той же
+    // странице, и без восстановления `attach` падал бы у всех.
+    const after = await rightClickAndRead(page);
+    expect(after.openCount, 'меню открылось после восстановления').toBe(1);
+  });
+
+  test('attach, open, close и detach после destroy() бросают Error', async ({ page }) => {
     await makeMenu(page, 'flat', 'workspace');
     await destroyMenu(page);
 
@@ -898,6 +997,9 @@ test.describe('жизненный цикл MyContext', () => {
         () => {
           probe.close();
         },
+        () => {
+          probe.detach();
+        },
       ]) {
         try {
           call();
@@ -915,15 +1017,18 @@ test.describe('жизненный цикл MyContext', () => {
       'MyContext: экземпляр уничтожен',
       'MyContext: экземпляр уничтожен',
       'MyContext: экземпляр уничтожен',
+      'MyContext: экземпляр уничтожен',
     ]);
   });
 
   test('destroy() снимает слушатель contextmenu с контейнера', async ({ page }) => {
     await makeMenu(page, 'flat', 'workspace');
     const removed = (await destroyMenu(page)).removed;
-    // Слушатель снят с самого контейнера, а не с документа и не с меню: иначе
-    // привязка пережила бы экземпляр и держала бы его замыканием.
-    expect(removed).toEqual([{ type: 'contextmenu', target: 'workspace' }]);
+    // Снятие с самого контейнера, а не с документа и не с меню: иначе привязка
+    // пережила бы экземпляр и держала бы его замыканием. Сравнение по присутствию, а
+    // не по точному составу массива: снимать слушатели будут и Tasks 10–11, и
+    // требование «лишних снятий нет» к ним не относится.
+    expect(removed).toContainEqual({ type: 'contextmenu', target: 'workspace' });
 
     await rightClick(page, WORKSPACE_POINT);
 
@@ -938,9 +1043,10 @@ test.describe('жизненный цикл MyContext', () => {
   test('detach() снимает привязку: правый клик по контейнеру больше не открывает меню', async ({ page }) => {
     await makeMenu(page, 'flat', 'workspace');
     const detached = await detachMenu(page);
-    expect(detached.removed, 'слушатель снят с контейнера').toEqual([
-      { type: 'contextmenu', target: 'workspace' },
-    ]);
+    expect(detached.removed, 'слушатель снят с контейнера').toContainEqual({
+      type: 'contextmenu',
+      target: 'workspace',
+    });
 
     await rightClick(page, WORKSPACE_POINT);
 
@@ -1064,7 +1170,10 @@ test.describe('жизненный цикл MyContext', () => {
     const after = await readMenu(page);
     // `Enter` активирует пункт, а не открывает пустое подменю, и закрывает меню.
     expect(after.log, 'пункт активирован').toEqual(['пустой']);
-    expect(after.levels, 'уровень так и не заведён').toHaveLength(1);
+    // Заведённого, но не показанного уровня в разметке нет вовсе — он отцепленный
+    // узел, — поэтому «уровень не заведён» проверяется по карте действий: три ключа
+    // корня и один ключ подменю доступного владельца, ни одного от пустого.
+    expect(after.actionsSize, 'уровень пустого подменю не заведён').toBe(4);
     expect(after.openCount, 'подменю не появилось').toBe(0);
   });
 
@@ -1085,9 +1194,13 @@ test.describe('жизненный цикл MyContext', () => {
     // Разметку владельца ставит рендерер по непустоте подменю, независимо от
     // `disabled`, и оркестратор не имеет права её отбирать: `aria-owns` и
     // `data-chevron` принадлежат рендереру, как и `aria-level`.
+    // ВНИМАНИЕ, следующая задача: решение Task 10 о том, что владельцем является
+    // только непустое подменю у доступного пункта, отнимет шеврон у отключённого
+    // владельца. Это утверждение — снимок сегодняшней разметки, а не контракт
+    // оркестратора, и меняться будет.
     expect(deaf.label).toBe('Глухой');
     expect(deaf.disabled).toBe(true);
-    expect(deaf.chevron, 'шеврон у владельца есть').toBe('right');
+    expect(deaf.chevron, 'шеврон у владельца есть (см. предупреждение выше)').toBe('right');
     expect(deaf.owns, 'зарезервированный адрес подменю есть').not.toBeNull();
     expect(live.label).toBe('Живой');
     expect(live.owns, 'у владельцев разные зарезервированные адреса').not.toBe(deaf.owns);

@@ -49,6 +49,17 @@ export const DEGENERATE_AREA = 25;
 export const DEFAULT_ANIMATION_DURATION = 140;
 
 /**
+ * `options.label` по умолчанию: доступное имя меню. Лежит здесь, а не в
+ * `src/MyContext.js`, по той же причине, что и остальные дефолты опций, — видно
+ * всем, кто их читает, включая тесты.
+ *
+ * Подставляется вместо пустой строки потому, что имя у уровня обязательно
+ * (`createLayer` требует строку), а `aria-label=""` не читается и не проходит
+ * аудит доступности. Автор может переопределить его своим.
+ */
+export const DEFAULT_MENU_LABEL = 'Меню';
+
+/**
  * Значение CSS-переменной `--vc-item-height` по умолчанию, px.
  */
 export const DEFAULT_ITEM_HEIGHT = 28;
