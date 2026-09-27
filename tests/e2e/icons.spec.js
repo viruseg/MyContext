@@ -448,6 +448,60 @@ test.describe('svg', () => {
     });
   });
 
+  test('внутренний url() в кавычках тоже сохраняется', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      const el = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg">'
+          + '<defs><linearGradient id="grad"><stop offset="0" stop-color="red"/></linearGradient></defs>'
+          // Кавычки записаны сущностями, и это не украшение: санитизация видит уже
+          // разобранное значение, поэтому `&quot;` к моменту проверки — обычные
+          // кавычки вокруг имени фрагмента.
+          + '<path d="M0 0h16v16H0z" fill="url(&quot;#grad&quot;)"/>'
+          + '<circle cx="8" cy="8" r="4" fill="url(&apos;#grad&apos;)"/>'
+          + '</svg>',
+      });
+      return {
+        pathFill: el.querySelectorAll('path')[0].getAttribute('fill'),
+        circleFill: el.querySelectorAll('circle')[0].getAttribute('fill'),
+      };
+    });
+
+    // Кавычки не влияют на то, что ссылка ведёт внутрь того же документа, поэтому
+    // отбрасывать их было бы ложным срабатыванием без выигрыша в безопасности.
+    expect(result).toEqual({
+      pathFill: 'url("#grad")',
+      circleFill: "url('#grad')",
+    });
+  });
+
+  test('внутренний url() с пробелами сохраняется', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      const el = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg">'
+          + '<defs>'
+          + '<linearGradient id="grad"><stop offset="0" stop-color="red"/></linearGradient>'
+          + '<clipPath id="clip"><rect x="0" y="0" width="8" height="8"/></clipPath>'
+          + '</defs>'
+          + '<path d="M0 0h16v16H0z" fill="url( #grad )"/>'
+          + '<circle cx="8" cy="8" r="4" clip-path="url(  #clip  )"/>'
+          + '</svg>',
+      });
+      return {
+        pathFill: el.querySelectorAll('path')[0].getAttribute('fill'),
+        circleClipPath: el.querySelectorAll('circle')[0].getAttribute('clip-path'),
+      };
+    });
+
+    expect(result).toEqual({
+      pathFill: 'url( #grad )',
+      circleClipPath: 'url(  #clip  )',
+    });
+  });
+
   test('url( без фрагмента удаляется в любом атрибуте', async ({ page }) => {
     const result = await page.evaluate(async () => {
       const { renderIcon } = await import('../../src/icons.js');
