@@ -1082,6 +1082,14 @@ test.describe('роуминг-фокус', () => {
     expect(result.steps[0].levels.root.focusLabel).toBe('Пункт 40');
     expect(result.steps[0].levels.root.items[39].inView).toBe(true);
     expect(result.steps[0].levels.root.list.scrollTop).toBeGreaterThan(0);
+    // Прокрутка ровно минимальная: список встал в самый низ, а не подогнал пункт под
+    // верхний край. `block: 'start'` дал бы 1092 вместо 446, и кейс, который
+    // проверяет только «пункт виден и список прокрутился», такого бы не увидел.
+    expect(result.steps[0].levels.root.list.scrollTop).toBeCloseTo(
+      result.steps[0].levels.root.list.scrollHeight
+      - result.steps[0].levels.root.list.clientHeight,
+      0,
+    );
     expect(result.steps[0].levels.root.tabStops).toBe(1);
     expect(result.steps[0].levels.root.activeMarks).toBe(1);
     // Обратный шаг тоже остаётся в кадре: `block: 'nearest'` долистывает ровно
