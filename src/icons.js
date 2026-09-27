@@ -3,20 +3,19 @@
  * слота `.vc-icon-slot`.
  *
  * Модуль — граница безопасности библиотеки. Разметка типа `svg` приходит от
- * автора меню, поэтому чистится по белому списку элементов, а не по запрету
- * отдельных имён: запрет `script` и `on*` перестаёт работать в тот момент,
- * когда придумают следующий вектор, а белый список от такого не ломается.
- * Удаление элемента уносит его поддерево — так отсекается `foreignObject`,
- * внутри которого разметка была бы уже в другом пространстве имён.
+ * автора меню, поэтому чистится по белым спискам — элементов и атрибутов, — а не
+ * по набору запретов. Запрет отдельного имени или вида атрибута находит следующий
+ * вектор уже после того, как его кто-то выдумал, и три раза за правки этого
+ * модуля список запретов оказывался короче реальности: `script` и `on*` ушли
+ * первыми, потом `style`, потом `url(` в presentation-атрибутах, потом `class`,
+ * `data-*`, `overflow`, `pointer-events`, `tabindex` и `xl:href`. Белый список от
+ * такого не ломается: `class` и `data-*` были прямым мостом из недоверенной
+ * разметки в стили и поведение страницы, а объявленный `xmlns:xl` давал внешнюю
+ * ссылку под именем, не совпадающим ни с одним правилом.
  *
- * Белый список задан по элементам и ничего не говорит об атрибутах, поэтому
- * политика по ним выражена явно: `on*` и `style` вырезаются, `href` и
- * `xlink:href` остаются только у ссылки на фрагмент текущего документа, а любое
- * `url(...)` в значении — только вида `url(#имя)`. Внешняя ссылка приходит тремя
- * путями, и все три закрыты: через `href`, через `style` и через
- * presentation-атрибуты вроде `fill="url(https://…)"` и `filter="url(https://…)"`.
- * Иначе проходило бы всё не названное: `position: fixed` в `style` перекрывает
- * меню, а `url(...)` уводит запросы наружу при каждом открытии.
+ * Удаление элемента уносит его поддерево — так отсекается `foreignObject`,
+ * внутри которого разметка была бы уже в другом пространстве имён. Из прочих
+ * узлов остаются только текст и CDATA.
  *
  * Контракты двух экспортов различаются намеренно. `sanitizeSvg` бросает `Error`
  * на неразобранном входе: у него один вызывающий, `renderIcon`, и тот обязан
@@ -92,7 +91,45 @@ const ALLOWED_ELEMENTS = new Set([
   'stop',
 ]);
 
-const HREF_ATTRIBUTES = ['href', 'xlink:href'];
+const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
+
+const XLINK_NAMESPACE = 'http://www.w3.org/1999/xlink';
+
+/**
+ * Белый список атрибутов: геометрия и представление, плюс `id` для внутренних
+ * ссылок. `href` добавлен к списку плана — без него `use` и градиенты не
+ * ссылались бы сами на себя.
+ *
+ * Всё, чего в списке нет, удаляется безусловно, без отдельных правил: `class` и
+ * `data-*` были мостом из недоверенной разметки в стили и поведение страницы,
+ * `style` — тем же плюс оверлеем, `on*` — исполнением, `tabindex` — безымянной
+ * точкой фокуса в `aria-hidden` поддереве, `overflow` и `pointer-events` —
+ * unclips вьюпорта и перехватом клика, `aria-*` и `role` — выдуманной семантикой.
+ * Перечислить их запретом значило бы искать следующий вектор по памяти.
+ */
+const ALLOWED_ATTRIBUTES = new Set([
+  // Геометрия.
+  'd', 'cx', 'cy', 'r', 'rx', 'ry', 'x', 'y', 'x1', 'y1', 'x2', 'y2',
+  'width', 'height', 'points', 'pathLength',
+  // Трансформации и единицы градиентов, масок и маркеров.
+  'transform', 'gradientTransform', 'gradientUnits', 'patternUnits', 'patternContentUnits',
+  'clipPathUnits', 'maskUnits', 'maskContentUnits', 'markerWidth', 'markerHeight', 'markerUnits',
+  'refX', 'refY', 'orient', 'offset', 'viewBox', 'preserveAspectRatio',
+  // Представление.
+  'fill', 'fill-rule', 'fill-opacity',
+  'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'stroke-miterlimit',
+  'stroke-dasharray', 'stroke-dashoffset', 'stroke-opacity', 'opacity',
+  'color', 'stop-color', 'stop-opacity',
+  'font-family', 'font-size', 'font-weight',
+  'text-anchor', 'dominant-baseline', 'letter-spacing', 'word-spacing',
+  'clip-path', 'clip-rule', 'mask', 'filter',
+  'marker-start', 'marker-mid', 'marker-end',
+  // Отрисовка и текст.
+  'display', 'visibility', 'vector-effect', 'shape-rendering', 'paint-order',
+  'color-interpolation', 'color-interpolation-filters',
+  // Собственные ссылки разметки.
+  'id', 'href',
+]);
 
 const RASTER_PROTOCOLS = new Set(['http:', 'https:']);
 
@@ -137,25 +174,45 @@ function hasOnlyInternalUrls(value) {
 }
 
 /**
- * @param {Element} element элемент, очищаемый от обработчиков, `style` и внешних ссылок.
+ * Проверка идёт по паре `namespaceURI` + `localName`, а не по строке
+ * квалифицированного имени. Пространства имён разрешаются по URI, а не по
+ * префиксу: объявленный `xmlns:xl` даёт `xl:href` совершенно другое
+ * пространство, хотя `localName` у него тот же, что у `href`, и строка
+ * `xl:href` не совпала бы ни с одним правилом.
+ *
+ * @param {Attr} attribute проверяемый атрибут.
+ * @returns {boolean} `true`, если атрибут разрешён.
+ */
+function isAllowedAttribute(attribute) {
+  if (attribute.namespaceURI === null) {
+    // Разрешённые имена живут в своём пространстве имён: presentation-атрибут
+    // SVG не принадлежит никакому. Префикс — уже чужое пространство, то есть
+    // другой атрибут, даже когда `localName` совпал.
+    return ALLOWED_ATTRIBUTES.has(attribute.localName);
+  }
+  // `xlink:href` — единственный разрешённый именованный атрибут: SVG 1.1 требует
+  // его для ссылок, и без него иконки с `xlink:href` потеряли бы ссылку.
+  return attribute.namespaceURI === XLINK_NAMESPACE && attribute.localName === 'href';
+}
+
+/**
+ * @param {Attr} attribute проверяемый атрибут.
+ * @returns {boolean} `true`, если атрибут — ссылка `href` или `xlink:href`.
+ */
+function isHrefAttribute(attribute) {
+  return attribute.localName === 'href'
+    && (attribute.namespaceURI === null || attribute.namespaceURI === XLINK_NAMESPACE);
+}
+
+/**
+ * @param {Element} element элемент, очищаемый от всего, чего нет в белом списке.
  * @returns {void}
  */
 function scrubElement(element) {
   for (const attribute of Array.from(element.attributes)) {
-    const { name } = attribute;
-    // Регистр не различается: в XML-разборе `ONFOCUS` и `STYLE` — отдельные от
-    // обработчика и стиля имена, но вырезаются бесплатно.
-    const normalized = name.toLowerCase();
-    if (normalized.startsWith('on') || normalized === 'style') {
-      element.removeAttribute(name);
-      continue;
-    }
-    if (HREF_ATTRIBUTES.includes(normalized) && !isFragmentHref(attribute.value)) {
-      element.removeAttribute(name);
-      continue;
-    }
-    if (!hasOnlyInternalUrls(attribute.value)) {
-      element.removeAttribute(name);
+    const badHref = isHrefAttribute(attribute) && !isFragmentHref(attribute.value);
+    if (!isAllowedAttribute(attribute) || badHref || !hasOnlyInternalUrls(attribute.value)) {
+      element.removeAttribute(attribute.name);
     }
   }
 }
@@ -195,6 +252,15 @@ function applyRootAttributes(root) {
   root.setAttribute('height', '100%');
   root.setAttribute('aria-hidden', 'true');
   root.setAttribute('focusable', 'false');
+  // Авторский `overflow` — presentation-атрибут, то есть источник автора, и он
+  // перебивает правило UA-стилей: вьюпорт иконки unclips, а вместе с
+  // `pointer-events` это оверлей, перехватывающий клики. Ровно тот же результат,
+  // что давал `style`, но без него.
+  root.setAttribute('overflow', 'hidden');
+  // Каноническое пространство выставляется принудительно: объявления `xmlns*`
+  // вырезаются белым списком, и очищенный узел не должен зависеть от того, что
+  // написал автор.
+  root.setAttribute('xmlns', SVG_NAMESPACE);
 }
 
 /**
@@ -208,16 +274,18 @@ function createEmptySpan(className) {
 }
 
 /**
- * Разбирает разметку SVG и оставляет в ней только белый список элементов без
- * обработчиков, без `style` и без ссылок вовне.
+ * Разбирает разметку SVG и оставляет в ней только белые списки — элементов и
+ * атрибутов — плюс текст.
  *
- * Элементы вне белого списка удаляются вместе с поддеревом, узлы комментариев и
- * инструкций обработки — точками. У каждого уцелевшего элемента, включая корень,
- * вырезаются обработчики `on*` и атрибут `style` целиком, `href` и `xlink:href`
- * остаются только тогда, когда значение ведёт во фрагмент текущего документа, а
- * атрибут с `url(...)` не на фрагмент — тоже: `fill="url(#grad)"` нужен, чтобы
- * работали градиенты, а `fill="url(https://…)"` открывает внешний запрос.
- * Корневому `svg` принудительно выставляются размеры и признаки декоративности.
+ * Элементы вне списка удаляются вместе с поддеревом, узлы комментариев и инструкций
+ * обработки — точками. Атрибут вне списка удаляется у каждого уцелевшего элемента,
+ * включая корень, поэтому `class`, `data-*`, `style`, `on*`, `tabindex`, `overflow`,
+ * `pointer-events`, `role`, `aria-*` и объявления `xmlns*` исчезают сами собой.
+ * Ссылки `href` и `xlink:href`, если уцелели, ведут только во фрагмент текущего
+ * документа, а значение с `url(...)` — только вида `url(#имя)`: `fill="url(#grad)"`
+ * нужен, чтобы работали градиенты, а `fill="url(https://…)"` открывает внешний
+ * запрос. Корневому `svg` принудительно выставляются размеры, признаки
+ * декоративности, `overflow` и каноническое пространство имён.
  *
  * @param {string} svgText разбираемая разметка.
  * @returns {SVGSVGElement} очищенный корневой узел.

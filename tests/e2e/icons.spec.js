@@ -199,8 +199,8 @@ test.describe('svg', () => {
     // `ONFOCUS` в XML-разборе сохраняет регистр и в HTML-документе обработчиком не
     // стал бы, но вырезается вместе с остальными: цена нулевая.
     expect(names.filter((name) => name.toLowerCase().startsWith('on'))).toEqual([]);
-    // Санитизация трогает только обработчики, `style` и ссылки: `xmlns`, геометрия,
-    // заливка и принудительные атрибуты корня целы, ничего лишнего не добавлено.
+    // Осталось ровно то, что на белом списке атрибутов плюс шесть принудительных
+    // у корня: обработчики, `class` и `data-*` не выживают по построению.
     expect(names.sort()).toEqual([
       'aria-hidden',
       'd',
@@ -208,6 +208,7 @@ test.describe('svg', () => {
       'focusable',
       'height',
       'id',
+      'overflow',
       'width',
       'xmlns',
     ]);
@@ -239,6 +240,7 @@ test.describe('svg', () => {
       'focusable',
       'height',
       'id',
+      'overflow',
       'width',
       'xmlns',
     ]);
@@ -554,6 +556,296 @@ test.describe('svg', () => {
       { fill: null, stroke: 'url(#grad)' },
     ]);
     expect(result.markup).not.toContain('evil.example');
+  });
+
+  test('class и data-* удаляются, потому что это мост в стили страницы', async ({ page }) => {
+    const perElement = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      const el = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg" class="fixed inset-0 z-9999" data-track="root">'
+          + '<path d="M0 0h16v16H0z" class="overlay" data-track="path" fill="currentColor"/>'
+          + '</svg>',
+      });
+      return [el, ...el.querySelectorAll('*')].map((node) => {
+        return Array.from(node.attributes, (attribute) => attribute.name);
+      });
+    });
+
+    const names = perElement.flat();
+    // Даже `fixed inset-0` не наезжает на меню: `class` и `data-*` не на белом
+    // списке атрибутов, поэтому страница не видит ни классов иконки, ни её
+    // состояния.
+    expect(names.filter((name) => name === 'class' || name.startsWith('data-'))).toEqual([]);
+    expect(names.sort()).toEqual([
+      'aria-hidden',
+      'd',
+      'fill',
+      'focusable',
+      'height',
+      'overflow',
+      'width',
+      'xmlns',
+    ]);
+  });
+
+  test('presentation-атрибут overflow не переживает санитизацию', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      const el = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg" overflow="visible" pointer-events="all">'
+          + '<path d="M0 0h16v16H0z" overflow="visible"/>'
+          + '<rect x="0" y="0" width="4" height="4" overflow="scroll"/>'
+          + '</svg>',
+      });
+      return {
+        rootOverflow: el.getAttribute('overflow'),
+        rootPointerEvents: el.getAttribute('pointer-events'),
+        pathOverflow: el.querySelectorAll('path')[0].getAttribute('overflow'),
+        rectOverflow: el.querySelectorAll('rect')[0].getAttribute('overflow'),
+        rects: el.querySelectorAll('rect').length,
+      };
+    });
+
+    // У корня вместо авторского `visible` принудительный `hidden`, у детей
+    // атрибута нет вовсе: unclips вьюпорта иконки больше не случится.
+    expect(result).toEqual({
+      rootOverflow: 'hidden',
+      rootPointerEvents: null,
+      pathOverflow: null,
+      rectOverflow: null,
+      rects: 1,
+    });
+  });
+
+  test('pointer-events не переживает санитизацию', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      const el = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg" pointer-events="all">'
+          + '<path d="M0 0h16v16H0z" pointer-events="all" fill="currentColor"/>'
+          + '<circle cx="8" cy="8" r="4" pointer-events="visiblePainted"/>'
+          + '</svg>',
+      });
+      return {
+        root: el.getAttribute('pointer-events'),
+        path: el.querySelectorAll('path')[0].getAttribute('pointer-events'),
+        circle: el.querySelectorAll('circle')[0].getAttribute('pointer-events'),
+        // Без `pointer-events` оверлей не перехватывает клик, а сама иконка на
+        // месте: убирается атрибут, а не элемент.
+        circles: el.querySelectorAll('circle').length,
+      };
+    });
+
+    expect(result).toEqual({ root: null, path: null, circle: null, circles: 1 });
+  });
+
+  test('tabindex не переживает санитизацию', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      const el = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg" tabindex="0">'
+          + '<path d="M0 0h16v16H0z" tabindex="0" role="img" aria-label="Иконка"/>'
+          + '</svg>',
+      });
+      const path = el.querySelectorAll('path')[0];
+      return {
+        rootTabindex: el.getAttribute('tabindex'),
+        pathTabindex: path.getAttribute('tabindex'),
+        // `role` и `aria-*` уходят по той же причине: их на белом списке нет, и
+        // выдуманная семантика в `aria-hidden` поддереве ничего не значит.
+        role: path.getAttribute('role'),
+        ariaLabel: path.getAttribute('aria-label'),
+      };
+    });
+
+    expect(result).toEqual({
+      rootTabindex: null,
+      pathTabindex: null,
+      role: null,
+      ariaLabel: null,
+    });
+  });
+
+  test('объявление xmlns:xl удаляется, а xl:href вместе с ним', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      const el = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xl="https://evil.example/ns">'
+          + '<use id="ref" xl:href="https://evil.example/x.svg#y"/>'
+          + '</svg>',
+      });
+      return {
+        declaration: el.getAttribute('xmlns:xl'),
+        xmlns: el.getAttribute('xmlns'),
+        prefixed: el.querySelectorAll('use')[0].getAttribute('xl:href'),
+        // Элемент `use` уцелел вместе с `id` — внутренние ссылки по-прежнему
+        // работают, вырезан только именованный атрибут.
+        useId: el.querySelectorAll('use')[0].getAttribute('id'),
+        markup: el.outerHTML,
+      };
+    });
+
+    // Правило смотрит на `localName` вместе с `namespaceURI`: пространства
+    // разрешаются по URI, а не по префиксу, поэтому `xl:href` не проходит под
+    // именем `href`.
+    expect(result.declaration).toBe(null);
+    expect(result.prefixed).toBe(null);
+    expect(result.xmlns).toBe('http://www.w3.org/2000/svg');
+    expect(result.useId).toBe('ref');
+    expect(result.markup).not.toContain('evil.example');
+  });
+
+  test('корень получает overflow=hidden и принудительный xmlns', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      const el = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xl="https://evil.example/ns"'
+          + ' viewBox="0 0 16 16" width="10" height="10" overflow="visible"'
+          + ' focusable="true" aria-hidden="false">'
+          + '<path d="M0 0h16v16H0z"/></svg>',
+      });
+      return {
+        width: el.getAttribute('width'),
+        height: el.getAttribute('height'),
+        overflow: el.getAttribute('overflow'),
+        xmlns: el.getAttribute('xmlns'),
+        xmlnsXl: el.getAttribute('xmlns:xl'),
+        ariaHidden: el.getAttribute('aria-hidden'),
+        focusable: el.getAttribute('focusable'),
+        // Размеры и `viewBox` автора на белом списке, поэтому сохраняются.
+        viewBox: el.getAttribute('viewBox'),
+      };
+    });
+
+    expect(result).toEqual({
+      width: '100%',
+      height: '100%',
+      overflow: 'hidden',
+      xmlns: 'http://www.w3.org/2000/svg',
+      xmlnsXl: null,
+      ariaHidden: 'true',
+      focusable: 'false',
+      viewBox: '0 0 16 16',
+    });
+  });
+
+  test('у корня нет класса vc-icon', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      // Даже если автор назвал корневой узел `vc-icon`, класс не доживает: он не
+      // на белом списке. Оформление слота задаёт CSS селектором по слоту.
+      const el = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg" class="vc-icon" viewBox="0 0 16 16">'
+          + '<path d="M0 0h16v16H0z"/></svg>',
+      });
+      return {
+        tag: el.tagName,
+        className: el.getAttribute('class'),
+        classes: el.classList.length,
+        // Соседние типы иконок класс получают — и это разница намеренная.
+        emoji: renderIcon({ type: 'emoji', value: '📄' }).className,
+      };
+    });
+
+    expect(result).toEqual({ tag: 'svg', className: null, classes: 0, emoji: 'vc-icon' });
+  });
+
+  test('url(#id) вперемешку с внешним url( — атрибут удаляется целиком', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      const el = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg">'
+          + '<defs><linearGradient id="grad"><stop offset="0" stop-color="red"/></linearGradient></defs>'
+          + '<path d="M0 0h16v16H0z" fill="url(#grad) url(https://evil.example/g#x)"'
+          + ' stroke="url(#grad)"/>'
+          + '<circle cx="4" cy="4" r="4" clip-path="url(#grad) url(//evil.example/c.svg#c)"/>'
+          + '</svg>',
+      });
+      const path = el.querySelectorAll('path')[0];
+      return {
+        fill: path.getAttribute('fill'),
+        // Соседний атрибут того же элемента уцелел: решение принимается по
+        // значению, а не по элементу.
+        stroke: path.getAttribute('stroke'),
+        clipPath: el.querySelectorAll('circle')[0].getAttribute('clip-path'),
+        paths: el.querySelectorAll('path').length,
+        circles: el.querySelectorAll('circle').length,
+        markup: el.outerHTML,
+      };
+    });
+
+    expect(result.fill).toBe(null);
+    expect(result.clipPath).toBe(null);
+    expect(result.stroke).toBe('url(#grad)');
+    expect(result.paths).toBe(1);
+    expect(result.circles).toBe(1);
+    expect(result.markup).not.toContain('evil.example');
+  });
+
+  test('renderIcon: очищенный узел вставляется в живой документ и рисуется', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      const slot = document.createElement('span');
+      // Слот задаёт размеры явно: `width="100%"` у узла считается от
+      // содержащего блока, а демо-страница ещё не носит `mycontext.css`.
+      slot.style.cssText = 'display:inline-block;width:16px;height:16px';
+      document.body.appendChild(slot);
+
+      const icon = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+          + '<path d="M2 2h12v12H2z" fill="currentColor"/></svg>',
+      });
+      slot.appendChild(icon);
+      const box = icon.getBoundingClientRect();
+
+      /** @type {string[]} */
+      const warnings = [];
+      const original = console.warn;
+      console.warn = (message) => {
+        warnings.push(String(message));
+      };
+      let emptyConnected = false;
+      try {
+        // Тот же слот принимает и пустую заглушку: нераспознанная иконка не
+        // должна ронять меню при вставке.
+        const empty = renderIcon({ type: 'svg', value: 'это не разметка' });
+        slot.appendChild(empty);
+        emptyConnected = empty.isConnected;
+      } finally {
+        console.warn = original;
+      }
+
+      const drawn = {
+        connected: icon.isConnected,
+        parentIsSlot: icon.parentElement === slot,
+        width: box.width,
+        height: box.height,
+        // Собственный `xmlns` на месте: узел вставлен в HTML-документ, но
+        // пространство имён у него осталось тем же, что задал разбор.
+        xmlns: icon.getAttribute('xmlns'),
+        emptyConnected,
+        warnings: warnings.length,
+      };
+      slot.remove();
+      return drawn;
+    });
+
+    expect(result.connected).toBe(true);
+    expect(result.parentIsSlot).toBe(true);
+    expect(result.width).toBe(16);
+    expect(result.height).toBe(16);
+    expect(result.xmlns).toBe('http://www.w3.org/2000/svg');
+    expect(result.emptyConnected).toBe(true);
+    expect(result.warnings).toBe(1);
   });
 
   test('санитизация сохраняет элементы из белого списка (path, circle, g, defs, use, linearGradient)', async ({ page }) => {
