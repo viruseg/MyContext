@@ -1069,7 +1069,9 @@ git commit -m "feat: показ подменю с hover intent и усечени
 
 `tests/e2e/globals.spec.js`.
 
-- `клик левой кнопкой вне дерева меню закрывает его`
+- `клик левой кнопкой вне дерева меню закрывает его и НЕ уводит фокус на контейнер` — привязать кнопку, `document.activeElement` после клика не контейнер
+- `уход курсора с дерева меню в пустоту страницы закрывает каскад целиком` — открыть цепочку из трёх уровней, `page.mouse.move` в пустоту, `fastForward(CLOSE_GRACE_MS)`, все уровни закрыты
+- `уход курсора с цепочки из трёх уровней закрывает все, а не только глубочайший` — тот же путь, но утверждение по каждому уровню отдельно: средний уровень тоже закрыт (именно этот кейс ловит `planClose`-залипание, описанное выше)
 - `правый клик вне дерева меню закрывает его`
 - `правый клик по самому меню не открывает системное меню и не меняет наше` — `contextmenu` на пункте: `defaultPrevented === true`, меню остаётся открытым и в той же позиции
 - `правый клик по контейнеру во время открытого меню переоткрывает его в новой точке`
@@ -1090,11 +1092,16 @@ Expected: FAIL — глобальные слушатели не реализов
 
 - [ ] **Step 3: Реализовать `#bindGlobalHandlers` в `src/MyContext.js`
 
-- `pointerdown` на `document` в capture-фазе: если цель не внутри `.vc-menu` — `close()`
-- `contextmenu` на `document` в capture-фазе: `preventDefault()` только если цель внутри `.vc-menu`; иначе `close()` без подавления системного меню
-- `keydown` на `document` в capture-фазе: `Escape` вне меню всё равно закрывает; остальные клавиши передаются в `keyboard.handleKeydown`
-- `scroll` на `window` в capture-фазе с `passive: true`: если `event.target` — не `document` и не `body`, пропустить; иначе `close()`
-- `resize` на `window`: `close()`
+Закрытие по внешнему событию идёт через `#closeMenu({returnFocus: false})`, а не через публичное `close()`: иначе фокус улетит на контейнер при каждом клике по странице.
+
+Сначала вынести `#closeMenu({ returnFocus })` — тело нынешнего `close()` без `#returnFocus()`, а публичный `close()` становится `#closeMenu({ returnFocus: true })`. Публичный контракт Task 9 не меняется, а появляется путь закрытия без возврата фокуса.
+
+- `pointermove` на `document` в capture-фазе: прокинуть точку в `hover.pointerMove`, чтобы уход курсора с дерева планировал закрытие. **Это требование из ограничения выше, а не украшение** — без него пункт 1 Step 1 не может стать зелёным.
+- `pointerdown` на `document` в capture-фазе: если цель не внутри `.vc-menu` и не внутри привязанного контейнера — `#closeMenu({returnFocus: false})`
+- `contextmenu` на `document` в capture-фазе: `preventDefault()` только если цель внутри `.vc-menu`; иначе `#closeMenu({returnFocus: false})` без подавления системного меню
+- `keydown` на `document` в capture-фазе: только `Escape`, и только когда цель вне дерева меню. **Не передавать остальные клавиши в `keyboard.handleKeydown`**: движок уже слушает `keydown` на самом уровне (`MyContext.js:823`, Task 8), второй путь обработает клавиши дважды
+- `scroll` на `window` в capture-фазе с `passive: true`: если `event.target` — не `document` и не `body`, пропустить; иначе `#closeMenu({returnFocus: false})`
+- `resize` на `window`: `#closeMenu({returnFocus: false})`
 
 - [ ] **Step 4: Реализовать `#unbindGlobalHandlers` и вызовы в `destroy`**
 
