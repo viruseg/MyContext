@@ -359,8 +359,12 @@ git commit -m "feat: hover intent на safe-triangle с таймерами-ст�
 - Produces:
   ```js
   /**
+   * @typedef {HTMLElement | SVGSVGElement} IconElement
+   */
+
+  /**
    * @param {IconConfig} icon
-   * @returns {HTMLElement} элемент для вставки в .vc-icon-slot
+   * @returns {IconElement} элемент для вставки в .vc-icon-slot
    */
   export function renderIcon(icon)
 
@@ -371,6 +375,11 @@ git commit -m "feat: hover intent на safe-triangle с таймерами-ст�
    */
   export function sanitizeSvg(svgText)
   ```
+  `IconElement` — союз, а не `HTMLElement`: `SVGSVGElement` не подтип
+  `HTMLElement`, поэтому сужение до него потребовало бы `any` или двойного
+  приведения. Вставка в слот идёт через `appendChild`, который принимает `Node`.
+  SVG-узел намеренно не получает класс `vc-icon`: оформление задаёт CSS Task 5
+  селектором по слоту, а не по классу на самом узле.
   Тест подгружает модуль через `page.evaluate` с `import('/src/icons.js')` — сервер на Task 1 уже отдаёт `/src/`.
 
 - [ ] **Step 1: Написать падающие тесты**
@@ -385,6 +394,11 @@ git commit -m "feat: hover intent на safe-triangle с таймерами-ст�
 - `svg: санитизация вырезает foreignObject и iframe`
 - `svg: санитизация вырезает обработчики on* со всех элементов`
 - `svg: санитизация вырезает href со схемой javascript:`
+- `svg: санитизация вырезает style целиком` — `style="position: fixed; inset: 0; z-index: 99999"` на элементе не оставляет атрибута; презентация задаётся `fill` и `stroke`, а не style
+- `svg: санитизация вырезает style с background-image` — внешний запрос через `url(...)` не переживает санитизацию
+- `svg: санитизация оставляет только фрагментные ссылки` — `use href="#id"` сохраняется, `use href="https://…#y"` удаляется, чтобы открытие меню не стало сетевым запросом
+- `svg: санитизация удаляет узлы комментариев` — разметка с `<!-- … -->` не содержит комментариев в результате
+- `svg: атрибут fill и stroke переживают санитизацию` — презентация остаётся возможной без style
 - `svg: санитизация сохраняет элементы из белого списка (path, circle, g, defs, use, linearGradient)`
 - `svg: нераспознанная строка бросает Error из sanitizeSvg`
 - `растр: img с src, обязательным alt и draggable=false`
@@ -399,7 +413,7 @@ Expected: FAIL — модуль `src/icons.js` не найден.
 
 - [ ] **Step 3: Реализовать `sanitizeSvg` в `src/icons.js`**
 
-`DOMParser` с `image/svg+xml`, `parsererror` в корне — `Error`. Обход дерева: элемент не входит в белый список `svg, path, circle, ellipse, rect, line, polyline, polygon, g, defs, use, clipPath, mask, title, linearGradient, radialGradient, stop` — удаляется вместе с потомками; иначе атрибуты `on*` и `href` / `xlink:href` со схемой `javascript:` удаляются. Корневому `svg` выставляются `width="100%"`, `height="100%"`, `aria-hidden="true"`, `focusable="false"`.
+`DOMParser` с `image/svg+xml`, `parsererror` в корне — `Error`. Обход дерева: элемент не входит в белый список `svg, path, circle, ellipse, rect, line, polyline, polygon, g, defs, use, clipPath, mask, title, linearGradient, radialGradient, stop` — удаляется вместе со всем поддеревом, иначе `foreignObject` унёс бы разметку, которую обход иначе обязан был бы разбирать; узлы комментариев удаляются. Поскольку белый список задан по элементам, политика по атрибутам выражена явно: `on*` вырезаются со всех уцелевших элементов, `style` вырезается полностью, а `href` и `xlink:href` остаются только тогда, когда значение начинается с `#`. Корневому `svg` выставляются `width="100%"`, `height="100%"`, `aria-hidden="true"`, `focusable="false"`.
 
 - [ ] **Step 4: Реализовать `renderIcon` в `src/icons.js`**
 
