@@ -121,7 +121,11 @@ const MENU_HTML = `<!doctype html>
     <meta charset="utf-8" />
     <link rel="stylesheet" href="${STYLESHEET_PATH}" />
   </head>
-  <body>
+  <!-- Фон страницы задан явно: по умолчанию фон body прозрачный, и композит
+       поверх прозрачного чёрного занижал бы результат для полупрозрачной
+       подложки. Пока строка активного пункта непрозрачна, это безразлично, и
+       это утверждается. -->
+  <body style="background: rgb(255, 255, 255)">
     <div id="m" class="vc-menu" popover="manual">${MENU_CONTENT_HTML}</div>
   </body>
 </html>`;
@@ -188,6 +192,22 @@ function readBlock(css, marker) {
   const end = blockEnd(css, open);
   expect(end).toBeGreaterThan(open);
   return css.slice(open, end);
+}
+
+/**
+ * Тело блока без фигурных скобок, чтобы его можно было разобрать как правила.
+ *
+ * @param {string} css сплющенный текст таблицы стилей.
+ * @param {string} marker начало блока.
+ * @returns {string} содержимое блока.
+ */
+function readBlockBody(css, marker) {
+  const at = css.indexOf(marker);
+  expect(at, `блок ${marker}`).toBeGreaterThan(-1);
+  const open = css.indexOf('{', at);
+  const end = blockEnd(css, open);
+  expect(end).toBeGreaterThan(open);
+  return css.slice(open + 1, end);
 }
 
 /**
@@ -509,7 +529,7 @@ async function settleMenu(page) {
 /**
  * Ставит системную схему и меряет активную строку.
  *
- * Отдельная функция, а не тело кейса: контраст считают два кейса, и две копии
+ * Отдельная функция, а не тело кейса: контраст считают три кейса, и три копии
  * расчёта разъехались бы при первой же правке палитры.
  *
  * Тема ставится явно, а не остаётся `auto` из `beforeEach`: палитра
@@ -519,16 +539,20 @@ async function settleMenu(page) {
  * @param {import('@playwright/test').Page} page
  * @param {'auto'|'light'|'dark'} theme тема оформления.
  * @param {'light' | 'dark'} scheme системная схема.
+ * @param {boolean} [disabled] поставить ли `aria-disabled` на активную строку.
  * @returns {Promise<ActiveRow>}
  */
-async function readActiveRow(page, theme, scheme) {
+async function readActiveRow(page, theme, scheme, disabled = false) {
   await page.emulateMedia({ colorScheme: scheme });
   await setTheme(page, theme);
-  const measured = await page.evaluate(() => {
+  const measured = await page.evaluate((isDisabled) => {
     const menu = /** @type {HTMLElement} */ (document.getElementById('m'));
     const active = /** @type {HTMLElement} */ (
       document.querySelector('.vc-item[data-active]')
     );
+    if (isDisabled) {
+      active.setAttribute('aria-disabled', 'true');
+    }
     const chevron = /** @type {HTMLElement} */ (active.querySelector('.vc-chevron'));
     const menuStyle = getComputedStyle(menu);
 
@@ -555,13 +579,14 @@ async function readActiveRow(page, theme, scheme) {
       label: getComputedStyle(active).color,
       menu: menuStyle.backgroundColor,
       // Под меню лежит страница: её фон участвует в композите, потому что
-      // фон меню сам по себе полупрозрачный.
+      // фон меню сам по себе полупрозрачный. В фикстуре он непрозрачный, иначе
+      // модель считала бы композит поверх прозрачного чёрного.
       page: getComputedStyle(document.body).backgroundColor,
       chevron: getComputedStyle(chevron).color,
       activeBg: resolve('--vc-active-bg'),
       accent: resolve('--vc-accent'),
     };
-  });
+  }, disabled);
   // Композит, а не сырой токен: меню стеклянное, и глаз видит подложку.
   const background = composite(
     composite(parseColor(measured.row), parseColor(measured.menu)),
@@ -761,7 +786,7 @@ test.describe('стекло и запасной фон', () => {
     expect(css).toContain('backdrop-filter: blur(20px) saturate(180%)');
   });
 
-  test('поддержка без backdrop-filter: под @supports not есть непрозрачный запасной фон', async ({ page }) => {
+  test('поддержка без backdrop-filter: под @supports not есть непрозрачный запасной фон', async ({ page, request }) => {
     // Чтение идёт через CSSOM, а не по тексту файла: текстовое тело at-rule
     // находит объявление где угодно внутри, и перенос подстановки из `.vc-menu`
     // в `.vc-list` оставил бы кейс зелёным, пока меню осталось бы без
@@ -796,6 +821,9 @@ test.describe('стекло и запасной фон', () => {
               properties: style === null ? [] : declared(style),
               background: style === null ? null : style.getPropertyValue('--vc-bg'),
               filter: style === null ? null : style.getPropertyValue('backdrop-filter'),
+              prefixedFilter: style === null
+                ? null
+                : style.getPropertyValue('-webkit-backdrop-filter'),
             };
           }
         }
@@ -811,9 +839,35 @@ test.describe('стекло и запасной фон', () => {
     );
     // Селектор проверяется явно: запасной фон обязан достаться меню, а не списку.
     expect(rule?.selectors).toEqual(['.vc-menu']);
-    expect(rule?.properties).toContain('--vc-bg');
+
+    // Набор объявлений сравнивается целиком: `toContain` по одному свойству
+    // пропустил бы и лишнее объявление, и пропажу `-webkit-backdrop-filter: none`.
+    //
+    // Нормализация префикса не украшение, а необходимость: Chromium и WebKit
+    // считают `-webkit-backdrop-filter` тем же свойством, что и без префикса, и
+    // выкидывают из блока первое объявление, а Firefox хранит оба. Набор
+    // приводится к одному виду, иначе утверждение зависело бы от движка.
+    const normalized = [...new Set((rule?.properties ?? []).map((property) => {
+      return property.replace(/^-webkit-/, '');
+    }))].sort();
+    expect(normalized).toEqual(['--vc-bg', 'backdrop-filter']);
     expect(rule?.background?.trim()).toBe('var(--vc-bg-solid)');
     expect(rule?.filter?.trim()).toBe('none');
+
+    // Префиксанную запись проверяет движок, который её хранит, — старый WebKit
+    // знает только `-webkit-backdrop-filter`, и ради него она и написана. Там,
+    // где движок выкинул префикс как дубль, хватает проверки выше.
+    if ((rule?.prefixedFilter ?? '').trim() !== '') {
+      expect(rule?.properties).toContain('-webkit-backdrop-filter');
+      expect(rule?.prefixedFilter?.trim()).toBe('none');
+    }
+    // Наличие обеих записей в файле проверяется отдельно: движок, выкинувший
+    // префикс, не отличит удалённую строку от сохранённой.
+    const block = readBlock(
+      await readStylesheet(request),
+      '@supports not (backdrop-filter: blur(1px))',
+    );
+    expect(block).toContain('-webkit-backdrop-filter: none');
 
     // Непрозрачность сплошного токена — то, ради чего подстановка и нужна.
     // Прежняя проверка вида `/^rgba?\(/` ничего не говорила о прозрачности:
@@ -926,6 +980,54 @@ test.describe('анимации', () => {
     const entry = await readEntry(page);
     expect(entry.immediate).toBe('1');
     expect(entry.running).toEqual([]);
+  });
+
+  test('reduced-motion гасит переходы потомков, а не только меню', async ({ page, request }) => {
+    // Шеврон выбран потому, что у него есть собственный переход: без покрытия
+    // потомков кейс на меню остался бы зелёным, а движение на шевроне — нет.
+    const readChevronTransition = () => {
+      return page.evaluate(() => {
+        const style = getComputedStyle(/** @type {HTMLElement} */ (
+          document.getElementById('chevron-right')
+        ));
+        return { property: style.transitionProperty, duration: style.transitionDuration };
+      });
+    };
+
+    // Контроль без `reduce`: переход у потомка есть, иначе проверка ниже была бы
+    // тождественной.
+    const before = await readChevronTransition();
+    expect(before.property).toBe('transform');
+
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    const reduced = await readChevronTransition();
+    expect(reduced.property).toBe('none');
+    expect(reduced.duration).toBe('0s');
+
+    // Покрытие потомков держится на удвоенном классе, иначе будущее правило
+    // (0,2,0) — а такие в файле есть, `.vc-item:hover` это (0,2,0) — вернуло бы
+    // движение молча. Снятие удвоения роняет именно эту проверку.
+    const rules = readRules(readBlockBody(
+      await readStylesheet(request),
+      '@media (prefers-reduced-motion: reduce)',
+    ));
+    const blanket = rules.filter((rule) => rule.selector.includes('*'));
+    expect(blanket.length).toBeGreaterThan(0);
+    for (const rule of blanket) {
+      const classes = rule.selector.match(/\.vc-menu/g) ?? [];
+      expect(classes.length, `специфичность покрытия потомков: ${rule.selector}`)
+        .toBeGreaterThanOrEqual(2);
+    }
+
+    // Покрытие обязано быть и поведенческим, а не только структурным: нисходящее
+    // `transition: none` не должно ждать, пока появится правило (0,2,0).
+    const item = await page.evaluate(() => {
+      const style = getComputedStyle(/** @type {HTMLElement} */ (
+        document.querySelector('.vc-item[data-active]')
+      ));
+      return { property: style.transitionProperty };
+    });
+    expect(item.property).toBe('none');
   });
 
   test('reduced-motion побеждает инлайновую длительность', async ({ page }) => {
@@ -1122,10 +1224,31 @@ test.describe('пункты и состояния', () => {
       const result = await readActiveRow(page, theme, scheme);
       // 1.29:1 на тонированной заливке — это не «слабо», это нечитаемо, поэтому
       // порог берётся из AA для текста, а не «на глаз».
+      //
+      // Непрозрачность проверяется до расчёта: непрозрачная заливка означает, что
+      // подложка под строкой на число не влияет, и потому контраст, посчитанный
+      // по композитной модели, вообще применим. Полупрозрачная подложка сделала бы
+      // модель занижающей, и это надо сказать до результата, а не после.
+      expect(result.opaque, `непрозрачность заливки, ${theme}/${scheme}`).toBe(true);
       expect(result.ratio, `контраст активного пункта, ${theme}/${scheme}`)
         .toBeGreaterThanOrEqual(4.5);
-      expect(result.opaque, `непрозрачность заливки, ${theme}/${scheme}`).toBe(true);
       expect(result.chevronMatches, `цвет шеврона, ${theme}/${scheme}`).toBe(true);
+    }
+  });
+
+  test('контраст активного пункта не ниже 4.5:1 в обеих темах, включая disabled на активной строке', async ({ page }) => {
+    for (const [theme, scheme] of THEME_CASES) {
+      // `aria-disabled` ставится на активный пункт прямо здесь, а не в фикстуре:
+      // фикстура продолжает изображать то, что выдаёт рендерер, и состояние
+      // «отключённый и одновременно активный» в ней не штатное.
+      const result = await readActiveRow(page, theme, scheme, true);
+      // Приглушённый `--vc-muted` на сплошной заливке акцентом даёт 1.07:1 в
+      // светлой теме и 1.02:1 в тёмной, то есть строка становится нечитаемой.
+      // По спецификации 9.1 состояние недостижимо — отключённые пункты не входят
+      // в цикл роуминга, — но CSS и тесты не должны оставлять его на волю случая.
+      expect(result.opaque, `непрозрачность заливки, ${theme}/${scheme}`).toBe(true);
+      expect(result.ratio, `контраст disabled на активной строке, ${theme}/${scheme}`)
+        .toBeGreaterThanOrEqual(4.5);
     }
   });
 
