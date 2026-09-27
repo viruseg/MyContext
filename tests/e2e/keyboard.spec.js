@@ -462,6 +462,12 @@ test.beforeEach(async ({ page }) => {
     //
     // `closeAll` фокуса не трогает намеренно: возвращать его — дело задачи 9, а
     // если бы возвращал, кейс про `Tab` проходил бы и без `focusOwner`.
+    //
+    // `openSubmenu` отдаёт уровень движку через `focusFirst` — ровно как это делает
+    // `#openSubmenu` в `MyContext`. Договорённость «показывающий код отдаёт
+    // уровень и переносит в него фокус» тут и проверяется: если бы фокус
+    // переносил сам движок, фикстура не отличалась бы от него и кейс про фокус в
+    // подменю ничего бы не значил.
     /** @type {KeyboardHost} */
     const host = {
       closeAll() {
@@ -474,6 +480,7 @@ test.beforeEach(async ({ page }) => {
         calls.openSubmenu += 1;
         calls.openSubmenuIds.push(entry.element.id);
         openedLayer().showSubmenu(entry);
+        keyboard.focusFirst(entry);
       },
       closeCurrentLevel() {
         calls.order.push('closeCurrentLevel');
@@ -759,8 +766,8 @@ test.beforeEach(async ({ page }) => {
         };
       }
       if (step.command === 'show-submenu') {
-        // Открытие по наведению: так поступает вызывающий код, и он же обязан
-        // отдать уровень движку, иначе уровень останется для клавиатуры мёртвым.
+        // Открытие по наведению: так поступает вызывающий код, и хост сам отдаёт
+        // уровень движку, иначе уровень останется для клавиатуры мёртвым.
         const at = step.at ?? { path: [], index: 0 };
         const owner = itemAt(at);
         const entry = levelOf(at.path);
@@ -769,7 +776,6 @@ test.beforeEach(async ({ page }) => {
           throw new Error('у пункта нет заведённого подменю');
         }
         host.openSubmenu(child);
-        keyboard.focusFirst(child);
         return {
           command: step.command,
           key: null,

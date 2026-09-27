@@ -133,8 +133,19 @@ const OPEN_RIGHT = { x: 900, y: 300 };
 const OPEN_MIDDLE = { x: 260, y: 120 };
 /** Точка далеко от первой: показ поверх открытого подменю переносит меню сюда. */
 const OPEN_FAR = { x: 620, y: 560 };
-/** Запас точки замирания часов вперёд от «сейчас», мс. */
-const CLOCK_GAP_MS = 3_600_000;
+/**
+ * Мгновение, на котором замирают часы. Фиксированное, а не системное «сейчас»:
+ * одинаковое во всех прогонах, и рядом с ним виден каждый прыжок времени.
+ */
+const CLOCK_FROZEN_AT = new Date('2024-12-10T09:00:00Z');
+/**
+ * Точка запуска часов, на час раньше точки замирания. Разрыв нужен потому, что
+ * `install` не только ставит время, но и сразу пускает часы, и к моменту
+ * `pauseAt` фальшивое время уже ушло вперёд на всё, что заняло обращение к
+ * странице: `pauseAt` в прошлое двигать отказывается, Firefox отвечает на это
+ * ошибкой, и кейс падал бы примерно через раз.
+ */
+const CLOCK_START_AT = new Date(CLOCK_FROZEN_AT.getTime() - 3_600_000);
 
 /**
  * @param {import('@playwright/test').Page} page
@@ -280,15 +291,12 @@ test.beforeEach(async ({ page }) => {
   // Часы ставятся после ожидания таблицы стилей: `waitForFunction` доходит до
   // страницы кадрами браузера, а замороженное время кадров не даёт.
   //
-  // `install()` без времени ставит часы на системное «сейчас» и сразу пускает их,
-  // поэтому к моменту `pauseAt` фальшивое время уже ушло вперёд на всё, что
-  // заняло обращение к странице. `pauseAt(new Date())` при этом отказывается
-  // двигаться «в прошлом» — Firefox отвечает на это ошибкой, и кейс падал бы
-  // через раз. Точка замирания берётся на час вперёд: дрейф между двумя
-  // вызовами измеряется миллисекундами, а за час назад он не забегает никогда.
-  // Прыжок на час безопасен: задач на странице ещё нет, их заводит проба ниже.
-  await page.clock.install();
-  await page.clock.pauseAt(new Date(Date.now() + CLOCK_GAP_MS));
+  // `install` с временем ставит часы на указанный момент и сразу их пускает,
+  // поэтому точка замирания на час позже точки запуска: зазор не перекрывает
+  // дрейф между двумя вызовами, а прыжок безопасен — задач на странице ещё нет,
+  // их заводит проба ниже.
+  await page.clock.install({ time: CLOCK_START_AT });
+  await page.clock.pauseAt(CLOCK_FROZEN_AT);
   await page.emulateMedia({ reducedMotion: 'reduce' });
 
   await page.evaluate(async () => {
@@ -579,6 +587,129 @@ test.describe('показ подменю', () => {
     expect(after.openCount, 'открыты корень и подменю').toBe(2);
   });
 
+  test('нажатие не основной кнопкой подменю не открывает', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const ownerId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Экспорт');
+    });
+
+    await hoverItem(page, 'Экспорт');
+    // Средняя кнопка, а не правая: правое нажатие тут же подтверждается `contextmenu`,
+    // который зовёт `open()` и переносит меню, — мигание на один такт между этими
+    // событиями не прочитать, потому что браузер отдаёт их одной пачкой и не всегда
+    // одинаково. Средняя кнопка ничем не подтверждается, а `pointerdown` у неё тот
+    // же, то есть кейс бьёт по той же двери без чужой подсказки.
+    await page.mouse.down({ button: 'middle' });
+    const pressed = await readMenu(page);
+    expect(isOpen(pressed, ownerId), 'средняя кнопка не открывает подменю').toBe(false);
+    expect(pressed.openCount, 'открыт только корень').toBe(1);
+
+    // Показ всё равом остаётся замыслом наведения: отказ нажатию — не отказ
+    // показать. Снимается задача открытия, а не планирование.
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const shown = await readMenu(page);
+    expect(isOpen(shown, ownerId), 'подменю открыто по наведению').toBe(true);
+    // `auxclick`, а не `click`: обработчик активации на владельце не зовётся, и
+    // его действие в журнале не появляется.
+    await page.mouse.up({ button: 'middle' });
+    const after = await readMenu(page);
+    expect(after.log, 'действие владельца не вызвано').toEqual([]);
+    expect(isOpen(after, ownerId), 'подменю осталось открытым').toBe(true);
+  });
+
+  test('стрелка вправо открывает подменю и отдаёт его движку', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const ownerId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Экспорт');
+    });
+
+    // Клавиатурный путь показа на настоящем экземпляре: движок зовёт
+    // `host.openSubmenu` и больше ничего не делает, а показ и отдачу уровня
+    // движку с переносом фокуса делает один `#openSubmenu`. Если бы фокус в
+    // подменю переносил сам движок, его убрали бы — и на этом месте кейс
+    // погас бы, оставив мышиные пути единственной проверкой.
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
+
+    const after = await readMenu(page);
+    expect(isOpen(after, ownerId), 'подменю показано').toBe(true);
+    expect(after.openCount, 'открыты корень и подменю').toBe(2);
+    expect(after.focusLabel, 'фокус в показанном подменю').toBe('PDF');
+    // Ответ на ключ в показанном подменю, а не в родителе: уровень вне реестра
+    // движка на клавиши не отвечает вовсе, и это читалось бы как «открыто и мёртво».
+    await page.keyboard.press('ArrowDown');
+    expect((await readMenu(page)).focusLabel, 'роуминг идёт внутри подменю').toBe('PNG');
+  });
+
+  test('показ в новой точке снимает отложенное закрытие', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const exportId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Экспорт');
+    });
+
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    // Курсор уходит с владельца в сторону, в дереве меню: закрытие запланировано,
+    // и срок его ещё не истёк. Кейс про диагональное движение держит вторую
+    // половину этой же траектории — там закрытие действительно срабатывает.
+    await hoverItem(page, 'Новый');
+    await page.clock.fastForward(CLOSE_GRACE_MS - 50);
+    expect(isOpen(await readMenu(page), exportId), 'подменю на месте').toBe(true);
+
+    // Показ в новой точке переносит меню и прячет подменю прежней постановки, но
+    // отложенное закрытие относится к той же прежней постановке. Дальше подменю
+    // открывает клавиатура: этот путь не трогает hover intent ни на одном шаге, и
+    // ушедшая задача снесла бы подменю, открытое уже на новом месте.
+    await openAt(page, OPEN_FAR);
+    expect(isOpen(await readMenu(page), exportId), 'подменю прежней постановки скрыто').toBe(false);
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
+    await page.clock.fastForward(CLOSE_GRACE_MS);
+
+    const after = await readMenu(page);
+    expect(isOpen(after, exportId), 'подменю, открытое после переноса, не снесено').toBe(true);
+    expect(after.openCount, 'открыты корень и подменю').toBe(2);
+    expect(after.focusLabel, 'фокус в подменю').toBe('PDF');
+  });
+
+  test('уход курсора закрывает подменю, оставшееся после Escape', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const exportId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Экспорт');
+    });
+
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    await hoverItem(page, 'PNG');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    expect((await readMenu(page)).openCount, 'открыты корень и два подменю').toBe(3);
+
+    // Escape закрывает уровень, где стоит фокус, — в обход `#hideSubmenuFor`, и
+    // потому в обход укорочения цепочки. Уровень уходит из цепочки здесь же, иначе
+    // следующая операция по цепочке — уход курсора — спрятала бы его снова вместо
+    // показанного подменю «Экспорта», и оно осталось бы висеть при курсоре,
+    // который давно ушёл в сторону.
+    await page.keyboard.press('Escape');
+    const closed = await readMenu(page);
+    expect(closed.openCount, 'подменю «PNG» закрыто').toBe(2);
+    expect(isOpen(closed, exportId), 'подменю «Экспорта» осталось открытым').toBe(true);
+
+    await hoverItem(page, 'Заметки');
+    await page.clock.fastForward(CLOSE_GRACE_MS);
+    const after = await readMenu(page);
+    expect(isOpen(after, exportId), 'подменю «Экспорта» закрыто').toBe(false);
+    expect(after.openCount, 'остался корень').toBe(1);
+    expect(expandedLabels(after), 'отметок развёрнутости не осталось').toEqual([]);
+  });
+
   test('диагональное движение к подменю не закрывает его', async ({ page }) => {
     await makeMenu(page, 'tree', 'surface');
     await openAt(page, OPEN_MIDDLE);
@@ -715,6 +846,25 @@ test.describe('показ подменю', () => {
       expandedLabels(after),
       'развёрнуты «Экспорт» и «Скачать», «PNG» — нет',
     ).toEqual(['Скачать', 'Экспорт'].sort());
+
+    // Второе усечение — отдельный шаг, а не повтор первого. Показ «Скачать» скрыл
+    // «PNG» и встал в цепочку, а «Экспорт» обязан остаться в ней: усечение
+    // отсчитывается от него, и без него следующая ветка не обрежется вовсе. Шаг
+    // смотрит в слой, а цепочка оттуда не видна: «скрыт» и «оставлен в цепочке» —
+    // разные вещи, и проверять надо обе. Выкинутый из цепочки «Экспорт» роняет
+    // именно этот переход: «Скачать» осталось бы висеть рядом с «PNG».
+    await hoverItem(page, 'PNG');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+
+    const truncated = await readMenu(page);
+    expect(isOpen(truncated, innerIds.download), 'подменю «Скачать» унесено усечением').toBe(false);
+    expect(isOpen(truncated, innerIds.png), 'подменю «PNG» открыто').toBe(true);
+    expect(isOpen(truncated, exportId), 'подменю «Экспорта» осталось открытым').toBe(true);
+    expect(truncated.openCount, 'открыты корень, «Экспорт» и «PNG»').toBe(3);
+    expect(
+      expandedLabels(truncated),
+      'развёрнуты «Экспорт» и «PNG», «Скачать» — нет',
+    ).toEqual(['PNG', 'Экспорт'].sort());
   });
 
   test('подменю у правого края раскрывается влево, шеврон развёрнут', async ({ page }) => {
