@@ -9,6 +9,13 @@
  * Удаление элемента уносит его поддерево — так отсекается `foreignObject`,
  * внутри которого разметка была бы уже в другом пространстве имён.
  *
+ * Белый список задан по элементам и ничего не говорит об атрибутах, поэтому
+ * политика по ним выражена явно: `on*` и `style` вырезаются, `href` и
+ * `xlink:href` остаются только у ссылки на фрагмент текущего документа, всё
+ * остальное на месте. Иначе проходило бы всё не названное: `position: fixed` в
+ * `style` перекрывает меню, а `url(...)` и внешний `use href` уводят запросы
+ * наружу при каждом открытии.
+ *
  * Контракты двух экспортов различаются намеренно. `sanitizeSvg` бросает `Error`
  * на неразобранном входе: у него один вызывающий, `renderIcon`, и тот обязан
  * знать о сбое. `renderIcon` не бросает никогда: иконка не должна уронить меню,
@@ -47,9 +54,13 @@
 /**
  * Результат рендерера: либо HTML-обёртка, либо очищенный корневой узел SVG.
  *
- * Союз, а не `HTMLElement`: узел `svg` — потомок `SVGElement`, а не `HTMLElement`,
- * и объявление `HTMLElement` было бы ложью, заставляющей приводить тип там, где
- * элемент кладут в слот.
+ * Союз, а не `HTMLElement`: `SVGSVGElement` — потомок `SVGElement`, а не
+ * `HTMLElement`, и сужение до `HTMLElement` потребовало бы `any` или двойного
+ * приведения. Вставка в слот идёт через `appendChild`, который принимает `Node`,
+ * поэтому союз вызывающему коду не мешает.
+ *
+ * SVG-узел намеренно не получает класс `vc-icon`: оформление задаёт CSS селектором
+ * по слоту, а не по классу на самом узле.
  *
  * @typedef {HTMLElement | SVGSVGElement} IconElement
  */
@@ -89,26 +100,31 @@ const DATA_IMAGE = /^image\/[a-z0-9.+-]+[;,]/i;
 
 /**
  * @param {string} value значение атрибута ссылки.
- * @returns {boolean} `true`, если схема `javascript:`.
+ * @returns {boolean} `true`, если значение указывает на фрагмент текущего документа.
  */
-function isJavascriptScheme(value) {
-  // Браузер игнорирует пробельные символы внутри URL, поэтому
-  // `java&#9;script:alert(1)` исполняется так же, как `javascript:alert(1)`.
-  return value.replace(/\s/g, '').toLowerCase().startsWith('javascript:');
+function isFragmentHref(value) {
+  // Пробелы по краям браузер отбрасывает при разборе URL, поэтому ` " #id"`
+  // ссылается на тот же фрагмент, что и `#id`. Всё, что не фрагмент, убирается:
+  // относительный `href` у `use` — уже внешняя ссылка, как только документ
+  // окажется на любом другом origin.
+  return value.trim().startsWith('#');
 }
 
 /**
- * @param {Element} element элемент, очищаемый от обработчиков и ссылок.
+ * @param {Element} element элемент, очищаемый от обработчиков, `style` и ссылок.
  * @returns {void}
  */
 function scrubElement(element) {
   for (const attribute of Array.from(element.attributes)) {
-    const name = attribute.name;
-    if (name.toLowerCase().startsWith('on')) {
+    const { name } = attribute;
+    // Регистр не различается: в XML-разборе `ONFOCUS` и `STYLE` — отдельные от
+    // обработчика и стиля имена, но вырезаются бесплатно.
+    const normalized = name.toLowerCase();
+    if (normalized.startsWith('on') || normalized === 'style') {
       element.removeAttribute(name);
       continue;
     }
-    if (HREF_ATTRIBUTES.includes(name) && isJavascriptScheme(attribute.value)) {
+    if (HREF_ATTRIBUTES.includes(normalized) && !isFragmentHref(attribute.value)) {
       element.removeAttribute(name);
     }
   }
@@ -116,19 +132,27 @@ function scrubElement(element) {
 
 /**
  * Обход в глубину: разрешённый элемент чистится и обходится дальше, запрещённый
- * удаляется целиком, поэтому его потомки до обхода не доходят.
+ * удаляется целиком, поэтому его потомки до обхода не доходят. Из прочих узлов
+ * остаются только текст и CDATA — так контракт санитизации звучит «только элементы
+ * белого списка и текст», а не «всё, кроме перечисленного».
  *
  * @param {Element} element корень обхода.
  * @returns {void}
  */
 function sanitizeTree(element) {
-  for (const child of Array.from(element.children)) {
-    if (!ALLOWED_ELEMENTS.has(child.localName)) {
-      child.remove();
+  for (const node of Array.from(element.childNodes)) {
+    if (node instanceof Element) {
+      if (!ALLOWED_ELEMENTS.has(node.localName)) {
+        node.remove();
+        continue;
+      }
+      scrubElement(node);
+      sanitizeTree(node);
       continue;
     }
-    scrubElement(child);
-    sanitizeTree(child);
+    if (!(node instanceof Text || node instanceof CDATASection)) {
+      node.remove();
+    }
   }
 }
 
@@ -155,11 +179,13 @@ function createEmptySpan(className) {
 
 /**
  * Разбирает разметку SVG и оставляет в ней только белый список элементов без
- * обработчиков и ссылок со схемой `javascript:`.
+ * обработчиков, без `style` и без ссылок вовне.
  *
- * Элементы вне белого списка удаляются вместе с поддеревом, обработчики `on*` и
- * ссылки со схемой `javascript:` вырезаются у каждого уцелевшего элемента,
- * корневому `svg` принудительно выставляются размеры и признаки декоративности.
+ * Элементы вне белого списка удаляются вместе с поддеревом, узлы комментариев и
+ * инструкций обработки — точками. У каждого уцелевшего элемента, включая корень,
+ * вырезаются обработчики `on*` и атрибут `style` целиком, а `href` и `xlink:href`
+ * остаются только тогда, когда значение ведёт во фрагмент текущего документа.
+ * Корневому `svg` принудительно выставляются размеры и признаки декоративности.
  *
  * @param {string} svgText разбираемая разметка.
  * @returns {SVGSVGElement} очищенный корневой узел.

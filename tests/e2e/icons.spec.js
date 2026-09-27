@@ -199,8 +199,8 @@ test.describe('svg', () => {
     // `ONFOCUS` в XML-разборе сохраняет регистр и в HTML-документе обработчиком не
     // стал бы, но вырезается вместе с остальными: цена нулевая.
     expect(names.filter((name) => name.toLowerCase().startsWith('on'))).toEqual([]);
-    // Санитизация трогает только обработчики и ссылки: `xmlns`, геометрия, заливка
-    // и принудительные атрибуты корня целы, ничего лишнего не добавлено.
+    // Санитизация трогает только обработчики, `style` и ссылки: `xmlns`, геометрия,
+    // заливка и принудительные атрибуты корня целы, ничего лишнего не добавлено.
     expect(names.sort()).toEqual([
       'aria-hidden',
       'd',
@@ -213,38 +213,161 @@ test.describe('svg', () => {
     ]);
   });
 
-  test('санитизация вырезает href со схемой javascript:', async ({ page }) => {
+  test('санитизация вырезает style целиком', async ({ page }) => {
+    const perElement = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      const el = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg" style="position: fixed; inset: 0; z-index: 99999">'
+          + '<g style="position: fixed; inset: 0; z-index: 99999" id="layer">'
+          + '<path d="M0 0h16v16H0z" style="position: fixed; inset: 0; z-index: 99999"/>'
+          + '</g></svg>',
+      });
+      return [el, ...el.querySelectorAll('*')].map((node) => {
+        return Array.from(node.attributes, (attribute) => attribute.name);
+      });
+    });
+
+    const names = perElement.flat();
+    // Атрибут убран у всех троих, включая корень: `position: fixed` на элементе
+    // иконки накрыл бы меню, а убрав его целиком, презентация остаётся на `fill`
+    // и `stroke`.
+    expect(names.filter((name) => name.toLowerCase() === 'style')).toEqual([]);
+    expect(names.sort()).toEqual([
+      'aria-hidden',
+      'd',
+      'focusable',
+      'height',
+      'id',
+      'width',
+      'xmlns',
+    ]);
+  });
+
+  test('санитизация вырезает style с background-image', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      const el = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg">'
+          + '<circle cx="8" cy="8" r="4" style="background-image: url(https://evil.example/track)"/>'
+          + '<rect x="0" y="0" width="8" height="8" fill="red"/></svg>',
+      });
+      return {
+        markup: el.outerHTML,
+        styles: [el, ...el.querySelectorAll('*')].filter((node) => node.hasAttribute('style')).length,
+      };
+    });
+
+    // Внешний запрос ушёл вместе с атрибутом: в разобранной разметке не осталось
+    // ни `url(`, ни самого адреса.
+    expect(result.styles).toBe(0);
+    expect(result.markup).not.toContain('evil.example');
+    expect(result.markup).not.toContain('url(');
+    expect(result.markup).toContain('fill="red"');
+  });
+
+  test('санитизация оставляет только фрагментные ссылки', async ({ page }) => {
     const result = await page.evaluate(async () => {
       const { renderIcon } = await import('../../src/icons.js');
       const el = renderIcon({
         type: 'svg',
         value: '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">'
-          + '<use href="javascript:alert(1)"/>'
-          + '<use xlink:href="javascript:alert(1)"/>'
-          // Браузер вырезает табы из URL, поэтому `java&#9;script:` исполняется так
-          // же, как `javascript:`: проверяется нормализация схемы, а не префикс.
-          + '<use href="java&#9;script:alert(1)"/>'
-          + '<use id="legit" href="#legit"/>'
+          + '<use id="frag" href="#frag"/>'
+          // Пробелы по краям браузер отбрасывает, поэтому ссылка остаётся
+          // фрагментной, и значение остаётся авторским — санитизация решает, а не
+          // переписывает.
+          + '<use id="padded" href=" #padded "/>'
+          + '<use id="absolute" href="https://evil.example/x.svg#y"/>'
+          + '<use id="schemeRelative" href="//evil.example/x.svg#y"/>'
+          + '<use id="relative" href="../sprite.svg#icon"/>'
+          // Схема `javascript:` — частный случай общего правила, но именно её
+          // читатель ищет в первую очередь, поэтому она проверена отдельно.
+          + '<use id="script" href="javascript:alert(1)"/>'
+          + '<use id="xlinkScript" xlink:href="javascript:alert(1)"/>'
           + '</svg>',
       });
       const uses = Array.from(el.querySelectorAll('use'));
       return {
         uses: uses.length,
-        javascriptLinks: uses.filter((use) => {
-          return ['href', 'xlink:href'].some((name) => (use.getAttribute(name) ?? '').includes('script'));
-        }).length,
-        keptHref: uses[3].getAttribute('href'),
-        keptXlink: uses[3].getAttribute('xlink:href'),
+        hrefs: uses.map((use) => use.getAttribute('href')),
+        xlinkLeft: uses.filter((use) => use.hasAttribute('xlink:href')).length,
+        markup: el.outerHTML,
       };
     });
 
-    // Сами `use` остаются — элемент разрешён белым списком, — а ссылки вычищаются.
-    expect(result).toEqual({
-      uses: 4,
-      javascriptLinks: 0,
-      keptHref: '#legit',
-      keptXlink: null,
+    // Элементы `use` остаются — они разрешены белым списком, — а ссылки сузились
+    // до фрагмента своего документа. Относительный `href` у `use` уводил бы
+    // наружу, как только документ оказался бы на другом origin.
+    expect(result.uses).toBe(7);
+    expect(result.hrefs).toEqual(['#frag', ' #padded ', null, null, null, null, null]);
+    expect(result.xlinkLeft).toBe(0);
+    expect(result.markup).not.toContain('evil.example');
+  });
+
+  test('санитизация удаляет узлы комментариев', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      const el = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg">'
+          + '<!-- комментарий до пути -->'
+          + '<g><!-- внутри группы --><path d="M0 0h16v16H0z"/></g>'
+          // Инструкция обработки удаляется тем же правилом: контракт санитизации —
+          // «остаются только элементы белого списка и текст», а не «всё, кроме
+          // перечисленных». В HTML-документе она и так инертна, поэтому это
+          // упрощение контракта, а не закрытая дыра.
+          + '<?vc-evil mode="off"?>'
+          + '<!-- комментарий после группы -->'
+          + '</svg>',
+      });
+
+      /**
+       * @param {number} whatToShow что считать, константа `NodeFilter`.
+       * @returns {number} количество узлов этого вида под `el`.
+       */
+      const countNodes = (whatToShow) => {
+        const walker = document.createTreeWalker(el, whatToShow);
+        let count = 0;
+        while (walker.nextNode() !== null) {
+          count += 1;
+        }
+        return count;
+      };
+
+      return {
+        comments: countNodes(NodeFilter.SHOW_COMMENT),
+        processingInstructions: countNodes(NodeFilter.SHOW_PROCESSING_INSTRUCTION),
+        paths: el.querySelectorAll('path').length,
+      };
     });
+
+    // Соседние элементы пережили: вычищаются узлы, а не поддерево.
+    expect(result).toEqual({ comments: 0, processingInstructions: 0, paths: 1 });
+  });
+
+  test('атрибут fill и stroke переживают санитизацию', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      const el = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg">'
+          + '<path d="M2 2h12v12H2z" fill="currentColor" stroke="none" stroke-width="2"'
+          + ' fill-rule="evenodd" stroke-linejoin="round"/>'
+          + '<circle cx="8" cy="8" r="4" fill="red" fill-opacity="0.5"/></svg>',
+      });
+      const path = el.querySelectorAll('path')[0];
+      const circle = el.querySelectorAll('circle')[0];
+      return {
+        path: Array.from(path.attributes, (attribute) => attribute.name).sort(),
+        circle: Array.from(circle.attributes, (attribute) => attribute.name).sort(),
+      };
+    });
+
+    // Презентация выражается атрибутами, поэтому запрет `style` ничего
+    // лишнего не отнимает.
+    expect(result.path).toEqual(['d', 'fill', 'fill-rule', 'stroke', 'stroke-linejoin', 'stroke-width']);
+    expect(result.circle).toEqual(['cx', 'cy', 'fill', 'fill-opacity', 'r']);
   });
 
   test('санитизация сохраняет элементы из белого списка (path, circle, g, defs, use, linearGradient)', async ({ page }) => {
