@@ -34,9 +34,12 @@ import { expect, test } from '@playwright/test';
  * в элемент рядом с ним. `read` ничего не делает и снимает состояние на
  * середине сценария, когда сравнивать «до» и «после» нужно не на краях.
  * `reset` зовёт `reset()` движка — вызывающий код делает это при закрытии меню.
+ * `clear` снимает отметки с корневого уровня руками, не забывая его: так ведёт
+ * себя перерисовка уровня, и состояние без активного пункта обязано быть
+ * определённым.
  *
  * @typedef {object} Step
- * @property {'press' | 'press-outside' | 'read' | 'reset'} command
+ * @property {'press' | 'press-outside' | 'read' | 'reset' | 'clear'} command
  * @property {string} [key]
  * @property {ItemAt} [at]
  */
@@ -130,6 +133,9 @@ import { expect, test } from '@playwright/test';
 /**
  * @typedef {object} Scenario
  * @property {string} set имя набора пунктов, объявленного в пробе.
+ * @property {boolean} [buildSubmenus] `false` — дерево уровней не заводится, то
+ *   есть подменю не существует, хотя пункты-владельцы в меню есть. Так выглядит
+ *   дерево, до которого вызывающий код не дошёл.
  * @property {Record<string, number[]>} paths
  * @property {Step[]} steps
  */
@@ -143,7 +149,7 @@ import { expect, test } from '@playwright/test';
 
 /**
  * @typedef {object} KeyboardProbe
- * @property {(set: string) => void} open
+ * @property {(set: string, buildSubmenus?: boolean) => void} open
  * @property {(paths: Record<string, number[]>) => ProbeSnapshot} read
  * @property {(steps: Step[], paths: Record<string, number[]>) => StepResult[]} run
  */
@@ -608,6 +614,25 @@ test.beforeEach(async ({ page }) => {
      * @returns {StepResult}
      */
     function execute(step) {
+      if (step.command === 'clear') {
+        // Отметки снимает вызывающий код, а уровень движку остаётся известным:
+        // `reset` был бы другим состоянием — он и отметки снимает, и уровень
+        // забывает.
+        const entry = openedRoot();
+        for (const item of entry.items) {
+          item.element.tabIndex = -1;
+          item.element.removeAttribute('data-active');
+        }
+        entry.activeIndex = -1;
+        return {
+          command: step.command,
+          key: null,
+          prevented: false,
+          target: null,
+          focus: focusState(),
+          levels: read(pathsOfRun).levels,
+        };
+      }
       if (step.command === 'reset') {
         keyboard.reset();
         return {
@@ -675,13 +700,15 @@ test.beforeEach(async ({ page }) => {
     }
 
     const probe = /** @type {KeyboardProbe} */ ({
-      open(set) {
+      open(set, buildSubmenus) {
         layer = createLayer({ label: 'Меню файла', theme: 'light', actions });
         const items = sets[set];
         root = layer.ensureLevel(items, null, 0, null);
         levels.push(root);
         byElement.set(root.element, root);
-        buildTree(root, items, 0);
+        if (buildSubmenus !== false) {
+          buildTree(root, items, 0);
+        }
         openedLayer().showRoot(root, { x: 60, y: 60 });
         keyboard.focusFirst(root);
       },
@@ -707,7 +734,7 @@ async function runScenario(page, scenario) {
   return page.evaluate((input) => {
     const scope = /** @type {{ __vcKb: KeyboardProbe }} */ (/** @type {unknown} */ (globalThis));
     const probe = scope.__vcKb;
-    probe.open(input.set);
+    probe.open(input.set, input.buildSubmenus);
     const before = probe.read(input.paths);
     const steps = probe.run(input.steps, input.paths);
     return { before, steps, after: probe.read(input.paths) };
@@ -1064,6 +1091,69 @@ test.describe('переходы между уровнями', () => {
     expect(marksOf(result.after.levels.sub)).toEqual(marksOf(result.steps[2].levels.sub));
     expect(result.after.levels.sub.activeIndex).toBe(0);
     expect(result.after.calls.order).toEqual([`openSubmenu:${result.before.levels.sub.id}`]);
+  });
+
+  test('уровень без активного пункта начинает цикл с края', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'tail',
+      paths: { root: [] },
+      steps: [
+        { command: 'clear' },
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'clear' },
+        { command: 'press', key: 'ArrowUp' },
+      ],
+    });
+
+    // Отметки снял вызывающий код, а уровень движку остался известен: активного
+    // пункта нет, и циклу не от чего отталкиваться.
+    expect(result.steps[0].levels.root.activeIndex).toBe(-1);
+    expect(result.steps[0].levels.root.tabStops).toBe(0);
+    expect(result.steps[0].levels.root.activeMarks).toBe(0);
+    // `ArrowDown` без активного идёт с первого, `ArrowUp` — с последнего. Отсчёт от
+    // `-1` ушёл бы на минус один элемент списка, и `ArrowUp` встал бы на
+    // предпоследний вместо последнего.
+    expect(result.steps[1].levels.root.focusLabel).toBe('Первый');
+    expect(result.steps[1].levels.root.activeIndex).toBe(0);
+    expect(result.steps[2].levels.root.activeIndex).toBe(-1);
+    expect(result.steps[3].levels.root.focusLabel).toBe('Третий');
+    expect(result.after.levels.root.activeIndex).toBe(2);
+    expect(result.after.levels.root.tabStops).toBe(1);
+  });
+
+  test('незаведённый уровень подменю: пункт-владелец молчит, а не активируется', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'tree',
+      // Дерево не заведено: владельцы в меню есть, а уровней за ними нет.
+      buildSubmenus: false,
+      paths: { root: [] },
+      steps: [
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'ArrowRight' },
+        { command: 'press', key: 'Enter' },
+      ],
+    });
+
+    // Пункт — настоящий владелец: признаки рендерера на месте, а уровня за ним
+    // нет. Именно так выглядит дерево, до которого вызывающий код не дошёл, и
+    // движок обязан это различать, а не считать пунктом без подменю.
+    expect(result.after.levels.root.items[1].hasSubmenu).toBe(true);
+    expect(result.after.levels.root.items[1].haspopup).toBe('menu');
+    expect(result.after.levels.root.children).toBe(0);
+    // Ничего не открыто — показывать нечего, — и ничего не активировано: молчание
+    // предпочтительнее активации пункта, чьё подменю так и не появится.
+    expect(result.after.calls).toEqual({
+      closeAll: 0,
+      closeCurrentLevel: 0,
+      openSubmenu: 0,
+      openSubmenuIds: [],
+      focusOwner: 0,
+      order: [],
+    });
+    expect(result.after.actions).toEqual([]);
+    expect(result.after.clicks).toEqual([]);
+    expect(result.after.levels.root.open).toBe(true);
+    expect(result.after.focus.label).toBe('Экспорт');
   });
 
   test('reset снимает отметки роуминга и забывает уровень', async ({ page }) => {
