@@ -86,20 +86,26 @@ function createManualClock() {
  * @typedef {object} HoverSetup
  * @property {ManualClock} clock ручные часы.
  * @property {HoverIntentController} hover контроллер hover intent.
+ * @property {string[]} calls имена сработавших обратных связей в порядке вызова.
  */
 
 /**
  * @returns {HoverSetup} контроллер на ручных часах. Задержки не передаются:
- *   кейсы проверяют дефолты — 250 мс на открытие и 200 мс на закрытие.
+ *   кейсы проверяют дефолты — 250 мс на открытие и 200 мс на закрытие. `onOpen` и
+ *   `onClose` только записывают факт срабатывания, поэтому время двигает
+ *   планировщик, а не колбэки.
  */
 function setup() {
   const clock = createManualClock();
+  /** @type {string[]} */
+  const calls = [];
   const hover = createHoverIntent({
     schedule: clock.schedule,
     cancel: clock.cancel,
-    now: clock.now,
+    onOpen: () => calls.push('open'),
+    onClose: () => calls.push('close'),
   });
-  return { clock, hover };
+  return { clock, hover, calls };
 }
 
 /**
@@ -175,6 +181,22 @@ test.describe('открытие', () => {
     // наблюдается как «задачи открытия больше нет».
     expect(hover.isOpenPending()).toBe(false);
     expect(clock.tasks).toHaveLength(0);
+  });
+
+  test('повторный itemEnter не перезапускает задержку открытия', () => {
+    const { clock, hover, calls } = setup();
+
+    hover.itemEnter();
+    clock.advance(100);
+    hover.itemEnter();
+
+    // Отсчёт идёт от первого наведения: задача одна, срок прежний, а не now + 250.
+    expect(clock.tasks).toHaveLength(1);
+    expect(clock.tasks[0].time).toBe(OPEN_GRACE_MS);
+
+    clock.advance(OPEN_GRACE_MS);
+    expect(hover.isOpenPending()).toBe(false);
+    expect(calls).toEqual(['open']);
   });
 });
 
@@ -297,6 +319,51 @@ test.describe('отмена', () => {
   });
 });
 
+test.describe('обратная связь', () => {
+  test('onOpen срабатывает ровно один раз по истечении задержки', () => {
+    const { clock, hover, calls } = setup();
+
+    hover.itemEnter();
+    expect(calls).toEqual([]);
+
+    clock.advance(OPEN_GRACE_MS);
+    expect(calls).toEqual(['open']);
+
+    clock.advance(OPEN_GRACE_MS * 5);
+    expect(calls).toEqual(['open']);
+  });
+
+  test('onClose срабатывает ровно один раз по истечении задержки', () => {
+    const { clock, hover, calls } = setup();
+    enterSubmenuFrom(hover, EXIT_POINT, ENTRY_POINT);
+    hover.pointerMove(FIRST_POINT);
+    hover.pointerMove(OUTSIDE_POINT);
+    expect(calls).toEqual([]);
+
+    clock.advance(CLOSE_GRACE_MS);
+    expect(calls).toEqual(['close']);
+
+    clock.advance(CLOSE_GRACE_MS * 5);
+    expect(calls).toEqual(['close']);
+  });
+
+  test('отменённые задачи не вызывают обратную связь', () => {
+    const { clock, hover, calls } = setup();
+
+    // Открытие снято уходом с пункта, закрытие — возвратом курсора внутрь клина.
+    hover.itemEnter();
+    hover.itemLeave();
+    enterSubmenuFrom(hover, EXIT_POINT, ENTRY_POINT);
+    hover.pointerMove(FIRST_POINT);
+    hover.pointerMove(OUTSIDE_POINT);
+    hover.pointerMove(INSIDE_POINT);
+    expect(calls).toEqual([]);
+
+    clock.advance(CLOSE_GRACE_MS * 5);
+    expect(calls).toEqual([]);
+  });
+});
+
 test.describe('сброс', () => {
   test('новый itemEnter сбрасывает якоря предыдущего подменю', () => {
     const { hover } = setup();
@@ -332,38 +399,34 @@ test.describe('первая позиция после входа', () => {
   });
 });
 
-test.describe('вырожденный клин не защищает', () => {
-  test('промах и следующая за ним точка обе планируют закрытие', () => {
-    const { clock, hover } = setup();
-    enterSubmenuFrom(hover, { x: 100, y: 50 }, { x: 100, y: 50.4 });
-    hover.pointerMove({ x: 100, y: 200 });
+test('вырожденный клин после промаха становится невырожденным и начинает защищать', () => {
+  const { clock, hover } = setup();
+  enterSubmenuFrom(hover, { x: 100, y: 50 }, { x: 100, y: 50.4 });
+  hover.pointerMove({ x: 100, y: 200 });
 
-    hover.pointerMove({ x: 400, y: 10 });
-    expect(hover.isClosePending()).toBe(true);
-    expect(clock.tasks).toHaveLength(1);
-    expect(clock.tasks[0].time).toBe(clock.now() + CLOSE_GRACE_MS);
+  hover.pointerMove({ x: 400, y: 10 });
+  expect(hover.isClosePending()).toBe(true);
+  expect(clock.tasks).toHaveLength(1);
+  expect(clock.tasks[0].time).toBe(clock.now() + CLOSE_GRACE_MS);
 
-    // Страховка срабатывает, и вторая точка планирует закрытие заново: против
-    // сузившегося клина (100, 50), (100, 50.4), (400, 10) площадью 60 px² у
-    // (380, 20) кросс-продукты -112, 2192 и -2200 разного знака.
-    clock.advance(CLOSE_GRACE_MS);
-    expect(hover.isClosePending()).toBe(false);
-    expect(clock.tasks).toHaveLength(0);
+  // Промах стал вершиной, и клин (100, 50), (100, 50.4), (400, 10) площадью
+  // 60 px² стал невырожденным: точка (150, 43.5) внутри него — кросс-продукты
+  // -20, -50 и -50 одного знака, поэтому закрытие снимается. Против прежнего
+  // вырожденного клина с вершиной (100, 200) она снаружи: знаки -20, -7480 и
+  // 7500 разные, и закрытие осталось бы запланированным. Именно это и отличает
+  // кейс от проверки одной лишь вырожденности.
+  hover.pointerMove({ x: 150, y: 43.5 });
 
-    hover.pointerMove({ x: 380, y: 20 });
-
-    expect(hover.isClosePending()).toBe(true);
-    expect(clock.tasks).toHaveLength(1);
-    expect(clock.tasks[0].time).toBe(clock.now() + CLOSE_GRACE_MS);
-  });
+  expect(hover.isClosePending()).toBe(false);
+  expect(clock.tasks).toHaveLength(0);
 });
 
 test.describe('часы по умолчанию', () => {
   test('без инъекций контроллер работает на глобальных таймерах', () => {
-    // Единственный кейс без ручного планировщика, и ждать он не должен: проверяется
-    // только то, что дефолты не падают и что задача снимается настоящим
-    // `clearTimeout`. Время вперёд не двигается, поэтому кейс не зависит от
-    // скорости машины.
+    // Единственный кейс без ручного планировщика, и ждать он не должен: время
+    // вперёд не двигается, поэтому кейс не зависит от скорости машины. Проверяет
+    // ровно одно — ветка дефолтов не падает: опечатка в `globalThis.setTimeout`
+    // валит кейс, а содержимое `clearTimeout` кейс не проверяет.
     const hover = createHoverIntent();
 
     hover.itemEnter();

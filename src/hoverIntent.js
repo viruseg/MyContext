@@ -1,19 +1,15 @@
 import { CLOSE_GRACE_MS, DEGENERATE_AREA, OPEN_GRACE_MS } from './constants.js';
 
 /**
- * Модуль решает, летит ли курсор к подменю или уже ушёл от него. Пока курсор
- * внутри треугольника из трёх уже принятых точек — «безопасного треугольника» —
- * закрытие откладывается, иначе работает страховочный таймер.
+ * Hover intent: решает, летит ли курсор к подменю. Пока курсор внутри
+ * «безопасного треугольника» из трёх уже принятых точек, закрытие откладывается,
+ * иначе решение принимает страховочный таймер.
  *
- * Проверяемая точка никогда не входит в проверяемый многоугольник: если бы она
- * была его вершиной, она лежала бы внутри по определению и проверка стала бы
- * тождественной. Первая позиция после входа в подменю поэтому принимается без
- * проверки, каждая следующая проверяется против `[выход, вход, последняя
- * принятая]`, а промах обнуляет последнюю принятую точку — иначе клин рос бы
- * от каждого движения и подменю не закрывалось бы никогда.
+ * Проверяемая точка в проверяемый многоугольник не входит: вершина треугольника
+ * лежит в нём по определению, и такая проверка была бы тождественной. Поэтому
+ * первая позиция после входа в подменю принимается без проверки.
  *
- * Домен не трогается: контроллер работает только с точками `{x, y}` в
- * координатах вьюпорта, которые ему передаёт вызывающий код.
+ * Домен не трогается: точки `{x, y}` в координатах вьюпорта передаёт вызывающий код.
  */
 
 /**
@@ -25,8 +21,8 @@ import { CLOSE_GRACE_MS, DEGENERATE_AREA, OPEN_GRACE_MS } from './constants.js';
  */
 
 /**
- * Настройки контроллера. `schedule`, `cancel` и `now` обязательны по контракту:
- * тесты обязаны управлять временем руками, без реальных таймеров.
+ * Настройки контроллера. `schedule` и `cancel` обязательны по контракту: тесты
+ * обязаны управлять временем руками, без реальных таймеров.
  *
  * @typedef {object} HoverIntentOptions
  * @property {number} [openDelayMs] задержка открытия, мс, `OPEN_GRACE_MS` по умолчанию.
@@ -40,8 +36,8 @@ import { CLOSE_GRACE_MS, DEGENERATE_AREA, OPEN_GRACE_MS } from './constants.js';
  *   `Illegal invocation`. Возвращаемый жест задачи не интерпретируется.
  * @property {(handle: unknown) => void} [cancel] снятие задачи по жесту, который
  *   вернул `schedule`. По умолчанию глобальный `clearTimeout`.
- * @property {(now: () => number) => number} [now] текущее время, мс. Не читается:
- *   время задаёт `schedule`, а решение принимается по его задачам.
+ * @property {() => void} [onOpen] вызывается, когда сработала задержка открытия.
+ * @property {() => void} [onClose] вызывается, когда сработала задержка закрытия.
  */
 
 /**
@@ -50,20 +46,22 @@ import { CLOSE_GRACE_MS, DEGENERATE_AREA, OPEN_GRACE_MS } from './constants.js';
  * @typedef {object} HoverIntentController
  * @property {() => void} itemEnter курсор на пункте-владельце: снимает
  *   запланированное закрытие прошлого подменю, сбрасывает его опорные точки и
- *   планирует открытие через `openDelayMs`.
+ *   планирует открытие через `openDelayMs`. Повторный вход на тот же пункт отсчёт
+ *   не перезапускает: задержка идёт от первого наведения.
  * @property {() => void} itemLeave курсор покинул пункт-владелец: запоминает
  *   последнюю позицию `pointerMove` якорем выхода и отменяет открытие.
  * @property {(point: Point) => void} submenuEnter курсор вошёл в подменю: точка
- *   становится якорем входа, ожидающая вершина сбрасывается, запланированное
- *   закрытие снимается.
- * @property {(point: Point) => void} pointerMove позиция курсора: первая после
- *   входа принимается как вершина, каждая следующая проверяется против клина из
- *   трёх уже принятых точек. Точка вне клина планирует закрытие и обнуляет
- *   вершину, сужая клин.
+ *   становится якорем входа, вершина клина сбрасывается, запланированное закрытие
+ *   снимается.
+ * @property {(point: Point) => void} pointerMove позиция курсора. Первая позиция
+ *   после входа принимается без проверки и становится вершиной клина; каждая
+ *   следующая проверяется против клина из трёх уже принятых точек. Попадание внутрь
+ *   оставляет вершину прежней, промах планирует закрытие и сам становится новой
+ *   вершиной, то есть сужает клин.
  * @property {() => boolean} isOpenPending `true`, пока задача открытия ждёт своего
  *   времени. Сбросить раньше времени может только `itemLeave` или `itemPress`.
- * @property {() => boolean} isClosePending `true`, пока задача закрытия ждёт
- *   своего времени.
+ * @property {() => boolean} isClosePending `true`, пока задача закрытия ждёт своего
+ *   времени.
  * @property {() => void} itemPress пункт нажат: открытие происходит немедленно,
  *   задача снимается. Колбэка открытия у контроллера нет, поэтому «немедленно»
  *   наблюдается как снятая задача и сброшенный `isOpenPending`.
@@ -85,9 +83,9 @@ function cross(a, b, c) {
 }
 
 /**
- * @param {Point[]} triangle вершины треугольника против часовой стрелки или по
- *   прямой, любой ориентации.
- * @returns {number} площадь треугольника, px².
+ * @param {Point[]} triangle вершины треугольника в любом порядке.
+ * @returns {number} площадь треугольника, px²: ориентация вершин не важна, у
+ *   треугольника на одной прямой площадь нулевая.
  */
 function triangleArea(triangle) {
   return Math.abs(cross(triangle[0], triangle[1], triangle[2])) / 2;
@@ -156,14 +154,16 @@ export function createHoverIntent(options = {}) {
     degenerateArea = DEGENERATE_AREA,
     schedule = defaultSchedule,
     cancel = defaultCancel,
+    onOpen = () => {},
+    onClose = () => {},
   } = options;
 
   /** @type {Point | null} */
   let exitPoint = null;
   /** @type {Point | null} */
   let entryPoint = null;
-  /** @type {Point | null} */
-  let lastAcceptedPoint = null;
+  /** @type {Point | null} первая позиция после входа или последний промах. */
+  let wedgeTip = null;
   /** @type {Point | null} последняя позиция `pointerMove`, источник якоря выхода. */
   let lastPointerPoint = null;
   /** @type {unknown} */
@@ -173,9 +173,6 @@ export function createHoverIntent(options = {}) {
   let openPending = false;
   let closePending = false;
 
-  /**
-   * @returns {void}
-   */
   function clearOpen() {
     if (!openPending) {
       return;
@@ -185,9 +182,6 @@ export function createHoverIntent(options = {}) {
     openPending = false;
   }
 
-  /**
-   * @returns {void}
-   */
   function clearClose() {
     if (!closePending) {
       return;
@@ -197,9 +191,6 @@ export function createHoverIntent(options = {}) {
     closePending = false;
   }
 
-  /**
-   * @returns {void}
-   */
   function planClose() {
     if (closePending) {
       return;
@@ -208,17 +199,15 @@ export function createHoverIntent(options = {}) {
     closeHandle = schedule(() => {
       closeHandle = null;
       closePending = false;
+      onClose();
     }, closeDelayMs);
   }
 
-  /**
-   * @returns {void}
-   */
   function itemEnter() {
     clearClose();
     exitPoint = null;
     entryPoint = null;
-    lastAcceptedPoint = null;
+    wedgeTip = null;
     if (openPending) {
       return;
     }
@@ -226,12 +215,10 @@ export function createHoverIntent(options = {}) {
     openHandle = schedule(() => {
       openHandle = null;
       openPending = false;
+      onOpen();
     }, openDelayMs);
   }
 
-  /**
-   * @returns {void}
-   */
   function itemLeave() {
     if (lastPointerPoint !== null) {
       exitPoint = lastPointerPoint;
@@ -245,7 +232,7 @@ export function createHoverIntent(options = {}) {
    */
   function submenuEnter(point) {
     entryPoint = copyPoint(point);
-    lastAcceptedPoint = null;
+    wedgeTip = null;
     clearClose();
   }
 
@@ -260,12 +247,12 @@ export function createHoverIntent(options = {}) {
       planClose();
       return;
     }
-    if (lastAcceptedPoint === null) {
-      lastAcceptedPoint = lastPointerPoint;
+    if (wedgeTip === null) {
+      wedgeTip = lastPointerPoint;
       return;
     }
 
-    const triangle = [exitPoint, entryPoint, lastAcceptedPoint];
+    const triangle = [exitPoint, entryPoint, wedgeTip];
     // Клин площадью ровно `degenerateArea` невырожден: порог строгий, иначе
     // граница вела бы себя как вырожденная.
     if (triangleArea(triangle) >= degenerateArea && containsPoint(triangle, point)) {
@@ -273,29 +260,24 @@ export function createHoverIntent(options = {}) {
       return;
     }
 
-    // Обнуление вершины обязательно: без него клин рос бы от каждой принятой
-    // точки, и подменю осталось бы открытым. В вырожденной ветке оно же
-    // позволяет курсору вернуться ближе и сделать клин невырожденным.
-    lastAcceptedPoint = lastPointerPoint;
+    // Промах обязан стать вершиной: иначе клин не сузился бы, и подменю осталось
+    // бы открытым внутри треугольника, растущего от каждой принятой точки. В
+    // вырожденной ветке это же позволяет курсору вернуться ближе и сделать клин
+    // невырожденным.
+    wedgeTip = lastPointerPoint;
     planClose();
   }
 
-  /**
-   * @returns {void}
-   */
   function itemPress() {
     clearOpen();
   }
 
-  /**
-   * @returns {void}
-   */
   function cancelAll() {
     clearOpen();
     clearClose();
     exitPoint = null;
     entryPoint = null;
-    lastAcceptedPoint = null;
+    wedgeTip = null;
     lastPointerPoint = null;
   }
 
