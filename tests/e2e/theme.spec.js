@@ -4,6 +4,7 @@ import {
   DEFAULT_CHEVRON_SIZE,
   DEFAULT_ICON_SIZE,
   DEFAULT_ITEM_HEIGHT,
+  DEFAULT_RADIUS,
   SAFETY_PADDING,
 } from '../../src/constants.js';
 
@@ -22,20 +23,21 @@ const SETTLE_MS = DEFAULT_ANIMATION_DURATION * 3;
 /**
  * Снимок вычисленных стилей открытого меню. Всё, что кейс проверяет, снимается
  * одним заходом в страницу: `getComputedStyle` дорог, а половина кейсов нуждается
- * сразу и в палитре, и в переходах.
+ * сразу и в палитре, и в переходах. Цвета возвращаются строками: математику по ним
+ * делает сам тест, чтобы правила WCAG жили в одном месте.
  *
  * @typedef {object} ThemeSnapshot
  * @property {string} backgroundColor вычисленный цвет фона меню.
- * @property {number} alpha альфа-канал фона меню: меньше единицы означает
- *   полупрозрачность.
  * @property {string} solidBackground цвет из токена `--vc-bg-solid`: то, что
  *   подставляет запасной вариант без `backdrop-filter`.
- * @property {string} text вычисленный цвет текста из токена `--vc-text`.
- * @property {number} luminance относительная яркость текста, 0..1.
+ * @property {string} accent цвет из токена `--vc-accent`.
+ * @property {string} accentText цвет из токена `--vc-accent-text`.
+ * @property {string} text цвет из токена `--vc-text`.
  * @property {string} paddingToken значение `--vc-padding`.
  * @property {string} itemHeightToken значение `--vc-item-height`.
  * @property {string} iconSizeToken значение `--vc-icon-size`.
  * @property {string} chevronSizeToken значение `--vc-chevron-size`.
+ * @property {string} radiusToken значение `--vc-radius`.
  * @property {string} durationToken значение `--vc-animation-duration`.
  * @property {string} maxHeight вычисленный `max-height` меню.
  * @property {string} maxWidth вычисленный `max-width` меню.
@@ -70,7 +72,7 @@ const SETTLE_MS = DEFAULT_ANIMATION_DURATION * 3;
  */
 
 const MENU_CONTENT_HTML = `<div class="vc-list" role="group">
-        <div class="vc-item" role="menuitem" tabindex="-1" data-active aria-haspopup="menu">
+        <div class="vc-item" role="menuitem" tabindex="0" data-active aria-haspopup="menu">
           <span class="vc-icon-slot" id="slot"></span>
           <span class="vc-label" id="${ACTIVE_ITEM}">Открыть</span>
           <span class="vc-chevron" id="chevron-right"></span>
@@ -164,16 +166,148 @@ function readBlock(css, marker) {
 }
 
 /**
- * Все селекторы файла, включая вложенные в at-rule. Правило без вложенности читается
- * как «всё до открывающей скобки», поэтому в список попадают и прелюдии
- * `@media`/`@supports` — для проверок селекторов это безобидно.
+ * Листовые правила файла: селектор и его тело. Вложенные правила читаются как
+ * самостоятельные, прелюдии `@media`/`@supports` пропускаются — для проверок
+ * селекторов и объявлений это безобидно.
  *
  * @param {string} css сплющенный текст таблицы стилей.
- * @returns {string[]} уникальные селекторы и прелюдии at-rule.
+ * @returns {{ selector: string, declarations: string }[]}
+ */
+function readRules(css) {
+  return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((match) => {
+    return { selector: match[1].trim(), declarations: match[2].trim() };
+  }).filter((rule) => rule.selector !== '');
+}
+
+/**
+ * Тела всех правил с ровно таким селектором, склеенные в один текст.
+ *
+ * Нужно, чтобы утверждение про объявление говорило о конкретном селекторе:
+ * `toContain` по всему файлу нашло бы то же объявление в соседнем правиле и
+ * пропустило бы пропажу из нужного.
+ *
+ * @param {string} css сплющенный текст таблицы стилей.
+ * @param {string} selector искомый селектор, ровно как он написан в файле.
+ * @returns {string} объявления всех правил с этим селектором.
+ */
+function readRule(css, selector) {
+  const found = readRules(css).filter((rule) => rule.selector === selector);
+  expect(found.map((rule) => rule.selector), `правило ${selector}`).not.toHaveLength(0);
+  return found.map((rule) => rule.declarations).join('; ');
+}
+
+/**
+ * Все селекторы файла.
+ *
+ * @param {string} css сплющенный текст таблицы стилей.
+ * @returns {string[]} уникальные селекторы.
  */
 function readSelectors(css) {
-  const found = [...css.matchAll(/([^{}]+)\{/g)].map((match) => match[1].trim());
-  return [...new Set(found)].filter((selector) => selector !== '');
+  return [...new Set(readRules(css).map((rule) => rule.selector))];
+}
+
+/**
+ * Каналы и прозрачность вычисленного цвета.
+ *
+ * @typedef {object} Color
+ * @property {number} r красный канал, 0..255.
+ * @property {number} g зелёный канал, 0..255.
+ * @property {number} b синий канал, 0..255.
+ * @property {number} a альфа-канал, 0..1.
+ */
+
+/**
+ * Разбирает вычисленный цвет. Нотаций две: `rgba(r, g, b, a)` и
+ * `color(srgb r g b / a)` — вторая появляется у новых сборок, и без неё
+ * проверка зависела бы от версии движка.
+ *
+ * @param {string} color вычисленный цвет.
+ * @returns {Color}
+ */
+function parseColor(color) {
+  const rgba = /rgba?\(([^)]*)\)/.exec(color);
+  if (rgba !== null) {
+    const parts = rgba[1].split(/[,\s/]+/).filter((part) => part !== '').map(Number);
+    return {
+      r: parts[0] ?? 0,
+      g: parts[1] ?? 0,
+      b: parts[2] ?? 0,
+      a: parts.length >= 4 ? (parts[3] ?? 1) : 1,
+    };
+  }
+  const modern = /color\(\s*srgb\s+([^)]*)\)/.exec(color);
+  if (modern !== null) {
+    const parts = modern[1].split('/').map((part) => part.trim());
+    const channels = (parts[0] ?? '').split(/[\s,]+/).filter((part) => part !== '').map(Number);
+    const alpha = parts[1] === undefined ? 1 : Number(parts[1]);
+    return {
+      // `color(srgb …)` задаёт каналы в 0..1, а `getComputedStyle` отдаёт и
+      // проценты, и доли; приведение к 0..255 одно на оба случая.
+      r: Math.round((channels[0] ?? 0) * 255),
+      g: Math.round((channels[1] ?? 0) * 255),
+      b: Math.round((channels[2] ?? 0) * 255),
+      a: alpha,
+    };
+  }
+  throw new Error(`Не разобран цвет: ${color}`);
+}
+
+/**
+ * Альфа-канал вычисленного цвета, 1 для непрозрачного.
+ *
+ * @param {string} color вычисленный цвет.
+ * @returns {number}
+ */
+function alphaOf(color) {
+  return parseColor(color).a;
+}
+
+/**
+ * Наложение `top` на `bottom` с учётом прозрачности, то есть тот композит,
+ * который в итоге видит глаз. Для непрозрачного `top` результат равен `top`.
+ *
+ * @param {Color} top верхний слой.
+ * @param {Color} bottom нижний слой.
+ * @returns {Color} результат без прозрачности.
+ */
+function composite(top, bottom) {
+  return {
+    r: top.r * top.a + bottom.r * (1 - top.a),
+    g: top.g * top.a + bottom.g * (1 - top.a),
+    b: top.b * top.a + bottom.b * (1 - top.a),
+    a: 1,
+  };
+}
+
+/**
+ * Относительная яркость по WCAG.
+ *
+ * @param {Color} color сплошной цвет.
+ * @returns {number} яркость, 0..1.
+ */
+function relativeLuminance(color) {
+  /**
+   * @param {number} value канал 0..255.
+   * @returns {number} линеаризованный канал.
+   */
+  const linear = (value) => {
+    const channel = value / 255;
+    return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b);
+}
+
+/**
+ * Контраст двух сплошных цветов по WCAG.
+ *
+ * @param {Color} foreground цвет текста.
+ * @param {Color} background цвет подложки.
+ * @returns {number} отношение, 1..21.
+ */
+function contrast(foreground, background) {
+  const light = relativeLuminance(foreground);
+  const dark = relativeLuminance(background);
+  return (Math.max(light, dark) + 0.05) / (Math.min(light, dark) + 0.05);
 }
 
 /**
@@ -186,24 +320,6 @@ async function readSnapshot(page) {
     const list = /** @type {HTMLElement} */ (document.querySelector('.vc-list'));
     const item = /** @type {HTMLElement} */ (document.querySelector('.vc-item'));
     const style = getComputedStyle(menu);
-
-    /**
-     * Альфа-канал приходит двумя нотациями: `rgba(r, g, b, a)` и
-     * `color(srgb r g b / a)`. Обе нужно понимать, иначе кейс про
-     * полупрозрачный фон зависел бы от версии движка.
-     *
-     * @param {string} color вычисленный цвет.
-     * @returns {number} альфа-канал, 1 для непрозрачного.
-     */
-    function alphaOf(color) {
-      const rgba = /rgba?\(([^)]*)\)/.exec(color);
-      if (rgba !== null) {
-        const parts = rgba[1].split(/[,\s/]+/).filter((part) => part !== '');
-        return parts.length >= 4 ? Number(parts[3]) : 1;
-      }
-      const slash = /\/\s*([\d.]+)\s*\)$/.exec(color);
-      return slash === null ? 1 : Number(slash[1]);
-    }
 
     /**
      * Токен приводится к `rgb()` тем же путём, каким браузер приводит цвет:
@@ -222,39 +338,17 @@ async function readSnapshot(page) {
       return resolved;
     }
 
-    /**
-     * @param {string} value вычисленный цвет текста.
-     * @returns {number[]} каналы `r`, `g`, `b`.
-     */
-    function channels(value) {
-      const found = /rgba?\(([^)]*)\)/.exec(value);
-      if (found === null) {
-        return [0, 0, 0];
-      }
-      return found[1].split(/[,\s/]+/).filter((part) => part !== '').map(Number);
-    }
-
-    /**
-     * @param {number} value канал 0..255.
-     * @returns {number} линеаризованное значение канала.
-     */
-    function linear(value) {
-      const channel = value / 255;
-      return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
-    }
-
-    const text = resolve(style.getPropertyValue('--vc-text'));
-    const rgb = channels(text);
     return {
       backgroundColor: style.backgroundColor,
-      alpha: alphaOf(style.backgroundColor),
       solidBackground: resolve(style.getPropertyValue('--vc-bg-solid')),
-      text,
-      luminance: 0.2126 * linear(rgb[0]) + 0.7152 * linear(rgb[1]) + 0.0722 * linear(rgb[2]),
+      accent: resolve(style.getPropertyValue('--vc-accent')),
+      accentText: resolve(style.getPropertyValue('--vc-accent-text')),
+      text: resolve(style.getPropertyValue('--vc-text')),
       paddingToken: style.getPropertyValue('--vc-padding'),
       itemHeightToken: style.getPropertyValue('--vc-item-height'),
       iconSizeToken: style.getPropertyValue('--vc-icon-size'),
       chevronSizeToken: style.getPropertyValue('--vc-chevron-size'),
+      radiusToken: style.getPropertyValue('--vc-radius'),
       durationToken: style.getPropertyValue('--vc-animation-duration'),
       maxHeight: style.maxHeight,
       maxWidth: style.maxWidth,
@@ -305,17 +399,27 @@ async function setAnimationDuration(page, durationMs) {
  * до-изменяемого состояния нет вовсе и `@starting-style` не срабатывает. Настоящее
  * первое открытие — это вставка готового меню в документ.
  *
+ * `inlineDurationMs` повторяет столкновение, о котором идёт речь в кейсе про
+ * `reduce`: инлайновая длительность пишется публичным API уже на новое меню.
+ * Без неё наблюдение шло бы мимо дела — инлайновый стиль исходного `#m` на
+ * свежий узел не переносится, и проверка проходила бы при сломанном CSS.
+ *
  * @param {import('@playwright/test').Page} page
+ * @param {number | null} inlineDurationMs длительность через публичный API или `null`.
  * @returns {Promise<EntrySnapshot>}
  */
-async function readEntry(page) {
-  return page.evaluate(async ({ content, settleMs }) => {
+async function readEntry(page, inlineDurationMs = null) {
+  return page.evaluate(async ({ content, settleMs, durationMs }) => {
     // Второе меню собирается из тех же кусков, что и первое, но без идентификаторов:
     // дубликаты `id` в документе невалидны, а измерять тут больше нечего.
     const host = document.createElement('div');
     host.innerHTML = `<div class="vc-menu" popover="manual">${content.replaceAll(/\s+id="[^"]*"/g, '')}</div>`;
     const menu = /** @type {HTMLElement} */ (host.firstElementChild);
     document.body.appendChild(menu);
+    if (durationMs !== null) {
+      const { applyAnimationDuration } = await import('../../src/theme.js');
+      applyAnimationDuration(menu, durationMs);
+    }
     menu.showPopover();
     // Чтение стилей вынуждает пересчёт, поэтому возвращается стартовое
     // значение, а не значение кадра, следующего за переходом.
@@ -329,7 +433,7 @@ async function readEntry(page) {
     const settled = getComputedStyle(menu).opacity;
     menu.remove();
     return { immediate, settled, running };
-  }, { content: MENU_CONTENT_HTML, settleMs: SETTLE_MS });
+  }, { content: MENU_CONTENT_HTML, settleMs: SETTLE_MS, durationMs: inlineDurationMs });
 }
 
 /**
@@ -444,6 +548,15 @@ test.describe('токены геометрии', () => {
     expect(boxes.slot).toBe(DEFAULT_ICON_SIZE);
     expect(boxes.chevron).toBe(DEFAULT_CHEVRON_SIZE);
   });
+
+  test('radius по умолчанию равен DEFAULT_RADIUS', async ({ page }) => {
+    const snapshot = await readSnapshot(page);
+    // Пятая пара «токен ↔ константа» из доктрины `src/constants.js`. Раньше она
+    // была единственной незакреплённой: токен объявлялся, но ни с чем не
+    // сверялся, и разъехаться с константой мог без единого красного теста.
+    expect(DEFAULT_RADIUS).toBe(8);
+    expect(snapshot.radiusToken.trim()).toBe(`${DEFAULT_RADIUS}px`);
+  });
 });
 
 test.describe('ограничение габаритов', () => {
@@ -460,9 +573,11 @@ test.describe('ограничение габаритов', () => {
 
     // Форма ограничения проверяется по тексту файла: `100dvh` без учёта
     // динамической панели браузера и `padding` вместо `SAFETY_PADDING` дали бы
-    // расхождение с движком позиционирования, которого выше не видно.
+    // расхождение с движком позиционирования, которого выше не видно. Утверждение
+    // ограничено правилом `.vc-menu`: то же объявление есть и у `.vc-list`, и
+    // `toContain` по всему файлу нашло бы его там, оставив меню без ограничения.
     const css = await readStylesheet(page.request);
-    expect(css).toContain('max-height: calc(100dvh - 2 * var(--vc-padding))');
+    expect(readRule(css, '.vc-menu')).toContain('max-height: calc(100dvh - 2 * var(--vc-padding))');
   });
 
   test('уровень ограничен по ширине: max-width равен 100dvw минус два padding', async ({ page }) => {
@@ -503,7 +618,7 @@ test.describe('ограничение габаритов', () => {
     expect(measured.itemHeight).toBe(DEFAULT_ITEM_HEIGHT);
 
     const css = await readStylesheet(page.request);
-    expect(css).toContain('max-width: calc(100dvw - 2 * var(--vc-padding))');
+    expect(readRule(css, '.vc-menu')).toContain('max-width: calc(100dvw - 2 * var(--vc-padding))');
   });
 });
 
@@ -514,8 +629,8 @@ test.describe('стекло и запасной фон', () => {
     // Полупрозрачность держится на `color-mix` с `transparent`, а не на
     // восьмизначном `#ffffffcc`: запасной вариант ниже подставляет непрозрачный
     // токен, и он обязан отличаться от того, что видит браузер сейчас.
-    expect(snapshot.alpha).toBeGreaterThan(0);
-    expect(snapshot.alpha).toBeLessThan(1);
+    expect(alphaOf(snapshot.backgroundColor)).toBeGreaterThan(0);
+    expect(alphaOf(snapshot.backgroundColor)).toBeLessThan(1);
     expect(snapshot.backgroundColor).not.toBe(snapshot.solidBackground);
 
     // Размытие читается и по префиксованному имени: старые WebKit-сборки знают
@@ -534,19 +649,65 @@ test.describe('стекло и запасной фон', () => {
     expect(css).toContain('backdrop-filter: blur(20px) saturate(180%)');
   });
 
-  test('поддержка без backdrop-filter: под @supports not есть непрозрачный запасной фон', async ({ page, request }) => {
-    const fallback = readBlock(await readStylesheet(request), '@supports not (backdrop-filter: blur(1px))');
+  test('поддержка без backdrop-filter: под @supports not есть непрозрачный запасной фон', async ({ page }) => {
+    // Чтение идёт через CSSOM, а не по тексту файла: текстовое тело at-rule
+    // находит объявление где угодно внутри, и перенос подстановки из `.vc-menu`
+    // в `.vc-list` оставил бы кейс зелёным, пока меню осталось бы без
+    // запасного фона. Условие применить нельзя — все три движка понимают
+    // `backdrop-filter` — поэтому проверяется оно само и его содержимое.
+    const rule = await page.evaluate((path) => {
+      for (const sheet of document.styleSheets) {
+        const href = sheet.href;
+        if (href === null || !href.endsWith(path)) {
+          continue;
+        }
+        for (const candidate of sheet.cssRules) {
+          if (candidate instanceof CSSSupportsRule) {
+            const inner = Array.from(candidate.cssRules);
+            const style = inner[0] instanceof CSSStyleRule ? inner[0].style : null;
+            /**
+             * @param {CSSStyleDeclaration} declaration
+             * @returns {string[]} имена объявленных свойств, в порядке объявления.
+             */
+            const declared = (declaration) => {
+              const names = [];
+              for (let index = 0; index < declaration.length; index += 1) {
+                names.push(declaration.item(index));
+              }
+              return names;
+            };
+            return {
+              condition: candidate.conditionText,
+              selectors: inner.map((entry) => {
+                return entry instanceof CSSStyleRule ? entry.selectorText : null;
+              }),
+              properties: style === null ? [] : declared(style),
+              background: style === null ? null : style.getPropertyValue('--vc-bg'),
+              filter: style === null ? null : style.getPropertyValue('backdrop-filter'),
+            };
+          }
+        }
+      }
+      return null;
+    }, 'mycontext.css');
 
-    // Блок под отрицательным условием — единственное место, где фон становится
-    // непрозрачным, и он обязан подставлять сплошной токен.
-    expect(fallback).toContain('--vc-bg: var(--vc-bg-solid)');
-    expect(fallback).toContain('backdrop-filter: none');
+    expect(rule, 'CSSSupportsRule в таблице стилей').not.toBe(null);
+    // Пробелы в сериализованном условии движок нормализует по-своему, поэтому
+    // сравнение по смыслу, а не посимвольно.
+    expect(rule?.condition.replace(/\s+/g, ' ')).toMatch(
+      /^not \(backdrop-filter: blur\(1px\)\)$/,
+    );
+    // Селектор проверяется явно: запасной фон обязан достаться меню, а не списку.
+    expect(rule?.selectors).toEqual(['.vc-menu']);
+    expect(rule?.properties).toContain('--vc-bg');
+    expect(rule?.background?.trim()).toBe('var(--vc-bg-solid)');
+    expect(rule?.filter?.trim()).toBe('none');
 
-    // Применить запасной вариант в движке, который `backdrop-filter` умеет,
-    // нельзя, поэтому проверяется достижимость условия: сплошной токен объявлен
-    // и разрешается в непрозрачный цвет — иначе подмена ничего бы не улучшила.
+    // Непрозрачность сплошного токена — то, ради чего подстановка и нужна.
+    // Прежняя проверка вида `/^rgba?\(/` ничего не говорила о прозрачности:
+    // `rgba(255,255,255,0.5)` ей удовлетворяет.
     const snapshot = await readSnapshot(page);
-    expect(snapshot.solidBackground).toMatch(/^rgba?\(/);
+    expect(alphaOf(snapshot.solidBackground)).toBe(1);
     expect(snapshot.solidBackground).not.toBe(snapshot.backgroundColor);
   });
 });
@@ -572,18 +733,18 @@ test.describe('каскад тем', () => {
     const snapshot = await readSnapshot(page);
 
     // Тёмный текст на светлом фоне: без автотемы по умолчанию и не разобраться.
-    expect(snapshot.luminance).toBeLessThan(0.2);
+    expect(relativeLuminance(parseColor(snapshot.text))).toBeLessThan(0.2);
   });
 
   test('auto при тёмной системной схеме меняет фон', async ({ page }) => {
     await page.emulateMedia({ colorScheme: 'dark' });
     const dark = await readSnapshot(page);
 
-    expect(dark.luminance).toBeGreaterThan(0.5);
+    expect(relativeLuminance(parseColor(dark.text))).toBeGreaterThan(0.5);
     // Фон остался стеклом, а не стал непрозрачным: запасной вариант включается
     // по `@supports`, а не по теме.
-    expect(dark.alpha).toBeGreaterThan(0);
-    expect(dark.alpha).toBeLessThan(1);
+    expect(alphaOf(dark.backgroundColor)).toBeGreaterThan(0);
+    expect(alphaOf(dark.backgroundColor)).toBeLessThan(1);
   });
 
   test('явный dark побеждает светлую системную настройку', async ({ page }) => {
@@ -592,7 +753,8 @@ test.describe('каскад тем', () => {
 
     // Атрибут стоит, иначе кейс проверил бы не ту тему.
     expect(await page.getAttribute(MENU_SELECTOR, 'data-vc-theme')).toBe('dark');
-    expect((await readSnapshot(page)).luminance).toBeGreaterThan(0.5);
+    const dark = await readSnapshot(page);
+    expect(relativeLuminance(parseColor(dark.text))).toBeGreaterThan(0.5);
   });
 
   test('явный light побеждает тёмную системную настройку', async ({ page }) => {
@@ -600,7 +762,8 @@ test.describe('каскад тем', () => {
     await setTheme(page, 'light');
 
     expect(await page.getAttribute(MENU_SELECTOR, 'data-vc-theme')).toBe('light');
-    expect((await readSnapshot(page)).luminance).toBeLessThan(0.2);
+    const light = await readSnapshot(page);
+    expect(relativeLuminance(parseColor(light.text))).toBeLessThan(0.2);
   });
 });
 
@@ -650,6 +813,44 @@ test.describe('анимации', () => {
     // `@starting-style` задержало бы появление на всю ненулевую длительность.
     const entry = await readEntry(page);
     expect(entry.immediate).toBe('1');
+    expect(entry.running).toEqual([]);
+  });
+
+  test('reduced-motion побеждает инлайновую длительность', async ({ page }) => {
+    // Столкновение, которое не видит кейс выше: тот не зовёт публичный API, а
+    // `applyAnimationDuration` пишет токен в инлайновый стиль. Инлайновое
+    // объявление перебивает любое авторское правило, включая правило внутри
+    // `@media`, поэтому обнуление токена в медиазапросе тут бессильно.
+    await setAnimationDuration(page, 120);
+
+    // Столкновение действительно воспроизведено: без этой проверки кейс прошёл бы
+    // и при провале `setAnimationDuration`, то есть проверял бы не то.
+    const inline = await page.evaluate(() => {
+      return /** @type {HTMLElement} */ (document.getElementById('m')).style
+        .getPropertyValue('--vc-animation-duration');
+    });
+    expect(inline.trim()).toBe('120ms');
+    // До `reduce` инлайновое значение действительно governs: длительность 0.12s.
+    expect(Number.parseFloat((await readSnapshot(page)).transitionDuration)).toBeCloseTo(0.12, 5);
+
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    const reduced = await readSnapshot(page);
+    // Переходы не просто получили нулевую длительность, а выключены как класс
+    // свойств: `transition: none` даёт `transition-property: none`. Инлайновый
+    // токен при этом никуда не делся — его перебило правило медиазапроса, и
+    // поэтому проверять надо поведение, а не значение токена.
+    expect(reduced.transitionProperty).toBe('none');
+    expect(reduced.transitionDuration).toBe('0s');
+    expect(reduced.transform).toBe('none');
+    expect(inline.trim()).toBe('120ms');
+
+    // Наблюдение идёт на меню, которое само несёт инлайновую длительность: у
+    // свежего узла инлайновый стиль исходного `#m` не наследуется, и проверка
+    // прошла бы мимо столкновения.
+    const entry = await readEntry(page, 120);
+    expect(entry.immediate).toBe('1');
+    // Ни одного перехода: без `transition: none` в медиазапросе длительность
+    // осталась бы 0.12s, переходы пошли бы, и кейс упал бы здесь.
     expect(entry.running).toEqual([]);
   });
 
@@ -744,7 +945,7 @@ test.describe('пункты и состояния', () => {
     expect(withClass).toEqual(['.vc-icon']);
   });
 
-  test('активный пункт помечен [data-active], а не фокусом', async ({ page, request }) => {
+  test('активный пункт помечен [data-active], а не фокусом', async ({ page }) => {
     const result = await page.evaluate(() => {
       const active = /** @type {HTMLElement} */ (document.querySelector('.vc-item[data-active]'));
       const plain = /** @type {HTMLElement} */ (
@@ -763,11 +964,96 @@ test.describe('пункты и состояния', () => {
     expect(result.focusMoved).toBe(true);
     expect(result.activeBackground).not.toBe('rgba(0, 0, 0, 0)');
     expect(result.activeBackground).not.toBe(result.focusedBackground);
+  });
 
-    // Селектора фокуса в файле нет вообще: подсветка живёт на атрибуте.
+  test('видимость фокуса не запрещена', async ({ page, request }) => {
     const css = await readStylesheet(request);
-    expect(css).not.toContain(':focus');
-    expect(css).toContain('.vc-item[data-active]');
+
+    // Запрещено ровно одно: подсветка активного пункта не должна ключеваться на
+    // голом `:focus`. Проверка по классу из целого слова, потому что предложенный
+    // `/[^-]:focus\b/` матчил бы и `:focus-visible` — между `focus` и `-visible`
+    // есть граница слова, и кольцо фокуса было бы запрещено вместе с запретом
+    // самого фокуса.
+    expect(css, 'голый селектор :focus').not.toMatch(/(?<!-):focus(?!-)/);
+
+    // Кольцо обязано быть объявлено, а не только не запрещено: `data-active`
+    // совпадает с фокусом при клавиатурной навигации, но не обязан совпадать
+    // всегда, и без кольца клавиатурный пользователь теряет признак фокуса.
+    const ringRules = readRules(css).filter((rule) => rule.selector.includes(':focus-visible'));
+    expect(ringRules.length).toBeGreaterThan(0);
+    expect(ringRules.map((rule) => rule.selector)).toContain('.vc-item:focus-visible');
+    expect(readRule(css, '.vc-item:focus-visible')).toMatch(/outline:\s*2px solid/);
+
+    // `outline: none` у меню и списка означал бы, что фокус на уровне не виден
+    // вовсе: браузерное кольцо погашено, а своего никто не рисует.
+    expect(readRule(css, '.vc-menu')).not.toContain('outline');
+    expect(readRule(css, '.vc-list')).not.toContain('outline');
+
+    // И вживую: Tab по спецификации 9.1 ставит фокус на активный пункт, и кольцо
+    // у него есть.
+    await page.keyboard.press('Tab');
+    const focused = await page.evaluate(() => {
+      const active = /** @type {HTMLElement} */ (document.querySelector('.vc-item[data-active]'));
+      return {
+        isActive: document.activeElement === active,
+        width: getComputedStyle(active).outlineWidth,
+        style: getComputedStyle(active).outlineStyle,
+      };
+    });
+    expect(focused.isActive).toBe(true);
+    expect(focused.width).toBe('2px');
+    expect(focused.style).toBe('solid');
+  });
+
+  test('контраст активного пункта не ниже 4.5:1 в обеих темах', async ({ page }) => {
+    /**
+     * @param {'light' | 'dark'} scheme системная схема.
+     * @returns {Promise<{ ratio: number, opaque: boolean, chevronMatches: boolean }>}
+     */
+    const measure = async (scheme) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      const measured = await page.evaluate(() => {
+        const menu = /** @type {HTMLElement} */ (document.getElementById('m'));
+        const active = /** @type {HTMLElement} */ (
+          document.querySelector('.vc-item[data-active]')
+        );
+        const chevron = /** @type {HTMLElement} */ (
+          active.querySelector('.vc-chevron')
+        );
+        return {
+          // Цвета строки: её собственный фон, её текст и фон подложки, на которую
+          // этот фон ложится.
+          row: getComputedStyle(active).backgroundColor,
+          label: getComputedStyle(active).color,
+          menu: getComputedStyle(menu).backgroundColor,
+          // Под меню лежит страница: её фон участвует в композите, потому что
+          // фон меню сам по себе полупрозрачный.
+          page: getComputedStyle(document.body).backgroundColor,
+          chevron: getComputedStyle(chevron).color,
+        };
+      });
+      const row = parseColor(measured.row);
+      // Композит, а не сырой токен: меню стеклянное, и глаз видит подложку.
+      const background = composite(composite(row, parseColor(measured.menu)), parseColor(measured.page));
+      return {
+        ratio: contrast(parseColor(measured.label), background),
+        // Непрозрачная заливка означает, что стекло под строкой на число не
+        // влияет. Утверждается явно, иначе непрозрачность выводилась бы из
+        // совпадения с результатом, а не проверялась.
+        opaque: alphaOf(measured.row) === 1,
+        // Шеврон на заливке акцентом обязан читаться, иначе он молча пропадает.
+        chevronMatches: measured.chevron === measured.label,
+      };
+    };
+
+    for (const scheme of /** @type {const} */ (['light', 'dark'])) {
+      const result = await measure(scheme);
+      // 1.29:1 на тонированной заливке — это не «слабо», это нечитаемо, поэтому
+      // порог берётся из AA для текста, а не «на глаз».
+      expect(result.ratio, `контраст активного пункта, тема ${scheme}`).toBeGreaterThanOrEqual(4.5);
+      expect(result.opaque, `непрозрачность заливки, тема ${scheme}`).toBe(true);
+      expect(result.chevronMatches, `цвет шеврона, тема ${scheme}`).toBe(true);
+    }
   });
 
   test('разделитель — тонкая линия, а шеврон разворачивается по data-chevron', async ({ page }) => {

@@ -35,10 +35,12 @@
   --vc-bg: color-mix(in srgb, var(--vc-bg-solid) 72%, transparent);
   --vc-text: #1f2023;
   --vc-muted: #6b7280;
+  /* Пара «акцент + текст на акценте» обязана выдерживать 4.5:1: ею заливается
+   * активный пункт. Тонированной заливки здесь быть не может — на 18% акцента
+   * белый текст даёт 1.29:1, то есть подсветку активного пункта не видно вовсе. */
   --vc-accent: #2563eb;
   --vc-accent-text: #ffffff;
   --vc-hover-bg: color-mix(in srgb, var(--vc-text) 6%, transparent);
-  --vc-active-bg: color-mix(in srgb, var(--vc-accent) 18%, transparent);
   --vc-separator: color-mix(in srgb, var(--vc-text) 12%, transparent);
   --vc-shadow: 0 8px 28px rgba(15, 18, 25, 0.18);
 }
@@ -61,10 +63,12 @@
     --vc-bg: color-mix(in srgb, var(--vc-bg-solid) 76%, transparent);
     --vc-text: #e8eaed;
     --vc-muted: #9aa1ab;
+    /* Тёмная тема разворачивает пару: светлый акцент под почти чёрным текстом,
+     * 7.03:1. Направление противоположное светлой теме, и это не опечатка —
+     * так выглядит нативная подсветка в тёмной теме. */
     --vc-accent: #6f9dff;
     --vc-accent-text: #10131a;
     --vc-hover-bg: color-mix(in srgb, var(--vc-text) 10%, transparent);
-    --vc-active-bg: color-mix(in srgb, var(--vc-accent) 34%, transparent);
     --vc-separator: color-mix(in srgb, var(--vc-text) 16%, transparent);
     --vc-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
   }
@@ -78,7 +82,6 @@
   --vc-accent: #6f9dff;
   --vc-accent-text: #10131a;
   --vc-hover-bg: color-mix(in srgb, var(--vc-text) 10%, transparent);
-  --vc-active-bg: color-mix(in srgb, var(--vc-accent) 34%, transparent);
   --vc-separator: color-mix(in srgb, var(--vc-text) 16%, transparent);
   --vc-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
 }
@@ -131,9 +134,8 @@
   max-height: calc(100dvh - 2 * var(--vc-padding));
   max-width: calc(100dvw - 2 * var(--vc-padding));
 
-  /* Фокус рисует рамка меню целиком, а не список: иначе при переходе фокуса
-   * между уровнями рамка мечтает по краю содержимого. */
-  outline: none;
+  /* `outline` здесь намеренно не задан: фокус на уровне обязан быть виден, и
+   * `data-active` покрывает только активный пункт. */
   overflow: visible;
 }
 
@@ -159,7 +161,6 @@
   max-width: calc(100dvw - 2 * var(--vc-padding));
   overflow-y: auto;
   overflow-x: hidden;
-  outline: none;
 }
 
 /* ── 4. Пункты ──────────────────────────────────────────────────────────────
@@ -194,11 +195,34 @@
  * подменю мышью `:focus-visible` не срабатывает, и подсветка мигала бы.
  * `data-active` вдобавок селекторно тестируется.
  *
+ * Заливка сплошная, а не тонированная: только так текст на активном пункте
+ * доходит до 4.5:1 в обеих темах (5.17:1 и 7.03:1). Насыщенность — плата за
+ * контраст, и она совпадает с нативным видом системных меню.
+ *
  * Специфичность у `:hover` и `[data-active]` одинаковая, поэтому правило стоит
  * ниже: активный пункт остаётся активным и под курсором. */
 .vc-item[data-active] {
-  background: var(--vc-active-bg);
+  background: var(--vc-accent);
   color: var(--vc-accent-text);
+}
+
+/* Приглушённый цвет шеврона на заливке акцентом даёт 1.05:1 и пропадает,
+ * поэтому внутри активного пункта шеврон наследует цвет строки. */
+.vc-item[data-active] .vc-chevron {
+  color: currentColor;
+}
+
+/* Кольцо фокуса — единственный носитель видимого признака фокуса для
+ * клавиатуры, и снимать его нельзя: `data-active` совпадает с фокусом при
+ * клавиатурной навигации, но не обязан совпадать всегда.
+ *
+ * Цветом служит `--vc-text`, а не `--vc-accent`: кольцо акцентом слилось бы с
+ * заливкой активного пункта в 1:1, то есть стало бы невидимым именно там, где
+ * нужно. `outline-offset: -2px` держит кольцо внутри строки — иначе `overflow`
+ * у `.vc-list` срезал бы его у первого и последнего пункта. */
+.vc-item:focus-visible {
+  outline: 2px solid var(--vc-text);
+  outline-offset: -2px;
 }
 
 .vc-item[aria-disabled="true"] {
@@ -291,16 +315,35 @@
 /*
  * `reduce` обнуляет длительность, а не укорачивает её: при любом положительном
  * значении скрытое меню ещё доживало бы своего отложенного `hidePopover()` и
- * съедало клики по странице. `transform` снят совсем — масштаб при появлении
- * декоративен, а состояние задаётся `opacity`.
+ * съедало клики по странице.
  *
- * Правило адресовано и `:popover-open`: у него специфичность выше, чем у
- * `.vc-menu`, иначе открытое меню продолжило бы масштабироваться.
+ * Длительность обнуляется и обрывом переходов. `applyAnimationDuration` пишет
+ * токен в инлайновый стиль, а инлайновое объявление перебивает любое авторское
+ * правило, включая правило внутри `@media`, — поэтому обнуления токена в
+ * медиазапросе самого по себе мало: первый же вызов публичного API вернул бы
+ * меню к анимации на полной длительности. `transition` инлайновым не пишется
+ * никем, и `!important` не нужен.
+ *
+ * Потомки в списке селекторов не для полноты: у `.vc-chevron` своя длительность
+ * от того же токена.
  */
 @media (prefers-reduced-motion: reduce) {
   .vc-menu,
-  .vc-menu:popover-open {
+  .vc-menu:popover-open,
+  .vc-menu *,
+  .vc-menu *::before,
+  .vc-menu *::after {
     --vc-animation-duration: 0ms;
+    transition: none;
+  }
+
+  /* `transform` снимается только у самого меню: поворот шеврона на 180° это
+   * признак flippedX, а не анимация, и он обязан пережить `reduce`.
+   *
+   * Селектор `:popover-open` обязателен: у него специфичность выше, иначе
+   * открытое меню продолжило бы масштабироваться. */
+  .vc-menu,
+  .vc-menu:popover-open {
     transform: none;
   }
 }
