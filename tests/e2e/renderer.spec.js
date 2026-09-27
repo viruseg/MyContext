@@ -518,8 +518,13 @@ test.describe('сетка пункта', () => {
        * другом. Опора на `padding + дорожка иконки + зазор` такой провал
        * ловит.
        *
+       * Одной опоры на координату мало: дорожки иконки и шеврона — ровно 16 и
+       * 12 px, и лейбл, задвинутый в освободившуюся 12-пиксельную, встал бы в ту
+       * же самую координату. Поэтому числом колонок закрепляется и сам порядок:
+       * лейбл обязан быть второй дорожкой, а не третьей.
+       *
        * @param {number} index
-       * @returns {{ labelX: number, expectedX: number }}
+       * @returns {{ labelX: number, expectedX: number, tracks: number[], labelWidth: number }}
        */
       const labelPlace = (index) => {
         const item = level.items[index].element;
@@ -531,6 +536,8 @@ test.describe('сетка пункта', () => {
             + Number.parseFloat(style.paddingLeft)
             + iconSize
             + Number.parseFloat(style.columnGap),
+          tracks: style.gridTemplateColumns.split(' ').map(Number.parseFloat),
+          labelWidth: label.getBoundingClientRect().width,
         };
       };
       return {
@@ -540,11 +547,25 @@ test.describe('сетка пункта', () => {
       };
     }, { levelItems: FIXTURE_ITEMS, iconSize: DEFAULT_ICON_SIZE });
 
-    expect(result.withIcon.labelX).toBe(result.withIcon.expectedX);
+    // Сравнение с допуском в тысячную долю пикселя: дорожка приходит из
+    // `grid-template-columns` с округлением до трёх знаков, а габарит лейбла —
+    // из `getBoundingClientRect` без него, и посимвольное `toBe` ловило бы
+    // движение в 10⁻⁴ px, а не сдвиг колонки.
+    expect(result.withIcon.labelX).toBeCloseTo(result.withIcon.expectedX, 3);
     // Слот зарезервирован, поэтому у пункта без иконки координата та же самая, а
     // не «какая получится».
-    expect(result.withoutIcon.labelX).toBe(result.withoutIcon.expectedX);
+    expect(result.withoutIcon.labelX).toBeCloseTo(result.withoutIcon.expectedX, 3);
     expect(result.withIcon.labelX).toBe(result.withoutIcon.labelX);
+    // Три дорожки в фиксированном порядке, и лейбл — средняя, тянущаяся: с двумя
+    // дорожками лейбл встал бы в 12-пиксельную колонку шеврона, и координата его
+    // левой границы от сдвига не изменилась бы.
+    for (const place of [result.withIcon, result.withoutIcon]) {
+      expect(place.tracks).toHaveLength(3);
+      expect(place.tracks[0]).toBe(DEFAULT_ICON_SIZE);
+      expect(place.tracks[2]).toBe(DEFAULT_CHEVRON_SIZE);
+      expect(place.labelWidth).toBeCloseTo(place.tracks[1], 3);
+      expect(place.labelWidth).toBeGreaterThan(DEFAULT_ICON_SIZE);
+    }
   });
 
   test('шеврон что-то рисует: у ::before есть ненулевая толщина рамки', async ({ page }) => {
