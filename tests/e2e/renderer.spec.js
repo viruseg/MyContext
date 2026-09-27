@@ -586,6 +586,28 @@ test.describe('сетка пункта', () => {
       // Псевдоэлемент читается только через `getComputedStyle` со вторым
       // аргументом: в разметке его нет, и `querySelector` его не увидит.
       const glyph = getComputedStyle(chevron, '::before');
+      /**
+       * Угол поворота из матрицы, знаком. Без знака утверждение было бы
+       * неполным: `rotate(45deg)` даёт ту же величину в 45°, и стрелка смотрела
+       * бы вниз.
+       *
+       * @param {string} transform вычисленное значение `transform`.
+       * @returns {number} угол в радианах, −π..π.
+       */
+      const angleOf = (transform) => {
+        const parts = /matrix\(([^)]+)\)/.exec(transform);
+        if (parts === null) {
+          return Number.NaN;
+        }
+        const numbers = /** @type {string[]} */ (/** @type {unknown} */ (parts))[1]
+          .split(',')
+          .map((part) => Number(part.trim()));
+        return Math.atan2(numbers[1] ?? 0, numbers[0] ?? 1);
+      };
+      // Активную строку помечает движок роуминга, а не рендерер, поэтому здесь
+      // состояние задаётся руками — как в фикстуре `theme.spec.js`.
+      const item = level.items[0].element;
+      item.dataset.active = '';
       return {
         // Псевдоэлемент обязан быть порождён, иначе все остальные значения были
         // бы начальными, а не вычисленными.
@@ -597,12 +619,20 @@ test.describe('сетка пункта', () => {
         colors: [glyph.borderTopColor, glyph.borderRightColor,
           glyph.borderBottomColor, glyph.borderLeftColor],
         size: [Number.parseFloat(glyph.width), Number.parseFloat(glyph.height)],
-        transform: glyph.transform,
-        // Глиф обязан переехать на цвет строки: на активном пункте шеврон
+        // Угол со знаком: диагональ срезанного угла при `−45°` смотрит вправо,
+        // при `+45°` — вниз, при `−90°` — вверх. Одна только величина угла эти
+        // три варианта не различила бы.
+        angle: angleOf(glyph.transform),
+        // Глиф обязан переехать на цвет строки: на активной строке шеврон
         // наследует `--vc-accent-text`, и серая стрелка на заливке акцентом
-        // дала бы 1.05:1.
+        // дала бы 1.05:1. Цвет рамки берётся уже на активной строке — в базовом
+        // состоянии обе стороны равны `--vc-muted`, и проверка была бы тождеством.
         color: glyph.borderRightColor,
         chevronColor: getComputedStyle(chevron).color,
+        rowColor: getComputedStyle(item).color,
+        // Токен приглушённого цвета, чтобы равенство «цвет глифа равен цвету
+        // шеврона» не прошло бы и тогда, когда оба стали бы приглушёнными.
+        muted: getComputedStyle(item).getPropertyValue('--vc-muted').trim(),
       };
     });
 
@@ -623,9 +653,15 @@ test.describe('сетка пункта', () => {
     }
     // Квадрат, иначе угол получится не 45°, а что-то другое.
     expect(result.size[0]).toBe(result.size[1]);
-    // Поворот глифа обязателен: квадрат без него — это угол, а не стрелка.
-    expect(result.transform).not.toBe('none');
+    // Знак поворота и есть направление стрелки; величина в 45° получена
+    // поворотом срезанного угла квадрата, а не его формой.
+    expect(result.angle).toBeCloseTo(-Math.PI / 4, 5);
     expect(result.color).toBe(result.chevronColor);
+    // Контракт 4.5:1 на активной строке живёт здесь: глиф обязан быть цвета
+    // текста строки, а не приглушённого. `theme.spec.js` проверяет контраст
+    // цвета самого шеврона, но не псевдоэлемента.
+    expect(result.chevronColor).toBe(result.rowColor);
+    expect(result.chevronColor).not.toBe(result.muted);
   });
 
   test('шеврон реально разворачивается: transform в состояниях left и right различаются', async ({ page }) => {
@@ -990,6 +1026,14 @@ test.describe('ключи и коллбэки', () => {
       if (target !== undefined && target.action !== undefined) {
         target.action(new MouseEvent('click'));
       }
+      /**
+       * @param {string | null} key
+       * @returns {string | null} подпись найденного пункта.
+       */
+      const labelOf = (key) => {
+        const found = key === null ? undefined : actions.get(key);
+        return found === undefined ? null : found.label;
+      };
       return {
         firstKeys: first.items.map((entry) => {
           return entry.key;
@@ -1000,6 +1044,12 @@ test.describe('ключи и коллбэки', () => {
         mapKeys: [...actions.keys()],
         mapSize: actions.size,
         calls: [...calls],
+        // Симптом перепутанной проводки, а не его следствие: под старым ключом
+        // по `levelIndex` второй экземпляр перезаписывал первый, и поиск по
+        // ключу пункта первого отдавал чужой пункт. Проверка на саму активацию
+        // этого не поймала бы — активировался пункт второго, он и сработал бы.
+        firstLookup: labelOf(first.items[1].key),
+        secondLookup: labelOf(second.items[1].key),
       };
     });
 
@@ -1010,6 +1060,9 @@ test.describe('ключи и коллбэки', () => {
     expect(result.mapSize).toBe(4);
     expect(result.mapKeys).toEqual(['vc-a-0:0', 'vc-a-0:1', 'vc-b-0:0', 'vc-b-0:1']);
     expect(new Set(result.mapKeys).size).toBe(4);
+    // Ключ пункта первого экземпляра ведёт к пункту первого, а не второго.
+    expect(result.firstLookup).toBe('Второй a');
+    expect(result.secondLookup).toBe('Второй b');
     expect(result.calls).toEqual(['второй:b']);
   });
 });
