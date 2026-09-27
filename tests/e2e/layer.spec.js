@@ -152,6 +152,19 @@ const WIDE_ITEMS = [
 ];
 
 /**
+ * Фикстура для кейсов о фокусе. Отключённый пункт стоит первым, иначе выбор
+ * первого доступного попытался бы попасть в него и кейс про отключённые пункты
+ * ничего бы не различал.
+ *
+ * @type {Array<MenuItem | SeparatorItem>}
+ */
+const FOCUS_ITEMS = [
+  { label: 'Отключённый', disabled: true },
+  { label: 'Первый доступный' },
+  { label: 'Второй доступный', submenu: [{ label: 'Внутри' }] },
+];
+
+/**
  * Проба ставится в `beforeEach` на глобальный объект страницы и достаётся
  * приведением прямо внутри каждого `page.evaluate`: колбэк сериализуется и
  * выполняется в браузере, где функций файла теста нет, — по той же причине, по
@@ -559,7 +572,15 @@ test.describe('показ', () => {
         return point.x >= rect.left && point.x <= rect.right
           && point.y >= rect.top && point.y <= rect.bottom;
       };
-      const afterId = document.elementFromPoint(point.x, point.y)
+      const afterSecond = document.elementFromPoint(point.x, point.y)
+        ?.closest('.vc-menu')?.id ?? null;
+
+      // Перепоказ уже подключённого подменю. Без переноса в конец `<body>` его
+      // узел остался бы на прежнем месте, то есть под соседним: порядок
+      // отрисовки Top Layer следует за порядком в DOM, а не за порядком показа.
+      layer.hide(first);
+      layer.showSubmenu(first);
+      const afterReshow = document.elementFromPoint(point.x, point.y)
         ?.closest('.vc-menu')?.id ?? null;
 
       return {
@@ -572,9 +593,9 @@ test.describe('показ', () => {
         insideFirst: inside(firstRect),
         insideSecond: inside(secondRect),
         beforeId,
-        afterId,
-        // Порядок в DOM: подменю вставлены в порядке показа, и переноса в конец
-        // `<body>` без переноса не произошло бы.
+        afterSecond,
+        afterReshow,
+        // Порядок в DOM: перепоказанное подменю в конце.
         order: Array.from(document.body.children, (node) => {
           return node.id;
         }),
@@ -585,17 +606,19 @@ test.describe('показ', () => {
     // пустоту: `elementFromPoint` вернул бы элемент под первым попавшим.
     expect(result.insideFirst).toBe(true);
     expect(result.insideSecond).toBe(true);
-    // Второе подменю позже в DOM — порядок Top Layer идёт от него, и именно его
-    // перенос в конец `<body>` и поднял наверх.
+    // Перепоказанное подменю в конце `<body>` — порядок Top Layer идёт от него.
     expect(result.order).toEqual([
       result.ids.root,
-      result.ids.first,
       result.ids.second,
+      result.ids.first,
     ]);
     // До показа второго в точке был первый: точка выбрана не случайно, и порядок
     // действительно меняет верхний слой.
     expect(result.beforeId).toBe(result.ids.first);
-    expect(result.afterId).toBe(result.ids.second);
+    expect(result.afterSecond).toBe(result.ids.second);
+    // Перепоказ первого поднял его снова: без переноса в конец `<body>` он
+    // остался бы под соседним, и верхним осталось бы то, что показано раньше.
+    expect(result.afterReshow).toBe(result.ids.first);
   });
 });
 
@@ -940,6 +963,56 @@ test.describe('закрытие', () => {
     // Задача текущего поколения закрывает.
     expect(result.afterFresh.open).toBe(false);
     expect(result.afterFresh.hides).toBe(1);
+  });
+
+  test('закрытие: переход самого уровня закрывает меню, переход потомка — нет', async ({ page }) => {
+    // Настоящее движение: под `reduce` отложенного закрытия нет вовсе, и
+    // `transitionend` нечего было бы слушать.
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    const result = await page.evaluate(({ rootItems, nestedItems }) => {
+      const host = /** @type { { __vcProbe: LayerProbe } } */ (/** @type { unknown } */ (globalThis));
+      const probe = host.__vcProbe;
+      const layer = probe.create();
+      const root = layer.ensureLevel(rootItems, null, 0, null);
+      // Второй уровень строится из фикстуры с владельцем подменю: у пункта с
+      // непустым подменю есть шеврон, а у шеврона свой `transform` с переходом.
+      const sub = layer.ensureLevel(nestedItems, root, 1, root.items[0]);
+      layer.showRoot(root, { x: 40, y: 40 });
+      layer.showSubmenu(sub);
+
+      layer.hide(sub);
+      const scheduled = probe.tasks.length;
+
+      // Переход потомка всплывает к уровню: шеврон крутит свой `transform` на
+      // `data-chevron` и его `transitionend` долетает до уровня. Закрывать по
+      // нему нельзя — меню ушло бы в момент чужой анимации.
+      const chevron = /** @type {HTMLElement} */ (
+        sub.element.querySelector('.vc-chevron')
+      );
+      chevron.dispatchEvent(new Event('transitionend', { bubbles: true }));
+      const afterDescendant = {
+        open: sub.element.matches(':popover-open'),
+        hides: probe.hides.length,
+        pending: probe.tasks.length,
+      };
+
+      // Переход самого уровня: `opacity` и `transform` в `styles/mycontext.css`.
+      sub.element.dispatchEvent(new Event('transitionend', { bubbles: true }));
+      const afterOwn = {
+        open: sub.element.matches(':popover-open'),
+        hides: probe.hides.length,
+        pending: probe.tasks.length,
+      };
+
+      return { scheduled, afterDescendant, afterOwn };
+    }, { rootItems: ROOT_ITEMS, nestedItems: NESTED_ITEMS });
+
+    // Задача-страховка стоит: закрывает уровень и она, если переход не придёт.
+    expect(result.scheduled).toBe(1);
+    expect(result.afterDescendant).toEqual({ open: true, hides: 0, pending: 1 });
+    // Свой переход закрывает сразу и снимает страховку: держать её после
+    // закрытия незачем.
+    expect(result.afterOwn).toEqual({ open: false, hides: 1, pending: 0 });
   });
 
   test('reduced-motion: hidePopover вызывается немедленно, без задачи в планировщике', async ({ page }) => {
@@ -1318,6 +1391,45 @@ test.describe('уровни', () => {
     expect(result.sizeBeforeDestroy).toBe(result.afterDestroy.length);
   });
 
+  test('тема и длительность достаются до каждого уровня', async ({ page }) => {
+    const result = await page.evaluate(({ focusItems, subItems }) => {
+      const host = /** @type { { __vcProbe: LayerProbe } } */ (/** @type { unknown } */ (globalThis));
+      const probe = host.__vcProbe;
+      const layer = probe.create({ theme: 'dark' });
+      const root = layer.ensureLevel(focusItems, null, 0, null);
+      const sub = layer.ensureLevel(subItems, root, 1, root.items[2]);
+      // Уровень обязан быть показан: у отцепленного узла `getComputedStyle` не
+      // вычисляет и пользовательские свойства, и проверка была бы пустой.
+      layer.showRoot(root, { x: 40, y: 40 });
+      layer.showSubmenu(sub);
+      /**
+       * @param {HTMLElement} element
+       * @returns {string}
+       */
+      const durationOf = (element) => {
+        return getComputedStyle(element)
+          .getPropertyValue('--vc-animation-duration')
+          .trim();
+      };
+      return {
+        themes: [root.element.dataset.vcTheme, sub.element.dataset.vcTheme],
+        // Пробная длительность не круглая: значение по умолчанию из таблицы стилей
+        // равно `140ms`, и с ним сравнение прошло бы при полном отсутствии
+        // `applyAnimationDuration`.
+        durations: [durationOf(root.element), durationOf(sub.element)],
+      };
+    }, { focusItems: FOCUS_ITEMS, subItems: SUB_ITEMS });
+
+    // Тема достаётся и до подменю: подменю — часть того же меню, и оформлено
+    // оно тем же набором токенов.
+    expect(result.themes).toEqual(['dark', 'dark']);
+    // Длительность одна на все уровни слоя, и она же идёт в задержку закрытия.
+    expect(result.durations).toEqual([
+      `${TEST_ANIMATION_DURATION}ms`,
+      `${TEST_ANIMATION_DURATION}ms`,
+    ]);
+  });
+
   test('destroy: элементы удалены из DOM, document.body чист', async ({ page }) => {
     // Настоящее движение: под `reduce` отложенного закрытия не было бы и висящих
     // задач тоже, а снимать было бы нечего.
@@ -1416,5 +1528,92 @@ test.describe('уровни', () => {
     expect(result.after.pending).toBe(0);
     expect(result.secondDestroyThrew).toBe(false);
     expect(result.actionsAfterDestroy).toBe(result.actionsBeforeDestroy);
+  });
+});
+
+test.describe('фокус', () => {
+  test('setFocusOwner: фокус уходит в первый доступный пункт, отметка не двоится, снятие её убирает', async ({ page }) => {
+    const result = await page.evaluate(({ focusItems, subItems }) => {
+      const host = /** @type { { __vcProbe: LayerProbe } } */ (/** @type { unknown } */ (globalThis));
+      const probe = host.__vcProbe;
+      const layer = probe.create();
+      const root = layer.ensureLevel(focusItems, null, 0, null);
+      layer.showRoot(root, { x: 40, y: 40 });
+      const sub = layer.ensureLevel(subItems, root, 1, root.items[2]);
+      layer.showSubmenu(sub);
+
+      layer.setFocusOwner(root);
+      // Отключённый пункт первым не встаёт: он вне цикла роуминга, иначе
+      // `tabindex="0"` достался бы неактивному элементу.
+      const afterRoot = {
+        activeIndex: root.activeIndex,
+        tabIndex: root.items[1].element.tabIndex,
+        disabledTabIndex: root.items[0].element.tabIndex,
+        focused: document.activeElement === root.items[1].element,
+        // Ровно один пункт уровня несёт `tabindex="0"`.
+        marked: root.items.filter((item) => {
+          return item.element.tabIndex === 0;
+        }).length,
+      };
+
+      // Передача фокуса подменю снимает отметку с предыдущего уровня, иначе в
+      // документе окажется два кандидата в цикл роуминга сразу.
+      layer.setFocusOwner(sub);
+      const afterSub = {
+        rootActiveIndex: root.activeIndex,
+        rootTabIndex: root.items[1].element.tabIndex,
+        subActiveIndex: sub.activeIndex,
+        subTabIndex: sub.items[0].element.tabIndex,
+        subFocused: document.activeElement === sub.items[0].element,
+        marked: [root, sub].map((entry) => {
+          return entry.items.filter((item) => {
+            return item.element.tabIndex === 0;
+          }).length;
+        }),
+      };
+
+      // `null` снимает отметку и не трогает фокус: возврат фокуса на
+      // элемент-владелец меню делает вызывающий код, он знает этот элемент.
+      layer.setFocusOwner(null);
+      const afterNull = {
+        activeIndex: sub.activeIndex,
+        tabIndex: sub.items[0].element.tabIndex,
+        stillFocused: document.activeElement === sub.items[0].element,
+      };
+
+      // После `destroy` — no-op: узлы отцеплены, и ни отметка, ни фокус на них
+      // не встают.
+      layer.destroy();
+      let threw = false;
+      try {
+        layer.setFocusOwner(root);
+      } catch {
+        threw = true;
+      }
+      return {
+        afterRoot,
+        afterSub,
+        afterNull,
+        afterDestroy: { threw, activeIndex: root.activeIndex, tabIndex: root.items[1].element.tabIndex },
+      };
+    }, { focusItems: FOCUS_ITEMS, subItems: SUB_ITEMS });
+
+    expect(result.afterRoot).toEqual({
+      activeIndex: 1,
+      tabIndex: 0,
+      disabledTabIndex: -1,
+      focused: true,
+      marked: 1,
+    });
+    expect(result.afterSub).toEqual({
+      rootActiveIndex: -1,
+      rootTabIndex: -1,
+      subActiveIndex: 0,
+      subTabIndex: 0,
+      subFocused: true,
+      marked: [0, 1],
+    });
+    expect(result.afterNull).toEqual({ activeIndex: -1, tabIndex: -1, stillFocused: true });
+    expect(result.afterDestroy).toEqual({ threw: false, activeIndex: -1, tabIndex: -1 });
   });
 });
