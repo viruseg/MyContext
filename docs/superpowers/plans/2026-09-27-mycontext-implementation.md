@@ -576,6 +576,7 @@ git commit -m "feat: стили, темы и анимации с поддерж�
    * @property {number} levelIndex
    * @property {string} menuId
    * @property {Map<string, MenuItem>} actions  внутренний ключ → пункт
+   * @property {string} [label]  aria-label уровня; при отсутствии атрибут не ставится
    */
 
   /**
