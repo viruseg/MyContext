@@ -40,6 +40,8 @@ import { DEFAULT_ANIMATION_DURATION, SAFETY_PADDING } from '../../src/constants.
  * @property {string} position инлайновый `position` в момент показа.
  * @property {string} visibility инлайновый `visibility` в момент показа.
  * @property {string} transform инлайновый `transform` в момент показа.
+ * @property {boolean} closing стоит ли на уровне `data-vc-closing` в момент
+ *   показа. Пока атрибут стоит, `opacity` уже ноль и вход не отыграл бы.
  */
 
 /**
@@ -247,6 +249,7 @@ test.beforeEach(async ({ page }) => {
         position: this.style.position,
         visibility: this.style.visibility,
         transform: this.style.transform,
+        closing: this.hasAttribute('data-vc-closing'),
       });
       nativeShow.call(this);
     };
@@ -544,6 +547,8 @@ test.describe('показ', () => {
     expect(call.position).toBe('');
     expect(call.visibility).toBe('');
     expect(call.transform).toBe('');
+    // Отметки закрытия нет: пока она стоит, `opacity` уже ноль, и вход не отыграл бы.
+    expect(call.closing).toBe(false);
     // Замер и запись координат уже состоялись. Показ до замера дал бы здесь
     // пустые `left` и `top` — координаты, посчитанные по габаритам `0×0`.
     expectPx(Number.parseFloat(call.left), result.expected.left, 'left на входе в showPopover');
@@ -830,6 +835,7 @@ test.describe('закрытие', () => {
       layer.showSubmenu(sub);
 
       layer.hide(sub);
+      const closingDelay = probe.tasks[0]?.ms;
       const scheduled = probe.tasks.map((task) => {
         return task.ms;
       });
@@ -848,6 +854,7 @@ test.describe('закрытие', () => {
       return {
         subId: sub.element.id,
         scheduled,
+        closingDelay,
         beforeFire,
         fired,
         afterFire,
@@ -857,8 +864,12 @@ test.describe('закрытие', () => {
       };
     }, { rootItems: ROOT_ITEMS, subItems: SUB_ITEMS });
 
-    // Задача поставлена ровно одна и ровно на `options.animationDuration`.
+    // Задача поставлена ровно одна и ровно на `options.animationDuration`. Сверка
+    // идёт числом, а не «около»: `TEST_ANIMATION_DURATION` и умолчание из константы
+    // различаются на 3 мс, и окно ±8 мс у кейса с настоящими часами такой сдвиг не
+    // увидело бы.
     expect(result.scheduled).toEqual([TEST_ANIMATION_DURATION]);
+    expect(result.closingDelay).toBe(TEST_ANIMATION_DURATION);
     expect(result.fired).toBe(1);
     // До срока подменю ещё открыто, корневое — тем более.
     expect(result.beforeFire).toEqual({ sub: true, root: true });
@@ -974,7 +985,7 @@ test.describe('закрытие', () => {
     expect(result.afterFresh.hides).toBe(1);
   });
 
-  test('закрытие: уровень уходит из Top Layer ровно через animationDuration, и переход на это не влияет', async ({ page }) => {
+  test('отложенный период совпадает с animationDuration', async ({ page }) => {
     // Настоящее движение и настоящие часы: под `reduce` отложенности нет вовсе, а
     // задача, поставленная заглушкой, исполнилась бы по первому же чтению списка
     // и ничего не сказала бы о сроке.
@@ -1030,6 +1041,10 @@ test.describe('закрытие', () => {
       };
     });
 
+    // Премиса кейса: пауза обязана быть заметно меньше длительности, иначе
+    // переход входа успеет завершиться и разница со сроком таймера исчезла бы —
+    // кейс прошёл бы вхолостую, а не упал.
+    expect(ENTRY_TRANSITION_WAIT_MS * 3).toBeLessThan(TEST_ANIMATION_DURATION);
     const elapsed = marks.hiddenAt - marks.hideAt;
     // Уровень не ушёл из Top Layer мгновенно: до срока он в нём и остаётся, и
     // переход `opacity` и `transform` всё это время идёт.
@@ -1039,6 +1054,118 @@ test.describe('закрытие', () => {
     // 10 мс, который кейс обязан ловить, и при этом заведомо больше разницы между
     // двумя таймерами, поставленными в одну миллисекунду.
     expect(Math.abs(elapsed - marks.control)).toBeLessThanOrEqual(8);
+  });
+
+  test('закрытие гасит уровень до ухода из Top Layer', async ({ page }) => {
+    // Настоящее движение: под `reduce` отложенности нет вовсе, и гаснуть нечему —
+    // там `transition: none`. Гашение проверяется на живом переходе CSS, поэтому
+    // читается оно на середине затухания, настоящим временем.
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    const marks = await page.evaluate(async ({ rootItems, subItems, duration }) => {
+      const host = /** @type { { __vcProbe: LayerProbe } } */ (
+        /** @type {unknown} */ (globalThis)
+      );
+      const layer = host.__vcProbe.real();
+      const root = layer.ensureLevel(rootItems, null, 0, null);
+      const sub = layer.ensureLevel(subItems, root, 1, root.items[0]);
+      layer.showRoot(root, { x: 40, y: 40 });
+      layer.showSubmenu(sub);
+
+      /**
+       * @param {number} ms
+       * @returns {Promise<void>}
+       */
+      const wait = (ms) => {
+        return new Promise((resolve) => {
+          globalThis.setTimeout(resolve, ms);
+        });
+      };
+      // Переходу входа дано закончиться: иначе чтение «до закрытия» видело бы
+      // стартовое значение из `@starting-style`, то есть ноль, и сравнивать было
+      // бы не с чем.
+      await wait(duration);
+
+      const element = sub.element;
+      const style = globalThis.getComputedStyle(element);
+      const before = {
+        closing: element.hasAttribute('data-vc-closing'),
+        open: element.matches(':popover-open'),
+        opacity: Number.parseFloat(style.opacity),
+        pointerEvents: style.pointerEvents,
+      };
+      // Точка в геометрии подменю, и до закрытия она достаётся до самого меню:
+      // иначе проверка снятия событий смотрела бы в пустоту.
+      const rect = element.getBoundingClientRect();
+      const point = {
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2),
+      };
+      /**
+       * @returns {string | null} идентификатор меню под точкой, если попали.
+       */
+      const menuAt = () => {
+        return document.elementFromPoint(point.x, point.y)?.closest('.vc-menu')?.id ?? null;
+      };
+      const hitBefore = menuAt();
+
+      layer.hide(sub);
+      const atHide = {
+        // Уровень ещё в Top Layer: `hidePopover` впереди, по сроку.
+        open: element.matches(':popover-open'),
+        closing: element.hasAttribute('data-vc-closing'),
+        // Прозрачность в эту же миллисекунду ещё прежняя: переход только что
+        // начался и идёт от единицы.
+        opacity: Number.parseFloat(style.opacity),
+        // А события снимаются сразу, не дожидаясь перехода.
+        pointerEvents: style.pointerEvents,
+        // Проба попадания после `hide`: гаснущий уровень обязан её пропустить.
+        hit: menuAt(),
+      };
+
+      // Середина затухания: к этому моменту `opacity` обязана быть и ненулевой
+      // (гашение ещё идёт), и меньше единицы (оно уже началось).
+      await wait(Math.round(duration / 2));
+      const midFade = {
+        opacity: Number.parseFloat(style.opacity),
+        // Отметка пережила половину срока — иначе перезапуск гашения обрезал бы
+        // анимацию.
+        closing: element.hasAttribute('data-vc-closing'),
+        // И всё это время уровень остаётся в Top Layer.
+        open: element.matches(':popover-open'),
+        pointerEvents: style.pointerEvents,
+      };
+      return { before, hitBefore, atHide, midFade, subId: sub.element.id };
+    }, { rootItems: ROOT_ITEMS, subItems: SUB_ITEMS, duration: TEST_ANIMATION_DURATION });
+
+    // До закрытия уровень обычный: непрозрачный, принимает события, отметки нет.
+    // Прозрачность сравнивается границей, а не ровно единицей: хвост перехода
+    // входа под нагрузкой не успевает завершиться, и чтение давало бы 0.999 —
+    // измерять тут нечего, важно лишь, что меню непрозрачно.
+    expect(marks.before.closing).toBe(false);
+    expect(marks.before.open).toBe(true);
+    expect(marks.before.opacity).toBeGreaterThan(0.98);
+    expect(marks.before.pointerEvents).toBe('auto');
+    // Контроль точки: до `hide` она достаётся до самого меню, значит
+    // последующая разница — не следствие промаха по геометрии.
+    expect(marks.hitBefore).toBe(marks.subId);
+    // Отметка поставлена сразу, и уровень при этом ещё в Top Layer: гаснуть
+    // должен тот узел, который ещё над страницей, а не тот, что уже вышел.
+    expect(marks.atHide.open).toBe(true);
+    expect(marks.atHide.closing).toBe(true);
+    // Прозрачность в саму миллисекунду `hide` ещё прежняя — переход только
+    // что пошёл, — поэтому граница, а не точное число.
+    expect(marks.atHide.opacity).toBeGreaterThan(0.98);
+    expect(marks.atHide.pointerEvents).toBe('none');
+    expect(marks.atHide.hit).toBe(null);
+    // Гашение идёт: на середине срока прозрачность между нулём и единицей. Без
+    // правила `.vc-menu[data-vc-closing]` она осталась бы единицей — `:popover-open`
+    // на месте, и менять нечего, а потеря `:popover-open` случится позже, уже вне
+    // Top Layer.
+    expect(marks.midFade.opacity).toBeGreaterThan(0.05);
+    expect(marks.midFade.opacity).toBeLessThan(0.95);
+    expect(marks.midFade.closing).toBe(true);
+    expect(marks.midFade.open).toBe(true);
+    expect(marks.midFade.pointerEvents).toBe('none');
   });
 
   test('reduced-motion: hidePopover вызывается немедленно, без задачи в планировщике', async ({ page }) => {
