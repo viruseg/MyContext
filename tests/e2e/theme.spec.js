@@ -21,6 +21,31 @@ const PLAIN_ITEM = 'label-plain';
 const SETTLE_MS = DEFAULT_ANIMATION_DURATION * 3;
 
 /**
+ * Три палитры файла: базовая светлая, тёмная под `auto` и тёмная явная.
+ */
+const THEME_SELECTORS = [
+  '.vc-menu',
+  '.vc-menu[data-vc-theme="auto"]',
+  '.vc-menu[data-vc-theme="dark"]',
+];
+
+/**
+ * Все сочетания темы и системной схемы, которые имеет смысл мерить. Явная тема
+ * проверяется с обеими схемами: она обязана побеждать системную, и это отдельное
+ * утверждение — здесь важно лишь, что палитра достаётся и не теряет контраст.
+ *
+ * @type {[theme: 'auto'|'light'|'dark', scheme: 'light'|'dark'][]}
+ */
+const THEME_CASES = [
+  ['light', 'light'],
+  ['light', 'dark'],
+  ['auto', 'light'],
+  ['auto', 'dark'],
+  ['dark', 'light'],
+  ['dark', 'dark'],
+];
+
+/**
  * Снимок вычисленных стилей открытого меню. Всё, что кейс проверяет, снимается
  * одним заходом в страницу: `getComputedStyle` дорог, а половина кейсов нуждается
  * сразу и в палитре, и в переходах. Цвета возвращаются строками: математику по ним
@@ -467,6 +492,93 @@ async function settleMenu(page) {
       setTimeout(stop, 1000);
     });
   }, MENU_SELECTOR);
+}
+
+/**
+ * Измерение активной строки в выбранной системной теме.
+ *
+ * @typedef {object} ActiveRow
+ * @property {string} label цвет текста строки.
+ * @property {string} activeBg разрешённый `--vc-active-bg`.
+ * @property {string} accent разрешённый `--vc-accent`.
+ * @property {number} ratio контраст текста к композиту подложки, 1..21.
+ * @property {boolean} opaque непрозрачна ли заливка строки.
+ * @property {boolean} chevronMatches совпадает ли цвет шеврона с цветом строки.
+ */
+
+/**
+ * Ставит системную схему и меряет активную строку.
+ *
+ * Отдельная функция, а не тело кейса: контраст считают два кейса, и две копии
+ * расчёта разъехались бы при первой же правке палитры.
+ *
+ * Тема ставится явно, а не остаётся `auto` из `beforeEach`: палитра
+ * `[data-vc-theme="dark"]` иначе не достаётся вовсе, и кейс молча проверял бы
+ * только медиазапрос.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {'auto'|'light'|'dark'} theme тема оформления.
+ * @param {'light' | 'dark'} scheme системная схема.
+ * @returns {Promise<ActiveRow>}
+ */
+async function readActiveRow(page, theme, scheme) {
+  await page.emulateMedia({ colorScheme: scheme });
+  await setTheme(page, theme);
+  const measured = await page.evaluate(() => {
+    const menu = /** @type {HTMLElement} */ (document.getElementById('m'));
+    const active = /** @type {HTMLElement} */ (
+      document.querySelector('.vc-item[data-active]')
+    );
+    const chevron = /** @type {HTMLElement} */ (active.querySelector('.vc-chevron'));
+    const menuStyle = getComputedStyle(menu);
+
+    /**
+     * Токен приводится к `rgb()` подстановкой в `color` пустого элемента: само
+     * значение `var(--vc-accent)` сравнивать не с чем.
+     *
+     * @param {string} name имя токена.
+     * @returns {string} разрешённый цвет.
+     */
+    const resolve = (name) => {
+      const probe = document.createElement('span');
+      probe.style.color = menuStyle.getPropertyValue(name);
+      document.body.appendChild(probe);
+      const resolved = getComputedStyle(probe).color;
+      probe.remove();
+      return resolved;
+    };
+
+    return {
+      // Цвета строки: её собственный фон, её текст и фон подложки, на которую
+      // этот фон ложится.
+      row: getComputedStyle(active).backgroundColor,
+      label: getComputedStyle(active).color,
+      menu: menuStyle.backgroundColor,
+      // Под меню лежит страница: её фон участвует в композите, потому что
+      // фон меню сам по себе полупрозрачный.
+      page: getComputedStyle(document.body).backgroundColor,
+      chevron: getComputedStyle(chevron).color,
+      activeBg: resolve('--vc-active-bg'),
+      accent: resolve('--vc-accent'),
+    };
+  });
+  // Композит, а не сырой токен: меню стеклянное, и глаз видит подложку.
+  const background = composite(
+    composite(parseColor(measured.row), parseColor(measured.menu)),
+    parseColor(measured.page),
+  );
+  return {
+    label: measured.label,
+    activeBg: measured.activeBg,
+    accent: measured.accent,
+    ratio: contrast(parseColor(measured.label), background),
+    // Непрозрачная заливка означает, что стекло под строкой на число не влияет.
+    // Утверждается явно, иначе непрозрачность выводилась бы из совпадения с
+    // результатом, а не проверялась.
+    opaque: alphaOf(measured.row) === 1,
+    // Шеврон на заливке акцентом обязан читаться, иначе он молча пропадает.
+    chevronMatches: measured.chevron === measured.label,
+  };
 }
 
 /**
@@ -1006,53 +1118,37 @@ test.describe('пункты и состояния', () => {
   });
 
   test('контраст активного пункта не ниже 4.5:1 в обеих темах', async ({ page }) => {
-    /**
-     * @param {'light' | 'dark'} scheme системная схема.
-     * @returns {Promise<{ ratio: number, opaque: boolean, chevronMatches: boolean }>}
-     */
-    const measure = async (scheme) => {
-      await page.emulateMedia({ colorScheme: scheme });
-      const measured = await page.evaluate(() => {
-        const menu = /** @type {HTMLElement} */ (document.getElementById('m'));
-        const active = /** @type {HTMLElement} */ (
-          document.querySelector('.vc-item[data-active]')
-        );
-        const chevron = /** @type {HTMLElement} */ (
-          active.querySelector('.vc-chevron')
-        );
-        return {
-          // Цвета строки: её собственный фон, её текст и фон подложки, на которую
-          // этот фон ложится.
-          row: getComputedStyle(active).backgroundColor,
-          label: getComputedStyle(active).color,
-          menu: getComputedStyle(menu).backgroundColor,
-          // Под меню лежит страница: её фон участвует в композите, потому что
-          // фон меню сам по себе полупрозрачный.
-          page: getComputedStyle(document.body).backgroundColor,
-          chevron: getComputedStyle(chevron).color,
-        };
-      });
-      const row = parseColor(measured.row);
-      // Композит, а не сырой токен: меню стеклянное, и глаз видит подложку.
-      const background = composite(composite(row, parseColor(measured.menu)), parseColor(measured.page));
-      return {
-        ratio: contrast(parseColor(measured.label), background),
-        // Непрозрачная заливка означает, что стекло под строкой на число не
-        // влияет. Утверждается явно, иначе непрозрачность выводилась бы из
-        // совпадения с результатом, а не проверялась.
-        opaque: alphaOf(measured.row) === 1,
-        // Шеврон на заливке акцентом обязан читаться, иначе он молча пропадает.
-        chevronMatches: measured.chevron === measured.label,
-      };
-    };
-
-    for (const scheme of /** @type {const} */ (['light', 'dark'])) {
-      const result = await measure(scheme);
+    for (const [theme, scheme] of THEME_CASES) {
+      const result = await readActiveRow(page, theme, scheme);
       // 1.29:1 на тонированной заливке — это не «слабо», это нечитаемо, поэтому
       // порог берётся из AA для текста, а не «на глаз».
-      expect(result.ratio, `контраст активного пункта, тема ${scheme}`).toBeGreaterThanOrEqual(4.5);
-      expect(result.opaque, `непрозрачность заливки, тема ${scheme}`).toBe(true);
-      expect(result.chevronMatches, `цвет шеврона, тема ${scheme}`).toBe(true);
+      expect(result.ratio, `контраст активного пункта, ${theme}/${scheme}`)
+        .toBeGreaterThanOrEqual(4.5);
+      expect(result.opaque, `непрозрачность заливки, ${theme}/${scheme}`).toBe(true);
+      expect(result.chevronMatches, `цвет шеврона, ${theme}/${scheme}`).toBe(true);
+    }
+  });
+
+  test('токен --vc-active-bg существует и по умолчанию равен акценту', async ({ page, request }) => {
+    // Ручка настройки входит в публичную поверхность: спека 11 перечисляет токен,
+    // и таблица токенов в README унаследует его. Объявлен он обязан быть во всех
+    // трёх палитрах, иначе одна тема осталась бы без ручки, а кейс по умолчанию
+    // был бы зелёным.
+    const css = await readStylesheet(request);
+    for (const selector of THEME_SELECTORS) {
+      expect(readRule(css, selector), `токен в палитре ${selector}`)
+        .toContain('--vc-active-bg: var(--vc-accent)');
+    }
+
+    // И вживую: ручка равна акценту по умолчанию, то есть ни одна тема не теряет
+    // контраст. Обход идёт по всем трём палитрам, а не по двум системным схемам:
+    // под `auto` тёмную палитру `[data-vc-theme="dark"]` вообще не достать.
+    for (const [theme, scheme] of THEME_CASES) {
+      const result = await readActiveRow(page, theme, scheme);
+      expect(result.activeBg, `--vc-active-bg против --vc-accent, ${theme}/${scheme}`)
+        .toBe(result.accent);
+      expect(result.ratio, `контраст с ручкой на месте, ${theme}/${scheme}`)
+        .toBeGreaterThanOrEqual(4.5);
     }
   });
 

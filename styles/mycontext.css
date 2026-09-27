@@ -41,6 +41,11 @@
   --vc-accent: #2563eb;
   --vc-accent-text: #ffffff;
   --vc-hover-bg: color-mix(in srgb, var(--vc-text) 6%, transparent);
+  /* Заливка активного пункта — отдельный токен, хотя по умолчанию это тот же
+   * акцент: автору темы может понадобиться приглушённая подсветка вместо
+   * сплошной. Тогда контраст 4.5:1 перестаёт быть гарантией библиотеки, и это
+   * осознанный его выбор. */
+  --vc-active-bg: var(--vc-accent);
   --vc-separator: color-mix(in srgb, var(--vc-text) 12%, transparent);
   --vc-shadow: 0 8px 28px rgba(15, 18, 25, 0.18);
 }
@@ -69,6 +74,7 @@
     --vc-accent: #6f9dff;
     --vc-accent-text: #10131a;
     --vc-hover-bg: color-mix(in srgb, var(--vc-text) 10%, transparent);
+    --vc-active-bg: var(--vc-accent);
     --vc-separator: color-mix(in srgb, var(--vc-text) 16%, transparent);
     --vc-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
   }
@@ -82,6 +88,7 @@
   --vc-accent: #6f9dff;
   --vc-accent-text: #10131a;
   --vc-hover-bg: color-mix(in srgb, var(--vc-text) 10%, transparent);
+  --vc-active-bg: var(--vc-accent);
   --vc-separator: color-mix(in srgb, var(--vc-text) 16%, transparent);
   --vc-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
 }
@@ -197,12 +204,14 @@
  *
  * Заливка сплошная, а не тонированная: только так текст на активном пункте
  * доходит до 4.5:1 в обеих темах (5.17:1 и 7.03:1). Насыщенность — плата за
- * контраст, и она совпадает с нативным видом системных меню.
+ * контраст, и она совпадает с нативным видом системных меню. Ручка настройки
+ * при этом остаётся: `--vc-active-bg` по умолчанию равен акценту, и автор темы
+ * вправе задать себе подсветку мягче, приняв на себя и её контраст.
  *
  * Специфичность у `:hover` и `[data-active]` одинаковая, поэтому правило стоит
  * ниже: активный пункт остаётся активным и под курсором. */
 .vc-item[data-active] {
-  background: var(--vc-accent);
+  background: var(--vc-active-bg);
   color: var(--vc-accent-text);
 }
 
