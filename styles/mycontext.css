@@ -1,0 +1,306 @@
+/*
+ * MyContext — единственный источник правды по визуалу библиотеки.
+ *
+ * Порядок разделов обязателен: 1) токены, 2) темы, 3) каркас, 4) пункты,
+ * 5) анимации. Внутри раздела 2 порядок блоков тоже несущий, и об этом сказано
+ * на месте.
+ */
+
+/* ── 1. Токены ─────────────────────────────────────────────────────────────
+ *
+ * Базовые значения токенов — это светлая тема. Поэтому `[data-vc-theme="light"]`
+ * и отсутствие атрибута вообще не нуждаются в собственном правиле, а тёмная тема
+ * описывается двумя переопределениями ниже.
+ *
+ * Геометрические токены обязаны совпадать с константами `src/constants.js`:
+ * `--vc-padding` ↔ `SAFETY_PADDING`, `--vc-item-height` ↔
+ * `DEFAULT_ITEM_HEIGHT`, `--vc-icon-size` ↔ `DEFAULT_ICON_SIZE`,
+ * `--vc-chevron-size` ↔ `DEFAULT_CHEVRON_SIZE`, `--vc-radius` ↔
+ * `DEFAULT_RADIUS`, `--vc-animation-duration` ↔ `DEFAULT_ANIMATION_DURATION`.
+ * Движок позиционирования измеряет элемент, уже ограниченный этим CSS, и
+ * считает, что отступ до края вьюпорта равен `SAFETY_PADDING`: расхождение
+ * ломает clamp и меню выходит за гарантированные границы.
+ */
+.vc-menu {
+  --vc-padding: 8px;
+  --vc-item-height: 28px;
+  --vc-icon-size: 16px;
+  --vc-chevron-size: 12px;
+  --vc-radius: 8px;
+  --vc-animation-duration: 140ms;
+  --vc-font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --vc-font-size: 13px;
+
+  --vc-bg-solid: #ffffff;
+  --vc-bg: color-mix(in srgb, var(--vc-bg-solid) 72%, transparent);
+  --vc-text: #1f2023;
+  --vc-muted: #6b7280;
+  --vc-accent: #2563eb;
+  --vc-accent-text: #ffffff;
+  --vc-hover-bg: color-mix(in srgb, var(--vc-text) 6%, transparent);
+  --vc-active-bg: color-mix(in srgb, var(--vc-accent) 18%, transparent);
+  --vc-separator: color-mix(in srgb, var(--vc-text) 12%, transparent);
+  --vc-shadow: 0 8px 28px rgba(15, 18, 25, 0.18);
+}
+
+/* ── 2. Темы ────────────────────────────────────────────────────────────────
+ *
+ * Тёмная палитра живёт в двух одинаковых блоках, и это не копипаста по недосмотру:
+ * CSS не умеет объединять «совпадение атрибута ИЛИ совпадение медиазапроса» в
+ * одном селекторе. Блоки обязаны меняться синхронно.
+ *
+ * Медиазапрос ограничен `[data-vc-theme="auto"]`, и это то, что делает `light`
+ * рабочим: без ограничения системная тёмная схема красила бы и явно светлое
+ * меню. Явный `dark` объявлен после медиазапроса: специфичность у
+ * `[data-vc-theme="dark"]` и у правила внутри медиазапроса одинаковая, поэтому
+ * решает порядок в файле, и последний wins.
+ */
+@media (prefers-color-scheme: dark) {
+  .vc-menu[data-vc-theme="auto"] {
+    --vc-bg-solid: #1b1d21;
+    --vc-bg: color-mix(in srgb, var(--vc-bg-solid) 76%, transparent);
+    --vc-text: #e8eaed;
+    --vc-muted: #9aa1ab;
+    --vc-accent: #6f9dff;
+    --vc-accent-text: #10131a;
+    --vc-hover-bg: color-mix(in srgb, var(--vc-text) 10%, transparent);
+    --vc-active-bg: color-mix(in srgb, var(--vc-accent) 34%, transparent);
+    --vc-separator: color-mix(in srgb, var(--vc-text) 16%, transparent);
+    --vc-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  }
+}
+
+.vc-menu[data-vc-theme="dark"] {
+  --vc-bg-solid: #1b1d21;
+  --vc-bg: color-mix(in srgb, var(--vc-bg-solid) 76%, transparent);
+  --vc-text: #e8eaed;
+  --vc-muted: #9aa1ab;
+  --vc-accent: #6f9dff;
+  --vc-accent-text: #10131a;
+  --vc-hover-bg: color-mix(in srgb, var(--vc-text) 10%, transparent);
+  --vc-active-bg: color-mix(in srgb, var(--vc-accent) 34%, transparent);
+  --vc-separator: color-mix(in srgb, var(--vc-text) 16%, transparent);
+  --vc-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+}
+
+/* ── 3. Каркас ──────────────────────────────────────────────────────────────
+ *
+ * `box-sizing: border-box` обязателен, а не аккуратность: при `content-box`
+ * рамка и внутренние отступы добавлялись бы к `max-width`, и гарантия «меню не
+ * шире вьюпорта минус padding» переставала бы выполняться ровно на толщину
+ * рамки — а именно на эту величину движок позиционирования и опирается.
+ */
+.vc-menu,
+.vc-menu *,
+.vc-menu *::before,
+.vc-menu *::after {
+  box-sizing: border-box;
+}
+
+.vc-menu {
+  /* UA-стиль `[popover]` центрирует элемент через `inset: 0` и `margin: auto`.
+   * Позицию задаёт движок позиционирования, поэтому авторские отступы уходят. */
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+
+  /* Внутренний отступ меню и `--vc-padding` — разные вещи: первый отодвигает
+   * пункты от края рамки, второй гарантирует отступ меню от края вьюпорта. */
+  padding: 4px;
+  border: 1px solid var(--vc-separator);
+  border-radius: var(--vc-radius);
+  box-shadow: var(--vc-shadow);
+
+  background: var(--vc-bg);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+
+  color: var(--vc-text);
+  font-family: var(--vc-font);
+  font-size: var(--vc-font-size);
+  line-height: 1.2;
+
+  /* Меню жмётся по содержимому, но не выходит за доступное место. Оба
+   * ограничения обязательны: без `max-width` длинный лейбл даёт меню шире
+   * вьюпорта, и clamp движка отжал бы его к левому краю — то есть за правый
+   * край всё равно вылезло бы. Именно здесь CSS делает инвариант позиционирования
+   * безусловным, а не условным на «короткие подписи». */
+  width: max-content;
+  max-height: calc(100dvh - 2 * var(--vc-padding));
+  max-width: calc(100dvw - 2 * var(--vc-padding));
+
+  /* Фокус рисует рамка меню целиком, а не список: иначе при переходе фокуса
+   * между уровнями рамка мечтает по краю содержимого. */
+  outline: none;
+  overflow: visible;
+}
+
+/* Стекло там, где `backdrop-filter` есть. Там, где его нет, полупрозрачный фон
+ * без размытия подложки превращается в нечитаемую кашу, поэтому условие
+ * отрицательное и подставляет непрозрачный `--vc-bg-solid`. */
+@supports not (backdrop-filter: blur(1px)) {
+  .vc-menu {
+    --vc-bg: var(--vc-bg-solid);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+.vc-list {
+  display: flex;
+  flex-direction: column;
+  /* `min-height: 0` — обязательная часть пары с `overflow-y`: флекс-пункт по
+   * умолчанию не сжимается ниже своего содержимого, и длинный список не дал бы
+   * включиться скроллу, вытолкнув меню за нижний край вьюпорта. */
+  min-height: 0;
+  max-height: calc(100dvh - 2 * var(--vc-padding));
+  max-width: calc(100dvw - 2 * var(--vc-padding));
+  overflow-y: auto;
+  overflow-x: hidden;
+  outline: none;
+}
+
+/* ── 4. Пункты ──────────────────────────────────────────────────────────────
+ *
+ * Три колонки, обе боковые зарезервированы всегда: слот иконки существует даже
+ * там, где иконки нет, поэтому лейблы всех пунктов начинаются с одной и той же
+ * координаты и меню не «дёргается» при наведении на соседний пункт.
+ */
+.vc-item {
+  display: grid;
+  grid-template-columns: var(--vc-icon-size) 1fr var(--vc-chevron-size);
+  align-items: center;
+  column-gap: 8px;
+
+  /* Фиксированная высота, а не `min-height`: длинный лейбл должен уйти в
+   * многоточие, а не вырастить строку и сломать расчёт высоты меню. */
+  height: var(--vc-item-height);
+  padding: 0 6px;
+  border-radius: calc(var(--vc-radius) - 2px);
+
+  color: var(--vc-text);
+  cursor: default;
+  user-select: none;
+}
+
+/* Обычное наведение мышью — самое слабое состояние из трёх. */
+.vc-item:hover {
+  background: var(--vc-hover-bg);
+}
+
+/* Активный пункт помечается атрибутом, а не псевдоклассом фокуса: при открытии
+ * подменю мышью `:focus-visible` не срабатывает, и подсветка мигала бы.
+ * `data-active` вдобавок селекторно тестируется.
+ *
+ * Специфичность у `:hover` и `[data-active]` одинаковая, поэтому правило стоит
+ * ниже: активный пункт остаётся активным и под курсором. */
+.vc-item[data-active] {
+  background: var(--vc-active-bg);
+  color: var(--vc-accent-text);
+}
+
+.vc-item[aria-disabled="true"] {
+  color: var(--vc-muted);
+}
+
+.vc-icon-slot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--vc-icon-size);
+  height: var(--vc-icon-size);
+}
+
+/* Размер иконки задаёт слот, а не сам узел: `renderIcon` для svg принципиально
+ * не ставит класс (класс — мост в стили страницы, а у svg-узла его быть не
+ * должно), поэтому правило описывает любого ребёнка слота, а не `vc-icon`. */
+.vc-icon-slot > * {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Класс `vc-icon` есть только у не-svg иконок: эмодзи и растр. */
+.vc-icon {
+  font-size: calc(var(--vc-icon-size) - 2px);
+  line-height: 1;
+}
+
+.vc-label {
+  /* `min-width: 0` без `text-overflow: ellipsis` в грид-колонке `1fr` не
+   * работает: колонка по умолчанию не меньше min-content лейбла, то есть
+   * многоточие не наступает никогда. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vc-chevron {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--vc-chevron-size);
+  height: var(--vc-chevron-size);
+  color: var(--vc-muted);
+  transition: transform var(--vc-animation-duration) ease;
+}
+
+/* Подменю, которое пришлось открыть слева, разворачивает шеврон. */
+.vc-item[data-chevron="left"] .vc-chevron {
+  transform: rotate(180deg);
+}
+
+.vc-separator {
+  flex: none;
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--vc-separator);
+}
+
+/* ── 5. Анимации ────────────────────────────────────────────────────────────
+ *
+ * Появление целиком на CSS: `@starting-style` задаёт стартовые значения, а
+ * `allow-discrete` разрешает переход по `display` и удерживает элемент в Top
+ * Layer до конца исчезновения — иначе `hidePopover()` убрал бы его мгновенно и
+ * анимации выхода просто не существовало бы.
+ */
+.vc-menu {
+  opacity: 0;
+  transform: scale(0.96);
+  transition-property: opacity, transform, display;
+  transition-duration: var(--vc-animation-duration);
+  transition-timing-function: ease;
+  transition-behavior: allow-discrete;
+}
+
+.vc-menu:popover-open {
+  opacity: 1;
+  transform: scale(1);
+}
+
+@starting-style {
+  .vc-menu:popover-open {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+/*
+ * `reduce` обнуляет длительность, а не укорачивает её: при любом положительном
+ * значении скрытое меню ещё доживало бы своего отложенного `hidePopover()` и
+ * съедало клики по странице. `transform` снят совсем — масштаб при появлении
+ * декоративен, а состояние задаётся `opacity`.
+ *
+ * Правило адресовано и `:popover-open`: у него специфичность выше, чем у
+ * `.vc-menu`, иначе открытое меню продолжило бы масштабироваться.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .vc-menu,
+  .vc-menu:popover-open {
+    --vc-animation-duration: 0ms;
+    transform: none;
+  }
+}
