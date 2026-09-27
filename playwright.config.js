@@ -4,6 +4,17 @@ const BASE_URL = 'http://127.0.0.1:4173';
 
 export default defineConfig({
   fullyParallel: true,
+  // Один воркер — измеренное ограничение этой машины, а не пессимизм. Firefox в
+  // параллельном режиме роняет программный композитор: в прогонах повторялись
+  // `RenderCompositorSWGL failed mapping default framebuffer` и
+  // `nimbus-desktop-experiments has not been synced yet`, плюс усечение ответа
+  // (`JSON.parse: unexpected end of data`) — то есть падал сам движок, а не код.
+  // Замерено: 4 воркера — флэк, 2 воркера — флэк, 1 воркер — 3 прогона из 3
+  // чистые. Чинить ретраями или ослаблять утверждения нельзя: план прямо запрещает
+  // и то, и другое, потому что флэк здесь маскировал бы реальную регрессию.
+  // На машине, которая держит несколько экземпляров Firefox, значение можно
+  // поднять — тогда удалите и этот комментарий.
+  workers: 1,
   retries: process.env.CI ? 0 : 1,
   use: {
     headless: true,
