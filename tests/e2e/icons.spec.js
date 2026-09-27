@@ -370,6 +370,138 @@ test.describe('svg', () => {
     expect(result.circle).toEqual(['cx', 'cy', 'fill', 'fill-opacity', 'r']);
   });
 
+  test('внешний url( в presentation-атрибуте удаляется', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      const el = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg">'
+          + '<defs><linearGradient id="grad">'
+          + '<stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/>'
+          + '</linearGradient></defs>'
+          + '<path d="M0 0h16v16H0z" fill="url(https://evil.example/g#x)"/>'
+          + '<circle cx="8" cy="8" r="4" filter="url(https://evil.example/f.svg#f)"/>'
+          + '</svg>',
+      });
+      const path = el.querySelectorAll('path')[0];
+      const circle = el.querySelectorAll('circle')[0];
+      return {
+        fill: path.getAttribute('fill'),
+        filter: circle.getAttribute('filter'),
+        // Сами элементы и градиент на месте: убирается атрибут, а не разметка.
+        paths: el.querySelectorAll('path').length,
+        circles: el.querySelectorAll('circle').length,
+        gradients: el.querySelectorAll('linearGradient').length,
+        markup: el.outerHTML,
+      };
+    });
+
+    // Внешний запрос ушёл вместе с атрибутом: в разобранной разметке не осталось
+    // ни адреса, ни самой функции.
+    expect(result.fill).toBe(null);
+    expect(result.filter).toBe(null);
+    expect(result.paths).toBe(1);
+    expect(result.circles).toBe(1);
+    expect(result.gradients).toBe(1);
+    expect(result.markup).not.toContain('evil.example');
+    expect(result.markup).not.toContain('url(');
+  });
+
+  test('внутренний url(#имя) сохраняется', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      const el = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg">'
+          + '<defs>'
+          + '<linearGradient id="grad"><stop offset="0" stop-color="red"/></linearGradient>'
+          + '<clipPath id="clip"><rect x="0" y="0" width="8" height="8"/></clipPath>'
+          + '</defs>'
+          + '<path d="M0 0h16v16H0z" fill="url(#grad)" stroke="url(#grad)" clip-path="url(#clip)"/>'
+          // Пробелы внутри скобок и регистр имени функции допустимы в CSS, и
+          // значение остаётся авторским: санитизация решает, а не правит.
+          + '<circle cx="8" cy="8" r="4" fill="url( #grad )"/>'
+          + '<rect x="0" y="0" width="4" height="4" fill="URL(#grad)"/>'
+          + '</svg>',
+      });
+      const path = el.querySelectorAll('path')[0];
+      const circle = el.querySelectorAll('circle')[0];
+      // `rect` в фикстуре два: тот, что внутри `clipPath`, и отдельный. Порядок
+      // документа — сначала вложенный, поэтому берётся весь список.
+      return {
+        pathFill: path.getAttribute('fill'),
+        pathStroke: path.getAttribute('stroke'),
+        pathClipPath: path.getAttribute('clip-path'),
+        circleFill: circle.getAttribute('fill'),
+        rectFills: Array.from(el.querySelectorAll('rect'), (node) => node.getAttribute('fill')),
+      };
+    });
+
+    // Ради этого `defs`, `clipPath` и градиенты и есть в белом списке: ссылки на
+    // свои же определения остаются, иначе иконка осталась бы бесцветной.
+    expect(result).toEqual({
+      pathFill: 'url(#grad)',
+      pathStroke: 'url(#grad)',
+      pathClipPath: 'url(#clip)',
+      circleFill: 'url( #grad )',
+      rectFills: [null, 'URL(#grad)'],
+    });
+  });
+
+  test('url( без фрагмента удаляется в любом атрибуте', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderIcon } = await import('../../src/icons.js');
+      const el = renderIcon({
+        type: 'svg',
+        value: '<svg xmlns="http://www.w3.org/2000/svg">'
+          + '<defs>'
+          + '<linearGradient id="grad"><stop offset="0" stop-color="red"/></linearGradient>'
+          + '<clipPath id="clip"><rect x="0" y="0" width="8" height="8"/></clipPath>'
+          + '<mask id="mask"><circle cx="4" cy="4" r="4"/></mask>'
+          + '</defs>'
+          // Проверяются ровно те атрибуты, которые контроллер назвал, плюс
+          // смешанное значение: одна внешняя ссылка убирает атрибут целиком, даже
+          // если рядом стоял внутренний `url(#…)`.
+          + '<g mask="url(#mask)" clip-path="url(//evil.example/c.svg#c)"/>'
+          + '<path d="M0 0h1v1H0z" marker-start="url(#clip)"'
+          + ' marker-mid="url(//evil.example/m.svg#m)"'
+          + ' marker-end="url(https://evil.example/e.svg#e)"/>'
+          + '<circle cx="4" cy="4" r="4" fill="url(#grad) url(https://evil.example/g#x)"'
+          + ' stroke="url(#grad)"/>'
+          + '</svg>',
+      });
+      const group = el.querySelectorAll('g')[0];
+      const path = el.querySelectorAll('path')[0];
+      // `circle` в фикстуре два: тот, что внутри `mask`, и отдельный. Порядок
+      // документа — сначала вложенный, поэтому берётся весь список.
+      return {
+        mask: group.getAttribute('mask'),
+        clipPath: group.getAttribute('clip-path'),
+        markerStart: path.getAttribute('marker-start'),
+        markerMid: path.getAttribute('marker-mid'),
+        markerEnd: path.getAttribute('marker-end'),
+        circles: Array.from(el.querySelectorAll('circle'), (node) => {
+          return { fill: node.getAttribute('fill'), stroke: node.getAttribute('stroke') };
+        }),
+        markup: el.outerHTML,
+      };
+    });
+
+    // Имя атрибута значения не касается: `mask`, `clip-path` и `marker-*`
+    // проверяются так же, как `fill` и `filter`.
+    expect(result.mask).toBe('url(#mask)');
+    expect(result.markerStart).toBe('url(#clip)');
+    expect(result.clipPath).toBe(null);
+    expect(result.markerMid).toBe(null);
+    expect(result.markerEnd).toBe(null);
+    // Смешанное значение ушло целиком: `url(#grad)` не спас `url(https://…)` рядом.
+    expect(result.circles).toEqual([
+      { fill: null, stroke: null },
+      { fill: null, stroke: 'url(#grad)' },
+    ]);
+    expect(result.markup).not.toContain('evil.example');
+  });
+
   test('санитизация сохраняет элементы из белого списка (path, circle, g, defs, use, linearGradient)', async ({ page }) => {
     const result = await page.evaluate(async () => {
       const { renderIcon } = await import('../../src/icons.js');
