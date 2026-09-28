@@ -6,6 +6,7 @@ import {
   DEFAULT_ITEM_HEIGHT,
   DEFAULT_RADIUS,
   SAFETY_PADDING,
+  SCROLL_ZONE_HEIGHT,
 } from '../../src/constants.js';
 import { resolveColor } from '../helpers/resolveColor.js';
 
@@ -41,12 +42,13 @@ const DARK_SELECTORS = THEME_SELECTORS.slice(1);
 const DARK_HOVER_BG = 'color-mix(in srgb, var(--vc-text) 10%, transparent)';
 
 /**
- * Бегунок полосы прокрутки, ровно как он записан во всех трёх палитрах.
+ * Цвет заблокированной зоны, ровно как он записан в каркасе.
  *
- * Запись одна и та же, а цвета получаются разными: `color-mix` берёт
- * `--vc-muted` своей палитры, и в этом весь смысл токена.
+ * Отдельный `color-mix`, а не `--vc-muted` целиком: зона, до которой не до
+ * доскроллить, обязана читаться как недоступная, а не как доступная и не
+ * наведённая.
  */
-const SCROLLBAR_THUMB = 'color-mix(in srgb, var(--vc-muted) 45%, transparent)';
+const BLOCKED_ZONE_COLOR = 'color-mix(in srgb, var(--vc-muted) 40%, transparent)';
 
 /**
  * Все сочетания темы и системной схемы, которые имеет смысл мерить. Явная тема
@@ -813,6 +815,72 @@ async function openLiveMenuByKeyboard(page) {
   });
 }
 
+/**
+ * Состояние одной зоны прокрутки.
+ *
+ * @typedef {object} ScrollZoneState
+ * @property {string} display вычисленный `display` зоны.
+ * @property {string} height вычисленная высота зоны. У скрытой зоны она остаётся
+ *   токеном, поэтому нулевой высоты здесь не бывает.
+ * @property {number} box высота зоны по рамке, px: у скрытой зоны `0`.
+ */
+
+/**
+ * Состояние обеих зон прокрутки показанного уровня.
+ *
+ * Высота меряется двумя способами, и это не перестраховка: для скрытого элемента
+ * `getComputedStyle` отдаёт вычисленное, а не использованное значение, то есть
+ * токен высоты, и «нулевая высота» получается только по рамке.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<{ up: ScrollZoneState, down: ScrollZoneState }>}
+ */
+async function readScrollZones(page) {
+  return page.evaluate(() => {
+    const level = document.querySelector('.vc-menu:popover-open');
+    if (level === null) {
+      throw new Error('живое меню не показано');
+    }
+    /**
+     * @param {string} selector класс зоны.
+     * @returns {ScrollZoneState}
+     */
+    const zone = (selector) => {
+      const element = level.querySelector(selector);
+      if (element === null) {
+        throw new Error(`у живого уровня нет зоны ${selector}`);
+      }
+      const style = getComputedStyle(element);
+      return {
+        display: style.display,
+        height: style.height,
+        box: element.getBoundingClientRect().height,
+      };
+    };
+    return { up: zone('.vc-scroll-zone-up'), down: zone('.vc-scroll-zone-down') };
+  });
+}
+
+/**
+ * Ставит или снимает `data-vc-scrollable` на показанном уровне руками.
+ *
+ * Атрибут — решение слоя, и кейс подменяет его только потому, что слоя с этим
+ * решением ещё нет: проверяется таблица стилей, а не слой.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {boolean} on
+ * @returns {Promise<void>}
+ */
+async function setLevelScrollable(page, on) {
+  await page.evaluate((value) => {
+    const level = document.querySelector('.vc-menu:popover-open');
+    if (level === null) {
+      throw new Error('живое меню не показано');
+    }
+    level.toggleAttribute('data-vc-scrollable', value);
+  }, on);
+}
+
 test.beforeEach(async ({ page }) => {
   // `goto` обязателен перед `setContent`: без него у документа нет адреса, и
   // ссылка на таблицу стилей не разрешилась бы.
@@ -951,64 +1019,38 @@ test.describe('ограничение габаритов', () => {
 });
 
 test.describe('прокручиваемый список', () => {
-  test('у прокручиваемого списка узкий скролбар', async ({ page, request }) => {
+  test('у прокручиваемого списка системной полосы нет', async ({ page, request }) => {
     const css = await readStylesheet(request);
 
-    // Полосу задаёт правило самого списка, а не уровня: прокручивается `.vc-list`,
-    // и объявление на `.vc-menu` досталось бы контейнеру, который не скроллится.
-    // Проверка по блоку, а не по файлу: те же два объявления в соседнем правиле
-    // прошли бы здесь молча.
-    const list = readBlock(css, '.vc-list');
-    expect(list, 'ширина полосы задана списку').toContain('scrollbar-width: thin');
-    expect(list, 'цвет полосы задан списку')
-      .toContain('scrollbar-color: var(--vc-scrollbar-thumb) transparent');
-
-    // Бегунок объявлен во всех трёх палитрах, а не только в светлой: у тёмных своя
-    // `--vc-muted`, и одна тема осталась бы с бегунком соседней, а тест по
-    // умолчанию остался бы зелёным. Берётся блок палитры, а не любое правило с
-    // селектором: у `.vc-menu` их в файле несколько, и объявление в соседнем
-    // прошло бы здесь молча.
-    for (const selector of THEME_SELECTORS) {
-      const palette = readBlock(css, selector);
-      expect(palette, `бегунок в палитре ${selector}`)
-        .toContain(`--vc-scrollbar-thumb: ${SCROLLBAR_THUMB}`);
-      // Ссылка обязана разрешаться: `color-mix` с необъявленным `--vc-muted` даёт
-      // невычисленное значение, и `scrollbar-color` молча откатился бы на `auto`.
-      expect(palette, `приглушённый объявлен в палитре ${selector}`)
-        .toMatch(/--vc-muted:\s/);
-    }
-
-    // Решение спеки 7.2 закреплено утверждением, а не комментарием: вернувшиеся
-    // вебкитовские псевдоэлементы выглядели бы заботой о совместимости, а на
-    // деле были бы мёртвым кодом там, где `scrollbar-width` поддержан.
+    // Полосы в файле нет вовсе, и все три утверждения отрицательные: токен
+    // бегунка, `scrollbar-color`, который покрасил бы дорожку, и вебкитовские
+    // псевдоэлементы — в движке без `scrollbar-width` они нарисовали бы полосу
+    // вопреки `none`.
+    expect(css, 'токен бегунка удалён').not.toContain('--vc-scrollbar-thumb');
+    expect(css, 'цвет полосы удалён').not.toContain('scrollbar-color');
     expect(css, 'вебкитовские псевдоэлементы полосы').not.toContain('::-webkit-scrollbar');
 
-    // Живая часть: показанный уровень длиннее рамки, и полоса у него именно та.
-    // Фикстура — то же живое меню, каким меряют наведение и клавиатуру: в `#m`
-    // переполнения нет вовсе, и полосу было бы негде мерить. Сорок пунктов —
-    // та же длина, что и в остальных кейсах файла.
+    // Полосу скрывает правило самого списка, а не уровня: прокручивается
+    // `.vc-list`, и объявление на `.vc-menu` досталось бы контейнеру, который не
+    // скроллится. Проверка по блоку, а не по файлу: те же объявления в соседнем
+    // правиле прошли бы здесь молча.
+    const list = readBlock(css, '.vc-list');
+    expect(list, 'полоса скрыта правилом списка').toContain('scrollbar-width: none');
+    // `overflow: hidden` не добавлен, и это отдельное утверждение: он погасил бы
+    // и touch-скролл, который живёт в `overflow-y: auto`, то есть на телефоне
+    // список перестал бы листаться вовсе. `scrollbar-width: none` убирает полосу
+    // и ничего больше.
+    expect(list, 'скролл списка не погашен').not.toContain('overflow: hidden');
+
+    // Живая часть: показанный уровень длиннее рамки, и полосы у него нет. Фикстура
+    // `#m` не годится: в ней переполнения нет вовсе. Сорок пунктов — та же длина,
+    // что и в остальных кейсах файла.
     await mountLiveMenu(page, Array.from({ length: 40 }, (unused, index) => {
       return { label: `Пункт ${index + 1}` };
     }));
     await openLiveMenu(page, { x: 200, y: 200 });
 
     const measured = await page.evaluate(() => {
-      // Отражение заданного значения проверяется на пустом узле, а не на нашем
-      // списке: движок отдаёт вычисленное значение не везде — там, где полоса
-      // системная, толщина может читаться как `none` при любом нашем правиле, а
-      // где свойство не знают вовсе, его нет и в вычисленном стиле. Проба ставит
-      // значение и читает его обратно, то есть спрашивает движок, а не наш CSS.
-      const probe = document.createElement('div');
-      document.body.appendChild(probe);
-      const probeStyle = getComputedStyle(probe);
-      probe.style.scrollbarWidth = 'thin';
-      const reflectsWidth = probeStyle.scrollbarWidth === 'thin';
-      probe.style.scrollbarWidth = '';
-      probe.style.scrollbarColor = 'rgb(1, 2, 3) transparent';
-      const reflectsColor = typeof probeStyle.scrollbarColor === 'string'
-        && probeStyle.scrollbarColor.startsWith('rgb(1, 2, 3)');
-      probe.remove();
-
       // Показанный уровень, а не документ: спрятанная фикстура `#m` несёт свою
       // разметку и переполнена не была бы так, как переполняется живой уровень.
       const level = document.querySelector('.vc-menu:popover-open');
@@ -1019,57 +1061,111 @@ test.describe('прокручиваемый список', () => {
       if (list === null) {
         throw new Error('у живого уровня нет списка');
       }
-      const style = getComputedStyle(list);
       return {
-        reflectsWidth,
-        reflectsColor,
-        scrollbarWidth: style.scrollbarWidth,
-        scrollbarColor: style.scrollbarColor,
         scrollable: list.scrollHeight > list.clientHeight,
-        // Токен снимается с уровня, а не со списка: он объявлен в палитре и
-        // достаётся потомку, но полоса красится им именно потому, что список
-        // лежит внутри уровня.
-        thumbToken: getComputedStyle(level).getPropertyValue('--vc-scrollbar-thumb'),
+        scrollbarWidth: getComputedStyle(list).scrollbarWidth,
+        // Показ зон решает слой, и слоя с этим решением ещё нет: атрибута на
+        // уровне нет ни в чьём коде, пока его туда не поставит `src/layer.js`.
+        scrollableAttribute: level.getAttribute('data-vc-scrollable'),
       };
     });
 
     // Контроль переполнения обязателен: у списка, который не скроллится, полосы
-    // нет, и толщину нечего было бы проверять.
+    // нет по определению, и живые утверждения ниже были бы пустыми.
     expect(measured.scrollable, 'список действительно прокручивается').toBe(true);
-    // Контроль самой пробы: если она не отработала, половина живых утверждений
-    // молча выпала бы, и кейс стал бы зелёным на любом CSS.
-    expect(
-      measured.reflectsWidth || measured.reflectsColor,
-      'движок отражает хотя бы одно из свойств полосы',
-    ).toBe(true);
+    expect(measured.scrollableAttribute, 'решение слоя ещё не принято').toBeNull();
+    expect(measured.scrollbarWidth, 'полосы нет на живом списке').toBe('none');
+  });
 
-    if (measured.reflectsWidth) {
-      expect(measured.scrollbarWidth, 'толщина полосы на живом списке').toBe('thin');
+  test('зоны прокрутки: атрибут включает обе зоны, высота равна токену, глиф нарисован рамками', async ({ page, request }) => {
+    const css = await readStylesheet(request);
+
+    // Приглушённый цвет зоны смешан с `--vc-muted`, а тот свой у каждой палитры.
+    // Берётся блок палитры, а не любое правило с селектором: у `.vc-menu` их в
+    // файле несколько, и объявление в соседнем прошло бы здесь молча.
+    for (const selector of THEME_SELECTORS) {
+      expect(readBlock(css, selector), `приглушённый объявлен в палитре ${selector}`)
+        .toMatch(/--vc-muted:\s/);
     }
 
-    // Цвет полосы — пара «бегунок, дорожка», и движок отдаёт её двумя нотациями:
-    // `color-mix` приходит как `color(srgb … / a)`, прозрачная дорожка — как
-    // `rgba(0, 0, 0, 0)`. На токен смотрим через `resolveColor`, тем же приёмом,
-    // что и весь остальной файл: сравнение записи токена с вычисленным цветом
-    // прошло бы на тождестве.
-    if (measured.reflectsColor) {
-      const [thumb, track] = await Promise.all([
-        resolveColor(page, measured.thumbToken),
-        resolveColor(page, 'transparent'),
-      ]);
-      // Проба уже установила, что движок отдаёт пару строкой, поэтому разбор
-      // страхует форму записи, а не отсутствие свойства.
-      const pair = [...measured.scrollbarColor.matchAll(/(?:rgba?|color)\([^)]*\)/g)]
-        .map((match) => match[0]);
-      expect(pair, `цвет полосы разобран: ${measured.scrollbarColor}`).toHaveLength(2);
-      // Бегунок непрозрачен и равен токену палитры: при `auto` вместо пары, при
-      // необъявленном токене и при полностью прозрачном бегунке полосы нет.
-      expect(alphaOf(pair[0]), 'бегунок виден').toBeGreaterThan(0);
-      expect(parseColor(pair[0]), 'бегунок равен токену палитры').toEqual(parseColor(thumb));
-      // Дорожка прозрачная: за полосой стекло меню, и вторая непрозрачная краска
-      // поверх него читалась бы рамкой.
-      expect(parseColor(pair[1]), 'дорожка прозрачна').toEqual(parseColor(track));
-    }
+    // `display: none` — состояние по умолчанию, а не украшение: разметку зон
+    // создаёт рендерер в каждом уровне безусловно, и показывать их обязан
+    // атрибут. Иначе короткий список получил бы две пустые полосы по краям.
+    const zone = readRule(css, '.vc-scroll-zone');
+    expect(zone, 'зона скрыта по умолчанию').toContain('display: none');
+    // `flex: none` — обязательная часть блока, а не аккуратность: в
+    // flex-колонке уровня зона иначе растянулась бы на остаток высоты, и упор
+    // «конец списка» перестал бы означать конец.
+    expect(zone, 'зона не растягивается').toContain('flex: none');
+    // Высота зоны берётся из токена, а не пишется числом: иначе тема не смогла
+    // бы подобрать зону под своё меню.
+    expect(zone, 'высота зоны взята из токена').toContain('height: var(--vc-scroll-zone-height)');
+
+    // Показ — единственное правило с атрибутом уровня: два показа по двум
+    // селекторам разошлись бы с правкой одного.
+    expect(readRule(css, '.vc-menu[data-vc-scrollable] .vc-scroll-zone'), 'показ зоны')
+      .toContain('display: flex');
+    // Упор гаснет, а не исчезает: исчезновение сдвинуло бы список под курсором
+    // ровно в тот момент, когда он перестаёт им двигаться.
+    expect(readRule(css, '.vc-scroll-zone[data-vc-blocked]'), 'упор приглушён')
+      .toContain(`color: ${BLOCKED_ZONE_COLOR}`);
+    // Подсветка достаётся только зоне, до которой есть куда идти: наведение на
+    // упор выглядело бы обещанием, которое меню не сдержит.
+    const hover = readRule(css, '.vc-scroll-zone:not([data-vc-blocked]):hover');
+    expect(hover, 'наведение красит зону').toContain('background: var(--vc-hover-bg)');
+    expect(hover, 'наведение возвращает цвет текста').toContain('color: var(--vc-text)');
+
+    // Токен живёт в разделе 1, а не в палитрах: высота зоны — геометрия, и тема
+    // её не перекрашивает. Константа закреплена числом, иначе токен и константа
+    // одинаково съехали бы в сторону.
+    expect(SCROLL_ZONE_HEIGHT).toBe(16);
+    expect(readBlock(css, '.vc-menu'), 'токен высоты зоны')
+      .toContain(`--vc-scroll-zone-height: ${SCROLL_ZONE_HEIGHT}px`);
+
+    // Глиф рисуется двумя сторонами рамки, а не картинкой: он обязан переезжать
+    // вместе с цветом зоны, который меняет и приглушение упора, и наведение.
+    // Сам угол общий у обеих зон, а поворот — единственное, чем они разошлись.
+    const glyph = readRule(css, '.vc-scroll-zone::before');
+    expect(glyph, 'глиф зоны — срезанный угол').toContain('border-right: 1.5px solid currentColor');
+    expect(glyph, 'глиф зоны — срезанный угол').toContain('border-bottom: 1.5px solid currentColor');
+    expect(readRule(css, '.vc-scroll-zone-up::before'), 'верхняя зона смотрит вверх')
+      .toContain('transform: rotate(-90deg)');
+    expect(readRule(css, '.vc-scroll-zone-down::before'), 'нижняя зона смотрит вниз')
+      .toContain('transform: rotate(45deg)');
+
+    // Живая часть: обе зоны — настоящие флекс-пункты уровня, и атрибут включает
+    // их обе разом. Сорок пунктов — то же, что и в кейсе выше: короткий список
+    // зон не показывает, и мерять было бы нечего.
+    await mountLiveMenu(page, Array.from({ length: 40 }, (unused, index) => {
+      return { label: `Пункт ${index + 1}` };
+    }));
+    await openLiveMenu(page, { x: 200, y: 200 });
+
+    await setLevelScrollable(page, false);
+    const hidden = await readScrollZones(page);
+    // Нулевая высота — это ещё и «меню не выросло»: зона в `display: none` не
+    // занимает места в колонке уровня.
+    expect(hidden.up.display, 'верхняя зона скрыта без атрибута').toBe('none');
+    expect(hidden.up.box, 'верхняя зона не занимает место').toBe(0);
+    expect(hidden.down.display, 'нижняя зона скрыта без атрибута').toBe('none');
+    expect(hidden.down.box, 'нижняя зона не занимает место').toBe(0);
+
+    // Обе зоны, а не одна: показ задаёт одно правило, и список с упором только
+    // вниз не должен терять верхнюю зону.
+    await setLevelScrollable(page, true);
+    const shown = await readScrollZones(page);
+    expect(shown.up.display, 'верхняя зона показана по атрибуту').toBe('flex');
+    expect(shown.down.display, 'нижняя зона показана по атрибуту').toBe('flex');
+    // Рамка меряется отдельно от вычисленной высоты: токен мог бы разрешиться, а
+    // места в колонке зона при этом не заняла бы.
+    expect(shown.up.height, 'высота верхней зоны равна токену')
+      .toBe(`${SCROLL_ZONE_HEIGHT}px`);
+    expect(shown.down.height, 'высота нижней зоны равна токену')
+      .toBe(`${SCROLL_ZONE_HEIGHT}px`);
+    expect(shown.up.box, `верхняя зона занимает ${SCROLL_ZONE_HEIGHT}px`)
+      .toBe(SCROLL_ZONE_HEIGHT);
+    expect(shown.down.box, `нижняя зона занимает ${SCROLL_ZONE_HEIGHT}px`)
+      .toBe(SCROLL_ZONE_HEIGHT);
   });
 });
 

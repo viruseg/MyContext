@@ -16,7 +16,8 @@
  * `--vc-padding` ↔ `SAFETY_PADDING`, `--vc-item-height` ↔
  * `DEFAULT_ITEM_HEIGHT`, `--vc-icon-size` ↔ `DEFAULT_ICON_SIZE`,
  * `--vc-chevron-size` ↔ `DEFAULT_CHEVRON_SIZE`, `--vc-radius` ↔
- * `DEFAULT_RADIUS`, `--vc-animation-duration` ↔ `DEFAULT_ANIMATION_DURATION`.
+ * `DEFAULT_RADIUS`, `--vc-animation-duration` ↔ `DEFAULT_ANIMATION_DURATION`,
+ * `--vc-scroll-zone-height` ↔ `SCROLL_ZONE_HEIGHT`.
  * Движок позиционирования измеряет элемент, уже ограниченный этим CSS, и
  * считает, что отступ до края вьюпорта равен `SAFETY_PADDING`: расхождение
  * ломает clamp и меню выходит за гарантированные границы.
@@ -24,6 +25,7 @@
 .vc-menu {
   --vc-padding: 8px;
   --vc-item-height: 28px;
+  --vc-scroll-zone-height: 16px;
   --vc-icon-size: 16px;
   --vc-chevron-size: 12px;
   --vc-radius: 8px;
@@ -46,9 +48,6 @@
    * осознанным выбором. */
   --vc-active-bg: var(--vc-hover-bg);
   --vc-separator: color-mix(in srgb, var(--vc-text) 12%, transparent);
-  /* Бегунок полосы прокрутки — отдельный токен, потому что `--vc-separator`
-   * (12–16 % текста, по палитре) на полосе не виден. */
-  --vc-scrollbar-thumb: color-mix(in srgb, var(--vc-muted) 45%, transparent);
   --vc-shadow: 0 8px 28px rgba(15, 18, 25, 0.18);
 }
 
@@ -77,7 +76,6 @@
     --vc-hover-bg: color-mix(in srgb, var(--vc-text) 10%, transparent);
     --vc-active-bg: var(--vc-hover-bg);
     --vc-separator: color-mix(in srgb, var(--vc-text) 16%, transparent);
-    --vc-scrollbar-thumb: color-mix(in srgb, var(--vc-muted) 45%, transparent);
     --vc-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
   }
 }
@@ -90,7 +88,6 @@
   --vc-hover-bg: color-mix(in srgb, var(--vc-text) 10%, transparent);
   --vc-active-bg: var(--vc-hover-bg);
   --vc-separator: color-mix(in srgb, var(--vc-text) 16%, transparent);
-  --vc-scrollbar-thumb: color-mix(in srgb, var(--vc-muted) 45%, transparent);
   --vc-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
 }
 
@@ -171,26 +168,75 @@
   min-height: 0;
   max-height: calc(100dvh - 2 * var(--vc-padding));
   max-width: calc(100dvw - 2 * var(--vc-padding));
-  /* Толщину полосы задаёт движок, и подстраивать её нечем, — токена ширины у полосы
-   * нет и не будет. Сама полоса узкая: у длинного списка каждый её пиксель взят
-   * у колонки лейбла, и поглощение колонкой остаётся прежним, то есть ширина меню
-   * от полосы не зависит.
+  /* Системной полосы нет, и `scrollbar-width: none` — не забывчивость: у
+   * длинного списка полоса отнимала у колонки лейбла каждый свой пиксель, то
+   * есть меню становилось уже ровно на её толщину. То же самое делают зоны по
+   * краям списка, и делают видимыми средствами: у полосы, кроме толщины, не было
+   * ни подписи, ни признака конца списка.
    *
-   * Дорожка прозрачная: за полосой стекло меню, и вторая непрозрачная краска
-   * поверх него читалась бы рамкой, а не тенью содержимого. Бегунок красится
-   * `--vc-scrollbar-thumb` — отдельный токен, и почему он отдельный, сказано
-   * у самого токена.
+   * `overflow` при этом не тронут, и `overflow: hidden` здесь неуместен:
+   * `scrollbar-width: none` убирает полосу и ничего больше, а `overflow: hidden`
+   * погасил бы и touch-скролл, ради которого прокрутка вообще нужна.
    *
-   * Псевдоэлементы `::-webkit-scrollbar` здесь не добавлены, и «для совместимости»
-   * добавлять их незачем: там, где `scrollbar-width` поддержан, вебкитовские
-   * правила всё равно игнорируются, то есть были бы мёртвым кодом, а там, где он
-   * не поддержан, проект и так не работает — `@starting-style`,
-   * `transition-behavior: allow-discrete`, `color-mix()`, `100dvh` и Top Layer он
-   * использует уже. */
+   * Псевдоэлементы `::-webkit-scrollbar` не добавлены и здесь: там, где
+   * `scrollbar-width` поддержан, вебкитовские правила всё равно игнорируются. */
   overflow-y: auto;
   overflow-x: hidden;
-  scrollbar-width: thin;
-  scrollbar-color: var(--vc-scrollbar-thumb) transparent;
+  scrollbar-width: none;
+}
+
+/* Зоны прокрутки. Обе создаются всегда, в том числе у короткого списка, и
+ * показывает их `data-vc-scrollable` на уровне: показывать по одной разметке
+ * в двух случаях значило бы завести в слое второе условие показа, а состояние
+ * у зон одно — показывать или нет.
+ *
+ * `flex: none` обязателен: в flex-колонке уровня зона иначе растянулась бы на
+ * остаток высоты, и упор «конец списка» перестал бы означать конец. */
+.vc-scroll-zone {
+  display: none;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  height: var(--vc-scroll-zone-height);
+  color: var(--vc-muted);
+}
+
+/* Атрибут ставит слой в `present`, один раз на показ, и только там. */
+.vc-menu[data-vc-scrollable] .vc-scroll-zone {
+  display: flex;
+}
+
+/* Дошли до края: зона остаётся на месте и гаснет, а не исчезает, — исчезновение
+ * сдвинуло бы список под курсором ровно в тот момент, когда он перестаёт им
+ * двигаться. */
+.vc-scroll-zone[data-vc-blocked] {
+  color: color-mix(in srgb, var(--vc-muted) 40%, transparent);
+}
+
+/* Подсветка только у зоны, до которой есть куда идти: иначе наведение на упор
+ * выглядело бы обещанием, которое меню не сдержит. */
+.vc-scroll-zone:not([data-vc-blocked]):hover {
+  background: var(--vc-hover-bg);
+  color: var(--vc-text);
+}
+
+/* Глиф — тот же срезанный угол, что у шеврона, и по той же причине: две
+ * соседние стороны рамки вместо готовой картинки, чтобы зона переезжала вместе
+ * с цветом текста. Поворот на 45° даёт угол, смотрящий вниз, на −90° — вверх. */
+.vc-scroll-zone::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+}
+
+.vc-scroll-zone-up::before {
+  transform: rotate(-90deg);
+}
+
+.vc-scroll-zone-down::before {
+  transform: rotate(45deg);
 }
 
 /* ── 4. Пункты ──────────────────────────────────────────────────────────────

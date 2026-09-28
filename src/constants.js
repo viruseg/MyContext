@@ -5,13 +5,14 @@
  * `SAFETY_PADDING` ↔ `--vc-padding`, `DEFAULT_ITEM_HEIGHT` ↔ `--vc-item-height`,
  * `DEFAULT_ICON_SIZE` ↔ `--vc-icon-size`, `DEFAULT_CHEVRON_SIZE` ↔
  * `--vc-chevron-size`, `DEFAULT_RADIUS` ↔ `--vc-radius`,
- * `DEFAULT_ANIMATION_DURATION` ↔ `--vc-animation-duration`.
+ * `DEFAULT_ANIMATION_DURATION` ↔ `--vc-animation-duration`,
+ * `SCROLL_ZONE_HEIGHT` ↔ `--vc-scroll-zone-height`.
  *
  * Расхождение с `--vc-padding` сдвигает расчёт: движок позиционирования измеряет
  * элемент, уже ограниченный CSS, и считает отступ до края равным
  * `SAFETY_PADDING`. Само по себе смещение рамки вьюпорт не покинет — предельные
  * `max-width` и `max-height` выведены из `--vc-padding` же, — но решение о том,
- * в какую сторону развернуть меню, примет неверный. Остальные пять констант
+ * в какую сторону развернуть меню, примет неверный. Остальные шесть констант
  * читаются только тестами, как зеркала токенов, и на поведение не влияют.
  */
 
@@ -70,6 +71,13 @@ export const DEFAULT_MENU_LABEL = 'Меню';
  * Значение CSS-переменной `--vc-item-height` по умолчанию, px.
  */
 export const DEFAULT_ITEM_HEIGHT = 28;
+
+/**
+ * Высота зоны прокрутки, px. Зеркалит `--vc-scroll-zone-height` в
+ * `styles/mycontext.css`; расхождение видно глазом, поэтому совпадение
+ * проверяется e2e-тестом.
+ */
+export const SCROLL_ZONE_HEIGHT = 16;
 
 /**
  * Значение CSS-переменной `--vc-icon-size` по умолчанию, px.
