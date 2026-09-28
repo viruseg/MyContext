@@ -16,11 +16,13 @@ import { OPEN_GRACE_MS, SAFETY_PADDING } from '../../src/constants.js';
  * утверждение — «отключённый пункт ничего не открывает» — и по nature своему
  * требует паузы, и пауза там стоит с тройным запасом.
  *
- * **Прокрутка страницы дожидается собственного события.** Глобальный слушатель
+ * **Прокрутка дожидается собственного события.** Глобальный слушатель
  * `scroll` закрывает открытое меню, а событие прокрутки приходит позже, чем
  * `scrollTo` возвращается. Правый клик без ожидания успевал открыть меню и тут же
  * получить закрытие от собственного прокручивания — «меню не открылось» на пустом
- * месте, и кейс падал бы через раз.
+ * месте, и кейс падал бы через раз. Ожидание ставится в capture-фазе на `window`
+ * и в том же `evaluate`, что и сама прокрутка: между двумя оборотами IPC браузер
+ * не обязан разослать событие, и слушатель библиотеки на нём не сработал бы.
  *
  * **Каждый пункт ищется по подписи внутри своего уровня, а не по документу.**
  * Сценарии разделяют подписи («Открыть» есть и в `basic`, и в `mixed`), а
@@ -88,6 +90,9 @@ import { OPEN_GRACE_MS, SAFETY_PADDING } from '../../src/constants.js';
  * @property {string | null} iconAlt `alt`, если узел — `img`.
  * @property {string[]} svgAttributes имена атрибутов svg-узла.
  * @property {number} svgPaths сколько `path` внутри svg-узла.
+ * @property {string[]} svgPathAttributes имена атрибутов первого `path` внутри
+ *   svg-узла: презентация живёт на нём, а не на svg, и потеря обводки или
+ *   заливки ни консоли, ни счёта `path` не показывает.
  * @property {number} labelLeft левый край лейбла, округлённый до целого.
  */
 
@@ -127,7 +132,7 @@ const SCENARIO_SHAPE = {
   mixed: { first: 'Новый', last: 'Последний', count: 8 },
 };
 
-/** Порядок подключения таблиц стилей, который проверяет кейс о перекрытии токенов. */
+/** Порядок подключения таблиц стилей, который требует бриф. */
 const STYLESHEET_ORDER = ['./styles/mycontext.css', './Demo/demo.css'];
 
 /**
@@ -144,13 +149,19 @@ const DEMO_DARK_ACCENT = '#c4b5fd';
 /** Подпись, которой страница сообщает, что блок открывает меню правым кликом. */
 const HINT = 'Правый клик по блоку открывает его меню.';
 
+/** Подпись, которую получает блок `basic` после выбора пункта с действием. */
+const CHOSEN_HINT = 'Выбрано: Открыть.';
+
 /**
  * Атрибуты, которых у очищенного svg-узла быть не может: каждый из них был бы
  * мостом из недоверенной разметки в стили, поведение или семантику страницы.
  * `xmlns`, `viewBox`, `width`, `height`, `aria-hidden`, `focusable` и `overflow`
  * наоборот обязательны — их ставит сам санитайзер, и они в список не входят.
+ * `id` в список тоже не входит: белый список `src/icons.js` держит его сознательно,
+ * ради внутренних ссылок `use href="#id"`, и называть его запрещённым здесь значило
+ * бы отрицать решение библиотеки.
  */
-const FORBIDDEN_SVG_ATTRIBUTES = ['class', 'style', 'tabindex', 'role', 'id'];
+const FORBIDDEN_SVG_ATTRIBUTES = ['class', 'style', 'tabindex', 'role'];
 
 /**
  * Коллекторы сообщений — по одному на страницу, а не на файл. Модульная
@@ -405,6 +416,11 @@ function readItem(page, levelId, label) {
           return attribute.name;
         }),
         svgPaths: svg === null ? 0 : svg.querySelectorAll('path').length,
+        svgPathAttributes: svg === null ? [] : Array.from(
+          svg.querySelector('path')?.attributes ?? [],
+        ).map((attribute) => {
+          return attribute.name;
+        }),
         labelLeft: textNode === null ? 0 : Math.round(textNode.getBoundingClientRect().left),
       };
     }
@@ -551,9 +567,11 @@ test('демо: токены меню перекрываются стилями 
       return link.getAttribute('href') ?? '';
     });
   });
-  // Порядок подключения, а не просто наличие обеих таблиц: переставленные
-  // ссылки оставили бы палитру библиотеки, и кейс ниже продолжал бы видеть
-  // `#2563eb` — то есть проверял бы сам себя.
+  // Порядок подключения — отдельное требование брифа, и держит его именно это
+  // утверждение: переставленные ссылки оставили бы два следующих зелёными, потому
+  // что палитру перевешивает вес селектора (0,3,0 у демо против (0,2,0) у
+  // библиотеки), а не старшинство файла. Само перекрытие проверяют следующие
+  // утверждения — они и не проходят на странице без единого правила для `.vc-menu`.
   expect(order).toEqual(STYLESHEET_ORDER);
 
   const rootId = await openScenario(page, 'basic');
@@ -606,6 +624,37 @@ test('демо: правый клик по рабочей области отк�
     level.rect.top + level.rect.height,
     'нижний край',
   ).toBeLessThanOrEqual(VIEWPORT.height - SAFETY_PADDING);
+});
+
+test('демо: клик по пункту с действием пишет выбор в подсказку и закрывает меню', async ({ page }) => {
+  const rootId = await openScenario(page, 'basic');
+
+  const before = await page.evaluate(() => {
+    const block = document.querySelector('[data-scenario="basic"]');
+    const hint = block === null ? null : block.querySelector('.demo-scenario__hint');
+    return hint === null ? '' : String(hint.textContent);
+  });
+  expect(before, 'до клика подсказка блока штатная').toBe(HINT);
+
+  await clickItem(page, rootId, 'Открыть');
+
+  // Обе половины читаются одним снимком: действие пишет подсказку, а закрытие
+  // происходит в `finally` после него, то есть это один и тот же факт. Без
+  // второй половины кейс прошёл бы на действии, которое записало подсказку и
+  // оставило меню висеть, — а закрытие здесь половина контракта, а не деталь.
+  const after = await page.evaluate((levelId) => {
+    const block = document.querySelector('[data-scenario="basic"]');
+    const hint = block === null ? null : block.querySelector('.demo-scenario__hint');
+    const level = document.getElementById(levelId);
+    return {
+      hint: hint === null ? '' : String(hint.textContent),
+      open: level !== null && level.matches(':popover-open'),
+    };
+  }, rootId);
+  expect(after.hint, 'подсказка блока назвала выбранный пункт').toBe(CHOSEN_HINT);
+  expect(after.hint, 'подсказка действительно изменилась').not.toBe(HINT);
+  expect(after.open, 'меню закрылось').toBe(false);
+  expect((await readMenu(page)).openCount, 'открытых уровней не осталось').toBe(0);
 });
 
 test('демо: сценарий с 4 уровнями вложенности раскрывается целиком', async ({ page }) => {
@@ -725,6 +774,11 @@ test('демо: сценарий со всеми тремя типами ико�
           return attribute.name;
         }),
         svgPaths: svg === null ? 0 : svg.querySelectorAll('path').length,
+        svgPathAttributes: svg === null ? [] : Array.from(
+          svg.querySelector('path')?.attributes ?? [],
+        ).map((attribute) => {
+          return attribute.name;
+        }),
         labelLeft: text === null ? 0 : Math.round(text.getBoundingClientRect().left),
       };
     });
@@ -764,6 +818,30 @@ test('демо: сценарий со всеми тремя типами ико�
   expect(vector?.svgAttributes, 'у svg остался `viewBox`').toEqual(
     expect.arrayContaining(['viewBox', 'aria-hidden', 'overflow', 'xmlns']),
   );
+  // Презентация живёт на `path`, а не на svg, поэтому и проверяется там. Потеря
+  // `fill` и `fill-rule` не видна нигде: `path` на месте, иконка остаётся фигурой,
+  // а консоль молчит — `src/icons.js` предупреждает только когда не отрисовано
+  // ничего.
+  expect(vector?.svgPathAttributes, 'у вектора осталась заливка и правило её заливки').toEqual(
+    expect.arrayContaining(['fill', 'fill-rule']),
+  );
+
+  // Второй вектор на уровне — другой набор атрибутов представления: обводка
+  // вместо заливки. Ровно тот случай, который молча ломается, и ровно тот, что
+  // одним счётом `path` не виден.
+  const secondVector = byLabel.get('Ещё вектор');
+  expect(secondVector?.iconTag, 'ещё вектор — svg').toBe('svg');
+  expect(secondVector?.svgPaths, 'у второго вектора сохранён path').toBe(1);
+  expect(
+    secondVector?.svgPathAttributes,
+    'у второго вектора остались обводка, её толщина и её концы',
+  ).toEqual(expect.arrayContaining(['stroke', 'stroke-width', 'stroke-linecap']));
+  expect(
+    (secondVector?.svgAttributes ?? []).filter((attribute) => {
+      return FORBIDDEN_SVG_ATTRIBUTES.includes(attribute);
+    }),
+    'у второго вектора не осталось атрибутов вне белого списка',
+  ).toEqual([]);
 
   const raster = byLabel.get('Растр');
   expect(raster?.iconTag, 'растр — img').toBe('img');
@@ -924,7 +1002,15 @@ test('демо: сценарий длинного списка прокручи�
 
   // Прокрутка именно `.vc-list`: глобальный слушатель `scroll` различает прокрутку
   // страницы и прокрутку списка, и различение это — предмет кейса.
-  const scrolled = await page.evaluate((levelId) => {
+  //
+  // Ожидание события `scroll` стоит в том же `evaluate`, что и сама прокрутка, и
+  // слушатель — на `window` в capture-фазе, ровно как в `rightClickPointIn`.
+  // Между двумя оборотами IPC браузер не обязан разослать событие, слушатель
+  // библиотеки на нём и не сработал бы, а «меню осталось открытым» прошло бы на
+  // списке, который вовсе не прокрутили. Порядок срабатывания тот же, что у
+  // библиотеки: её слушатель поставлен раньше, на том же узле и в той же фазе,
+  // поэтому к моменту разрешения обещания меню уже пережило событие.
+  const scrolled = await page.evaluate(async (levelId) => {
     const level = document.getElementById(levelId);
     const list = level === null ? null : level.querySelector('.vc-list');
     if (list === null) {
@@ -934,12 +1020,24 @@ test('демо: сценарий длинного списка прокручи�
     const visibleBefore = lastItem === null
       ? null
       : lastItem.getBoundingClientRect().bottom <= list.getBoundingClientRect().bottom;
-    list.scrollTop = list.scrollHeight;
+    const maxScroll = list.scrollHeight - list.clientHeight;
+    // Граница берётся достижимая, а не запрошенная: `scrollTop` никогда не
+    // больше `scrollHeight - clientHeight`, и у списка, уже прокрученного вниз,
+    // события не было бы вовсе — ждать его пришлось бы вечно.
+    if (maxScroll >= 1) {
+      const flushed = new Promise((resolve) => {
+        globalThis.addEventListener('scroll', () => {
+          resolve(undefined);
+        }, { once: true, capture: true });
+      });
+      list.scrollTop = maxScroll;
+      await flushed;
+    }
     const lastRect = lastItem === null ? null : lastItem.getBoundingClientRect();
     const listRect = list.getBoundingClientRect();
     return {
       scrollTop: list.scrollTop,
-      maxScroll: list.scrollHeight - list.clientHeight,
+      maxScroll,
       visibleBefore,
       visibleAfter: lastRect === null
         ? null
@@ -997,6 +1095,30 @@ test('демо: переключение темы страницы не лома
   expect(after.accent.toLowerCase(), 'открытое меню перекрашено новой темой').toBe(DEMO_DARK_ACCENT);
   expect(after.accent.toLowerCase(), 'это не токен библиотеки').not.toBe(LIBRARY_ACCENT);
   expect(after.vcTheme, 'data-vc-theme по-прежнему за экземпляром').toBe('auto');
+
+  // Мышиный путь — то, что видит человек с мышью: кнопка в шапке, до неё
+  // страницу надо довернуть, и меню по дороге сносит глобальный слушатель
+  // `scroll`. Само закрытие здесь не утверждается — это свойство из
+  // `globals.spec.js`; утверждается то, ради чего шаг: после клика и повторного
+  // правого клика меню снова перекрашено под текущую тему, и в обратную сторону.
+  await page.evaluate(async () => {
+    const flushed = new Promise((resolve) => {
+      globalThis.addEventListener('scroll', () => {
+        resolve(undefined);
+      }, { once: true, capture: true });
+    });
+    globalThis.scrollTo({ left: 0, top: 0 });
+    await flushed;
+  });
+  await page.locator('[data-theme-toggle]').click();
+
+  const mouseId = await openScenario(page, 'basic');
+  const byMouse = levelOf(await readMenu(page), mouseId);
+  expect(byMouse.open, 'после мышиного переключения меню снова открылось').toBe(true);
+  expect(
+    byMouse.accent.toLowerCase(),
+    'мышиный путь: тема доехала до меню в обратную сторону',
+  ).toBe(DEMO_LIGHT_ACCENT);
 });
 
 test('демо: у каждого сценария свой независимый экземпляр MyContext', async ({ page }) => {

@@ -4,10 +4,11 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>MyContext — демо</title>
-    <!-- Порядок обязателен: токены меню объявлены в `styles/mycontext.css`, а
-         `Demo/demo.css` перекрывает их под тему страницы. Обратный порядок
-         отдал бы палитру библиотеки, и переключатель темы красил бы страницу,
-         но не меню. -->
+    <!-- Порядок подключения — требование брифа: демо идёт вторым, поверх
+         библиотеки. Само перекрытие палитры держит не порядок, а вес селектора:
+         правила демо — (0,3,0) против (0,2,0) у `styles/mycontext.css`, так что
+         переставленные ссылки не изменили бы ничего. Разбор — в
+         `Demo/demo.css`. -->
     <link rel="stylesheet" href="./styles/mycontext.css" />
     <link rel="stylesheet" href="./Demo/demo.css" />
   </head>
