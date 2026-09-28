@@ -1,4 +1,4 @@
-import { DEFAULT_ANIMATION_DURATION, DEFAULT_MENU_LABEL } from './constants.js';
+import { DEFAULT_ANIMATION_DURATION, DEFAULT_MENU_LABEL, SAFE_AREA_BUFFER, SUBMENU_OFFSET } from './constants.js';
 import { createHoverIntent } from './hoverIntent.js';
 import { createKeyboard } from './keyboard.js';
 import { createLayer } from './layer.js';
@@ -16,6 +16,7 @@ import { createLayer } from './layer.js';
  * @typedef {import('./layer.js').Point} Point
  * @typedef {import('./keyboard.js').KeyboardController} KeyboardController
  * @typedef {import('./keyboard.js').KeyboardHost} KeyboardHost
+ * @typedef {import('./hoverIntent.js').SafeArea} SafeArea
  * @typedef {import('./hoverIntent.js').HoverIntentController} HoverIntentController
  */
 
@@ -289,10 +290,10 @@ export class MyContext {
    * вне дерева меню и вне привязанного контейнера. Это различает два исхода одного
    * и того же сигнала `hoverIntent`: курсор ушёл с подменю, но ещё ходит по меню —
    * тогда закрывается один уровень; курсор ушёл с дерева целиком — тогда цепочка.
-   * Сама геометрия различия не даёт: обе точки вне клина, и `hoverIntent` планирует
-   * закрытие одинаково, поэтому область закрытия решает оркестратор, читая цель
-   * события. Сбрасывается в `open()` вместе с отложенными задачами: после переноса
-   * меню прежняя точка ничего не значит.
+   * Сама геометрия различия не даёт: обе точки вне безопасной области, и
+   * `hoverIntent` планирует закрытие одинаково, поэтому область закрытия решает
+   * оркестратор, читая цель события. Сбрасывается в `open()` вместе с отложенными
+   * задачами: после переноса меню прежняя точка ничего не значит.
    *
    * @type {boolean}
    */
@@ -392,10 +393,9 @@ export class MyContext {
 
   /**
    * Движение курсора по дереву меню — только не по пункту-владельцу. По
-   * пункту-владельцу движение ничего не решает: там `entryPoint` ещё пуст, и
-   * `hoverIntent` запланировал бы закрытие подменю, которое вот-вот откроется или
-   * уже открыто, — мигание на месте. Позиция курсора при этом нужна: её читает
-   * `itemLeave` и делает якорем выхода для safe-triangle.
+   * пункту-владельцу движение ничего не решает: там подменю вот-вот откроется или
+   * уже открыто, а безопасная область выводится из геометрии цепочки, а не из
+   * траектории, — планировать по нему закрытие значило бы мигать на месте.
    *
    * @type {(event: PointerEvent) => void}
    */
@@ -411,21 +411,22 @@ export class MyContext {
     if (item !== null && this.#showTargets.has(item)) {
       return;
     }
-    this.#hover.pointerMove({ x: event.clientX, y: event.clientY });
+    this.#hover.pointerMove({ x: event.clientX, y: event.clientY }, this.#safeArea());
   };
 
   /**
-   * Вход в показанное подменю: точка становится якорем входа, а запланированное
-   * закрытие снимается. Именно этот шаг держит подменю открытым на диагональном
-   * движении к нему.
+   * Вход в показанное подменю: запланированное закрытие снимается. Шаг нужен и там,
+   * куда безопасная область не достаёт, — при переходе к подменю, прижатому к краю
+   * вьюпорта, зазор до владельца там больше `SUBMENU_OFFSET`, и переход держится
+   * только на этом снятии.
    *
-   * @type {(event: PointerEvent) => void}
+   * @type {() => void}
    */
-  #onSubmenuEnter = (event) => {
+  #onSubmenuEnter = () => {
     if (this.#destroyed) {
       return;
     }
-    this.#hover.submenuEnter({ x: event.clientX, y: event.clientY });
+    this.#hover.submenuEnter();
   };
 
   /**
@@ -459,10 +460,6 @@ export class MyContext {
     if (this.#destroyed) {
       return;
     }
-    // Позиция курсора на пункте передаётся `hoverIntent` перед самым уходом: она
-    // становится якорем выхода, и без неё клин строился бы от точки предыдущего
-    // пункта.
-    this.#hover.pointerMove({ x: event.clientX, y: event.clientY });
     this.#hover.itemLeave();
   };
 
@@ -475,8 +472,8 @@ export class MyContext {
     }
     // Только основная кнопка. Правый клик подтверждается `contextmenu`, который
     // зовёт `open()` и переносит меню: подменю, открытое нажатием, мигнуло бы
-    // ровно на один такт — а против чего safe-triangle и строится. Средняя кнопка
-    // не открывает ничего и по существу.
+    // ровно на один такт — а против чего безопасная область и строится. Средняя
+    // кнопка не открывает ничего и по существу.
     if (event.button !== PRIMARY_MOUSE_BUTTON) {
       return;
     }
@@ -507,21 +504,16 @@ export class MyContext {
    * закрытие больше было некому.
    *
    * Внутри собственного дерева обработчик молчит, и причина не в порядке событий:
-   * `itemEnter` обнуляет якоря входа и выхода, и `pointerMove`, получив точку с
-   * пустыми якорями, зовёт `planClose` безусловно. То есть любая точка, отданная
-   * документом в тот момент, когда курсор стоит на пункте-владельце, вооружает
-   * закрытие, которое сработает сразу после открытия подменю. Замер порядка это
-   * подтверждает и в другую сторону: `pointerenter` пункта приходит раньше
-   * `pointermove` документа, так что «capture раньше enter» объяснением быть не
-   * может. Решение внутри дерева принимает `#onLevelPointerMove`, и оно
-   * намеренно не трогает пункт-владелец, потому что по владельцу решать нечего.
+   * пункт-владелец лежит вне безопасной области своего же подменю, поэтому
+   * `pointerMove` по нему спланировал бы закрытие, которое сработает сразу после
+   * открытия. Замер порядка это подтверждает и в другую сторону: `pointerenter`
+   * пункта приходит раньше `pointermove` документа, так что «capture раньше enter»
+   * объяснением быть не может. Решение внутри дерева принимает
+   * `#onLevelPointerMove`.
    *
    * Над контейнером и над пустотой точка `hoverIntent` получает всегда, и в том
-   * числе над контейнером: там она необходима, чтобы подменю закрылось само, а не
-   * висело. Раньше обработчик возвращался над контейнером раньше `pointerMove`, и
-   * подменю над ним закрывалось лишь случайно — по пути `pointerleave` пункта-
-   * владельца, где якоря выхода ещё нет и `planClose` срабатывает вслепую. Внутри
-   * подменю этого пути нет, и подменю висело неограниченно.
+   * числе над контейнером: там событие не достаётся ни одному уровню, и без него
+   * планировать закрытие было бы некому — подменю висело бы неограниченно.
    *
    * Флаг области ставится только над пустотой, но **снимается** и внутри дерева,
    * и над контейнером. Он обязан означать «курсор сейчас не в дереве», а не
@@ -548,7 +540,7 @@ export class MyContext {
       return;
     }
     this.#pointerOutsideTree = !this.#isInsideAnchor(event.target);
-    this.#hover.pointerMove({ x: event.clientX, y: event.clientY });
+    this.#hover.pointerMove({ x: event.clientX, y: event.clientY }, this.#safeArea());
   };
 
   /**
@@ -723,10 +715,10 @@ export class MyContext {
         }
       },
       onClose: () => {
-        // Область закрытия решает оркестратор, а не `hoverIntent`: геометрия клина
-        // одинаково говорит «курсор ушёл» и в том случае, когда ушло лишь подменю,
-        // и в том, когда ушло дерево целиком. Различие — в цели последнего
-        // `pointermove`, и её читает `#pointerOutsideTree`.
+        // Область закрытия решает оркестратор, а не `hoverIntent`: геометрия
+        // безопасной области одинаково говорит «курсор ушёл» и в том случае, когда
+        // ушло лишь подменю, и в том, когда ушло дерево целиком. Различие — в цели
+        // последнего `pointermove`, и её читает `#pointerOutsideTree`.
         if (this.#pointerOutsideTree) {
           this.#closeMenu({ returnFocus: false });
           return;
@@ -793,11 +785,11 @@ export class MyContext {
       this.#layer.hide(this.#chain[position]);
     }
     this.#chain.length = 0;
-    // Отложенные задачи и якоря относятся к прежней постановке меню: точки
-    // safe-triangle — это точки страницы, которых на новом месте нет. `close()`
-    // снимает их по той же причине, и `open()` не должен быть мягче: ушедшее
-    // закрытие снесло бы подменю, открытое уже на новом месте, а ушедшее
-    // открытие сорвало бы отсчёт задержки, начатый до переноса.
+    // Отложенные задачи относятся к прежней постановке меню: безопасная область
+    // — это прямоугольник страницы, которого на новом месте нет. `close()` снимает
+    // их по той же причине, и `open()` не должен быть мягче: ушедшее закрытие
+    // снесло бы подменю, открытое уже на новом месте, а ушедшее открытие сорвало
+    // бы отсчёт задержки, начатый до переноса.
     this.#hover.cancelAll();
     this.#hoverOwner = null;
     this.#pointerOutsideTree = false;
@@ -1036,6 +1028,33 @@ export class MyContext {
   }
 
   /**
+   * Прямоугольник, внутри которого курсор считается идущим к подменю, либо `null`,
+   * когда подменю не открыто и любое движение планирует закрытие.
+   *
+   * Прямоугольник подменю расширен по трём сторонам на `SAFE_AREA_BUFFER`, а в
+   * сторону пункта-владельца — ровно на зазор: расширение на буфер накрыло бы
+   * край соседнего пункта родительского уровня, и уход на него перестал бы
+   * закрывать подменю. Считается здесь, а не в `hoverIntent`, потому что здесь
+   * есть и владелец, и разворот по X, а модуль остаётся чистой геометрией.
+   *
+   * @returns {SafeArea | null}
+   */
+  #safeArea() {
+    const deepest = this.#deepestChainEntry();
+    if (deepest === null || deepest.ownerItem === null) {
+      return null;
+    }
+    const rect = deepest.element.getBoundingClientRect();
+    const pad = SAFE_AREA_BUFFER;
+    const gap = SUBMENU_OFFSET;
+    const openedLeft = deepest.ownerItem.element.dataset.chevron === 'left';
+    if (openedLeft) {
+      return { left: rect.left - pad, top: rect.top - pad, right: rect.right + gap, bottom: rect.bottom + pad };
+    }
+    return { left: rect.left - gap, top: rect.top - pad, right: rect.right + pad, bottom: rect.bottom + pad };
+  }
+
+  /**
    * Закрывает тот уровень, где стоит фокус. Уровень берётся из цели события, а не
    * из переменки «текущий»: подменю может быть открыто, а фокус стоять в родителе.
    *
@@ -1112,8 +1131,8 @@ export class MyContext {
     entry.element.addEventListener('click', this.#onLevelClick);
     entry.element.addEventListener('keydown', this.#onLevelKeydown);
     entry.element.addEventListener('pointermove', this.#onLevelPointerMove);
-    // Якорь входа safe-triangle ставит только вход в подменю: у корня нет
-    // владельца, и вход в него не означает, что курсор идёт к подменю.
+    // Вход в подменю снимает отложенное закрытие: у корня нет владельца, и вход в
+    // него не означает, что курсор идёт к подменю.
     if (parent !== null) {
       entry.element.addEventListener('pointerenter', this.#onSubmenuEnter);
     }

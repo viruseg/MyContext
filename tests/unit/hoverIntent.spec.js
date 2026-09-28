@@ -1,9 +1,8 @@
 import { expect, test } from '@playwright/test';
-import { CLOSE_GRACE_MS, DEGENERATE_AREA, OPEN_GRACE_MS } from '../../src/constants.js';
+import { CLOSE_GRACE_MS, OPEN_GRACE_MS } from '../../src/constants.js';
 import { createHoverIntent } from '../../src/hoverIntent.js';
 
 /**
- * @typedef {import('../../src/hoverIntent.js').Point} Point
  * @typedef {import('../../src/hoverIntent.js').HoverIntentController} HoverIntentController
  */
 
@@ -111,35 +110,17 @@ function setup() {
   return { clock, hover, calls };
 }
 
-/**
- * Прогоняет курсор от пункта-владельца в подменю: позиция на пункте, уход с
- * него, вход в подменю. После вызова заданы оба якоря safe-triangle.
- *
- * @param {HoverIntentController} hover контроллер hover intent.
- * @param {Point} exitPoint точка, где курсор покидает пункт-владелец.
- * @param {Point} entryPoint точка входа в подменю.
- * @returns {void}
- */
-function enterSubmenuFrom(hover, exitPoint, entryPoint) {
-  hover.pointerMove(exitPoint);
-  hover.itemLeave();
-  hover.submenuEnter(entryPoint);
-}
-
-// Якоря safe-triangle из брифа. Выходной якорь модуль запоминает сам: в момент
-// itemLeave он берёт последнюю известную позицию курсора, поэтому отдельно он
-// не передаётся.
-const EXIT_POINT = { x: 100, y: 50 };
-const ENTRY_POINT = { x: 160, y: 60 };
-// Первая позиция после входа принимается без проверки и становится вершиной
-// треугольника из трёх уже принятых точек: |(60, 10) × (30, 30)| / 2 = 750 px²,
-// то есть заведомо выше порога DEGENERATE_AREA.
-const FIRST_POINT = { x: 130, y: 80 };
-// Внутри треугольника EXIT_POINT, ENTRY_POINT, FIRST_POINT: кросс-продукты
-// 850, 200 и 450 одного знака, сумма подтреугольников 425 + 100 + 225 = 750 px².
-const INSIDE_POINT = { x: 135, y: 70 };
-// Кросс-продукты 23000, -20000 и -1500: знаки разные, точка снаружи.
-const OUTSIDE_POINT = { x: 500, y: 500 };
+// Прямоугольник подменю и точка внутри него. У `OUTSIDE_AREA` отличается только
+// нижняя граница, и `OUTSIDE_POINT` проваливается ровно за неё: «снаружи» проверяется
+// одной величиной, а не двумя независимыми расхождениями, любое из которых сломало бы
+// кейс по другой причине.
+const AREA = { left: 100, top: 100, right: 300, bottom: 400 };
+const OUTSIDE_AREA = { left: 100, top: 100, right: 300, bottom: 200 };
+const INSIDE_POINT = { x: 200, y: 300 };
+const OUTSIDE_POINT = { x: 200, y: 350 };
+// На левой границе области: принадлежность границе обязана быть включительной, иначе
+// переход к подменю планировал бы закрытие ровно на собственной кромке.
+const EDGE_POINT = { x: 100, y: 250 };
 
 test.describe('открытие', () => {
   test('itemEnter планирует открытие через openDelayMs', () => {
@@ -229,102 +210,116 @@ test.describe('открытие', () => {
   });
 });
 
-test.describe('закрытие', () => {
-  test('курсор внутри треугольника не планирует закрытие', () => {
-    const { clock, hover } = setup();
-    enterSubmenuFrom(hover, EXIT_POINT, ENTRY_POINT);
-    hover.pointerMove(FIRST_POINT);
+test.describe('безопасная область', () => {
+  test('курсор внутри безопасной области не планирует закрытие', () => {
+    const { clock, hover, calls } = setup();
 
-    hover.pointerMove(INSIDE_POINT);
+    hover.pointerMove(INSIDE_POINT, AREA);
+    clock.advance(CLOSE_GRACE_MS * 3);
 
+    // Ждём срок целиком, а не половину: внутри области закрытие не планировалось
+    // вовсе, и ждать было нечего.
     expect(hover.isClosePending()).toBe(false);
-    expect(clock.tasks).toHaveLength(0);
+    expect(calls).toEqual([]);
   });
 
-  test('курсор снаружи треугольника планирует закрытие через closeDelayMs', () => {
-    const { clock, hover } = setup();
-    enterSubmenuFrom(hover, EXIT_POINT, ENTRY_POINT);
-    hover.pointerMove(FIRST_POINT);
+  test('курсор на границе безопасной области не планирует закрытие', () => {
+    const { clock, hover, calls } = setup();
 
-    hover.pointerMove(OUTSIDE_POINT);
+    hover.pointerMove(EDGE_POINT, AREA);
+    clock.advance(CLOSE_GRACE_MS * 3);
+
+    expect(hover.isClosePending()).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  test('курсор снаружи безопасной области планирует закрытие через closeDelayMs', () => {
+    const { clock, hover, calls } = setup();
+
+    hover.pointerMove(OUTSIDE_POINT, OUTSIDE_AREA);
 
     expect(hover.isClosePending()).toBe(true);
     expect(clock.tasks).toHaveLength(1);
     expect(clock.tasks[0].time).toBe(clock.now() + CLOSE_GRACE_MS);
+
+    clock.advance(CLOSE_GRACE_MS);
+    expect(calls).toEqual(['close']);
   });
 
   test('возврат курсора внутрь отменяет запланированное закрытие', () => {
-    const { clock, hover } = setup();
-    enterSubmenuFrom(hover, EXIT_POINT, ENTRY_POINT);
-    hover.pointerMove(FIRST_POINT);
+    const { clock, hover, calls } = setup();
 
-    hover.pointerMove(OUTSIDE_POINT);
+    hover.pointerMove(OUTSIDE_POINT, OUTSIDE_AREA);
     expect(hover.isClosePending()).toBe(true);
 
-    hover.pointerMove(INSIDE_POINT);
+    hover.pointerMove(INSIDE_POINT, AREA);
+    clock.advance(CLOSE_GRACE_MS * 2);
 
     expect(hover.isClosePending()).toBe(false);
-    expect(clock.tasks).toHaveLength(0);
+    expect(calls).toEqual([]);
   });
-});
 
-test.describe('промах сбрасывает опорные точки', () => {
-  test('после точки вне треугольника следующая проверяется против сузившегося клина', () => {
+  test('без открытого подменю любое движение планирует закрытие', () => {
+    const { clock, hover } = setup();
+
+    // Области нет, а не «область пустая»: подменю не открыто, и координаты курсора
+    // сами по себе ничего не значат.
+    hover.pointerMove(INSIDE_POINT, null);
+
+    expect(hover.isClosePending()).toBe(true);
+    expect(clock.tasks).toHaveLength(1);
+  });
+
+  test('вход в подменю снимает запланированное закрытие', () => {
+    const { clock, hover, calls } = setup();
+
+    hover.pointerMove(OUTSIDE_POINT, OUTSIDE_AREA);
+    expect(hover.isClosePending()).toBe(true);
+
+    // Вход в подменю не берёт точку: он и есть решение, и полагаться на то, что
+    // `pointermove` внутри подменю успеет снять закрытие, значило бы завязать
+    // корректность на порядок событий.
+    hover.submenuEnter();
+    clock.advance(CLOSE_GRACE_MS * 2);
+
+    expect(hover.isClosePending()).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  test('прямое движение к дальнему углу подменю не планирует закрытие', () => {
     const { hover } = setup();
-    enterSubmenuFrom(hover, EXIT_POINT, ENTRY_POINT);
-    hover.pointerMove(FIRST_POINT);
-    hover.pointerMove(OUTSIDE_POINT);
-    expect(hover.isClosePending()).toBe(true);
+    // Прямая от пункта-владельца к дальнему углу подменю: исходный дефект был ровно
+    // на этом пути. Первая точка вне пункта уже заходит в расширенную область, а
+    // дальше весь отрезок лежит в ней по построению.
+    const from = { x: 96, y: 104 };
+    const to = { x: 296, y: 396 };
+    const steps = 20;
 
-    // Промах обнуляет вершину, поэтому точка проверяется против клина
-    // (100, 50), (160, 60), (500, 500), где её кросс-продукты 900, 5100 и
-    // 17000 одного знака. Против исходного треугольника она снаружи: знаки
-    // 900, -450 и 1050 разные, и закрытие осталось бы запланированным.
-    hover.pointerMove({ x: 160, y: 75 });
+    for (let step = 1; step <= steps; step += 1) {
+      const t = step / steps;
+      hover.pointerMove(
+        { x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t },
+        AREA,
+      );
 
-    expect(hover.isClosePending()).toBe(false);
+      expect(hover.isClosePending(), `шаг ${step} из ${steps} не планирует закрытие`).toBe(false);
+    }
   });
-});
 
-test.describe('вырожденный треугольник', () => {
-  test('точки почти на одной прямой не защищают подменю', () => {
-    const { clock, hover } = setup();
-    // Якоря отличаются на 0.4 px по вертикали: площадь треугольника
-    // |(0, 0.4) × (0, 150)| / 2 = 0 px², то есть меньше DEGENERATE_AREA.
-    enterSubmenuFrom(hover, { x: 100, y: 50 }, { x: 100, y: 50.4 });
-    hover.pointerMove({ x: 100, y: 200 });
+  test('выход за верхний край области планирует закрытие', () => {
+    const { hover } = setup();
 
-    // Первая позиция после входа принимается без проверки, дальше вырожденный
-    // клин не защищает: каждая точка планирует закрытие.
-    hover.pointerMove({ x: 100, y: 300 });
+    hover.pointerMove({ x: 200, y: 99 }, AREA);
+
     expect(hover.isClosePending()).toBe(true);
-    expect(clock.tasks).toHaveLength(1);
-    expect(clock.tasks[0].time).toBe(clock.now() + CLOSE_GRACE_MS);
-
-    // Повторная проверка не плодит задачи: закрытие уже запланировано.
-    hover.pointerMove({ x: 300, y: 100 });
-    expect(hover.isClosePending()).toBe(true);
-    expect(clock.tasks).toHaveLength(1);
   });
-});
 
-test.describe('граница', () => {
-  test('площадь ровно DEGENERATE_AREA считается невырожденной', () => {
-    const { clock, hover } = setup();
-    // |(10, 0) × (0, 5)| / 2 = 25 px² — ровно порог, не меньше, поэтому клин
-    // невырожден и решение принимает принадлежность.
-    enterSubmenuFrom(hover, { x: 0, y: 0 }, { x: 10, y: 0 });
-    hover.pointerMove({ x: 0, y: 5 });
+  test('выход за нижний край области планирует закрытие', () => {
+    const { hover } = setup();
 
-    // Внутри: кросс-продукты 10, 30 и 10 одного знака.
-    hover.pointerMove({ x: 2, y: 1 });
-    expect(hover.isClosePending()).toBe(false);
-    expect(clock.tasks).toHaveLength(0);
+    hover.pointerMove({ x: 200, y: 401 }, AREA);
 
-    // Снаружи: кросс-продукты 200 и -250 разного знака.
-    hover.pointerMove({ x: 20, y: 20 });
     expect(hover.isClosePending()).toBe(true);
-    expect(DEGENERATE_AREA).toBe(25);
   });
 });
 
@@ -332,7 +327,7 @@ test.describe('отмена', () => {
   test('cancelAll снимает и открытие, и закрытие', () => {
     const { clock, hover } = setup();
     hover.itemEnter();
-    hover.pointerMove(OUTSIDE_POINT);
+    hover.pointerMove(OUTSIDE_POINT, OUTSIDE_AREA);
     expect(hover.isOpenPending()).toBe(true);
     expect(hover.isClosePending()).toBe(true);
 
@@ -364,9 +359,7 @@ test.describe('обратная связь', () => {
 
   test('onClose срабатывает ровно один раз по истечении задержки', () => {
     const { clock, hover, calls } = setup();
-    enterSubmenuFrom(hover, EXIT_POINT, ENTRY_POINT);
-    hover.pointerMove(FIRST_POINT);
-    hover.pointerMove(OUTSIDE_POINT);
+    hover.pointerMove(OUTSIDE_POINT, OUTSIDE_AREA);
     expect(calls).toEqual([]);
 
     clock.advance(CLOSE_GRACE_MS);
@@ -379,13 +372,11 @@ test.describe('обратная связь', () => {
   test('отменённые задачи не вызывают обратную связь', () => {
     const { clock, hover, calls } = setup();
 
-    // Открытие снято уходом с пункта, закрытие — возвратом курсора внутрь клина.
+    // Открытие снято уходом с пункта, закрытие — возвратом курсора внутрь области.
     hover.itemEnter();
     hover.itemLeave();
-    enterSubmenuFrom(hover, EXIT_POINT, ENTRY_POINT);
-    hover.pointerMove(FIRST_POINT);
-    hover.pointerMove(OUTSIDE_POINT);
-    hover.pointerMove(INSIDE_POINT);
+    hover.pointerMove(OUTSIDE_POINT, OUTSIDE_AREA);
+    hover.pointerMove(INSIDE_POINT, AREA);
     expect(calls).toEqual([]);
 
     clock.advance(CLOSE_GRACE_MS * 5);
@@ -405,9 +396,7 @@ test.describe('обратная связь', () => {
 
     hover.itemEnter();
     clock.advance(OPEN_GRACE_MS);
-    enterSubmenuFrom(hover, EXIT_POINT, ENTRY_POINT);
-    hover.pointerMove(FIRST_POINT);
-    hover.pointerMove(OUTSIDE_POINT);
+    hover.pointerMove(OUTSIDE_POINT, OUTSIDE_AREA);
     clock.advance(CLOSE_GRACE_MS);
 
     // Порядок «снять флаг, потом звать колбэк» зафиксирован: перестановка дала бы
@@ -428,70 +417,11 @@ test.describe('обратная связь', () => {
     clock.advance(OPEN_GRACE_MS);
     expect(hover.isOpenPending()).toBe(false);
 
-    enterSubmenuFrom(hover, EXIT_POINT, ENTRY_POINT);
-    hover.pointerMove(FIRST_POINT);
-    hover.pointerMove(OUTSIDE_POINT);
+    hover.pointerMove(OUTSIDE_POINT, OUTSIDE_AREA);
     clock.advance(CLOSE_GRACE_MS);
     expect(hover.isClosePending()).toBe(false);
     expect(clock.tasks).toHaveLength(0);
   });
-});
-
-test.describe('сброс', () => {
-  test('новый itemEnter сбрасывает якоря предыдущего подменю', () => {
-    const { hover } = setup();
-    enterSubmenuFrom(hover, EXIT_POINT, ENTRY_POINT);
-
-    hover.itemEnter();
-    hover.pointerMove(FIRST_POINT);
-
-    // Без сброса эта точка стала бы вершиной старого треугольника и не
-    // планировала бы закрытие: якоря нового пункта-владельца ещё нет.
-    expect(hover.isClosePending()).toBe(true);
-  });
-});
-
-test.describe('первая позиция после входа', () => {
-  test('принимается и становится вершиной, но не запускает закрытие', () => {
-    const { clock, hover } = setup();
-    // Свои якоря, чтобы кейс не повторял проверку сужения клина.
-    enterSubmenuFrom(hover, { x: 200, y: 100 }, { x: 260, y: 110 });
-
-    hover.pointerMove({ x: 300, y: 200 });
-
-    expect(hover.isClosePending()).toBe(false);
-    expect(clock.tasks).toHaveLength(0);
-
-    // Точка принята вершиной: следующая проверяется против треугольника
-    // (200, 100), (260, 110), (300, 200) площадью 2500 px², и (500, 500) вне
-    // него — кросс-продукты 21000, -6000 и -10000 разного знака.
-    hover.pointerMove(OUTSIDE_POINT);
-
-    expect(hover.isClosePending()).toBe(true);
-    expect(clock.tasks).toHaveLength(1);
-  });
-});
-
-test('вырожденный клин после промаха становится невырожденным и начинает защищать', () => {
-  const { clock, hover } = setup();
-  enterSubmenuFrom(hover, { x: 100, y: 50 }, { x: 100, y: 50.4 });
-  hover.pointerMove({ x: 100, y: 200 });
-
-  hover.pointerMove({ x: 400, y: 10 });
-  expect(hover.isClosePending()).toBe(true);
-  expect(clock.tasks).toHaveLength(1);
-  expect(clock.tasks[0].time).toBe(clock.now() + CLOSE_GRACE_MS);
-
-  // Промах стал вершиной, и клин (100, 50), (100, 50.4), (400, 10) площадью
-  // 60 px² стал невырожденным: точка (150, 43.5) внутри него — кросс-продукты
-  // -20, -50 и -50 одного знака, поэтому закрытие снимается. Против прежнего
-  // вырожденного клина с вершиной (100, 200) она снаружи: знаки -20, -7480 и
-  // 7500 разные, и закрытие осталось бы запланированным. Именно это и отличает
-  // кейс от проверки одной лишь вырожденности.
-  hover.pointerMove({ x: 150, y: 43.5 });
-
-  expect(hover.isClosePending()).toBe(false);
-  expect(clock.tasks).toHaveLength(0);
 });
 
 test.describe('часы по умолчанию', () => {

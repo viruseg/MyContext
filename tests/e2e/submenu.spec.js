@@ -122,6 +122,11 @@ const PAGE_HTML = `<!doctype html>
 </html>`;
 
 const VIEWPORT = { width: 1000, height: 700 };
+/**
+ * Узкий вьюпорт кейса о прижатом к краю подменю: подменю набора `wide` не помещается
+ * в него ни справа, ни слева и прижимается к `padding`.
+ */
+const NARROW_VIEWPORT = { width: 600, height: 700 };
 
 /**
  * Точки правого клика. Левая нужна, чтобы подменю помещалось справа, правая —
@@ -133,6 +138,12 @@ const OPEN_RIGHT = { x: 900, y: 300 };
 const OPEN_MIDDLE = { x: 260, y: 120 };
 /** Точка далеко от первой: показ поверх открытого подменю переносит меню сюда. */
 const OPEN_FAR = { x: 620, y: 560 };
+/**
+ * Точка правого клика для набора `wide`: по ней корень встаёт так, что его
+ * подменю не помещается ни справа, ни слева. Рассчитана на вьюпорт 600 px, который
+ * ставит сам кейс.
+ */
+const OPEN_WIDE = { x: 300, y: 300 };
 /**
  * Мгновение, на котором замирают часы. Фиксированное, а не системное «сейчас»:
  * одинаковое во всех прогонах, и рядом с ним виден каждый прыжок времени.
@@ -346,6 +357,20 @@ test.beforeEach(async ({ page }) => {
         },
         { label: 'Пустой', submenu: [], action: () => log.push('пустой') },
         { label: 'Заметки', action: () => log.push('заметки') },
+      ],
+      // Владелец с подменю, которое не помещается ни справа, ни слева и прижимается
+      // к `padding`. Набор отдельный, и длинная подпись в нём нужна ровно для этого:
+      // предмет кейса — геометрия показа, а не состав пунктов.
+      wide: [
+        {
+          label: 'Край',
+          submenu: [
+            { label: 'Первый' },
+            { label: 'Второй' },
+            { label: 'Третий' },
+            { label: 'Дальний пункт подменю, прижатого к краю вьюпорта' },
+          ],
+        },
       ],
     };
 
@@ -754,37 +779,22 @@ test.describe('показ подменю', () => {
       const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
       return scope.__mc.submenuIdOf('Экспорт');
     });
+    expect(ownerId, 'адрес подменю «Экспорта» назван').not.toBeNull();
+    const submenuId = /** @type {string} */ (ownerId);
 
     await hoverItem(page, 'Экспорт');
     await page.clock.fastForward(OPEN_GRACE_MS);
     const opened = await readMenu(page);
-    expect(isOpen(opened, ownerId), 'подменю открыто').toBe(true);
+    expect(isOpen(opened, submenuId), 'подменю открыто').toBe(true);
 
-    // Первое плечо: курсор уходит с владельца вверх, на соседний пункт, — мимо
-    // подменю. Здесь hover intent планирует закрытие, и оно действительно
-    // запланировано: обратная половина этого кейса — следующий тест, который
-    // ровно эту траекторию доводит до срабатывания.
-    await hoverItem(page, 'Новый');
-    // Второе плечо: один прыжок в подменю. Без `steps` вход в подменю и первый
-    // `pointermove` после него несут одну точку, поэтому закрытие планируется
-    // ровно одно — и оно снимается входом в подменю.
-    await hoverItem(page, 'PDF');
-    await page.clock.fastForward(CLOSE_GRACE_MS * 2);
-
-    const after = await readMenu(page);
-    expect(isOpen(after, ownerId), 'подменю пережило диагональное движение').toBe(true);
-    expect(expandedLabels(after), 'владелец всё ещё развёрнут').toEqual(['Экспорт']);
-
-    // Вторая половина: внутри подменю курсор всё ещё судим. Точка берётся в последнем
-    // пункте подменю — подальше от скруглённых углов, где попадание не гарантировано
-    // (в WebKit угловой пиксель вообще не в попадании), — и на таком расстоянии от
-    // точки входа клин вырожден, то есть решением будет закрытие. Без этого шага
-    // кейс проходил бы и на «`pointermove` по дереву меню не подписан вовсе»:
-    // закрытие никто бы не планировал. Саму геометрию клина закрепляют юнит-кейсы
-    // `tests/unit/hoverIntent.spec.js`; здесь проверяется только то, что решение
-    // доходит до оркестратора.
-    const far = await page.evaluate((id) => {
-      const level = document.getElementById(id);
+    // Прямая от пункта-владельца к нижнему крайнему пункту подменю — то самое
+    // движение, ради которого всё и затевалось. Оно идёт по прямой по построению,
+    // и именно на прямой клин вырождался в нулевую площадь, то есть каждая точка
+    // планировала закрытие. Обе точки берутся из настоящих рамок, а `steps`
+    // действительно гонит курсор по отрезку, а не прыгает в конец.
+    const inset = 4;
+    const far = await page.evaluate((input) => {
+      const level = document.getElementById(input.id);
       if (level === null) {
         throw new Error('подменю показано, но узла нет');
       }
@@ -793,16 +803,21 @@ test.describe('показ подменю', () => {
       if (last === undefined) {
         throw new Error('в подменю нет пунктов');
       }
+      // Нижний крайний пункт, а не первый: расстояние от пункта-владельца
+      // максимально, и подменю защищает не близость к началу пути, а весь отрезок
+      // целиком. Отступ от угла обязателен: сам угол скруглённой рамки в попадание
+      // не входит, и точка на нём не достала бы до пункта ни в одном движке.
       const rect = last.getBoundingClientRect();
-      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-    }, /** @type {string} */ (ownerId));
-    await moveTo(page, far);
-    await page.clock.fastForward(CLOSE_GRACE_MS * 2);
+      return { x: rect.right - input.inset, y: rect.bottom - input.inset };
+    }, { id: submenuId, inset });
+    await page.mouse.move(far.x, far.y, { steps: 20 });
+    await page.clock.fastForward(CLOSE_GRACE_MS * 3);
 
-    const closed = await readMenu(page);
-    expect(isOpen(closed, ownerId), 'подменю закрылось').toBe(false);
-    expect(closed.openCount, 'корень остался открытым').toBe(1);
-    expect(expandedLabels(closed), 'отметка развёрнутости снята').toEqual([]);
+    const after = await readMenu(page);
+    expect(isOpen(after, submenuId), 'подменю пережило прямое движение к дальнему пункту').toBe(true);
+    expect(after.openCount, 'открыты корень и подменю').toBe(2);
+    expect(expandedLabels(after), 'владелец всё ещё развёрнут').toEqual(['Экспорт']);
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
   });
 
   test('курсор, ушедший в сторону, закрывает подменю после closeDelayMs', async ({ page }) => {
@@ -812,27 +827,102 @@ test.describe('показ подменю', () => {
       const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
       return scope.__mc.submenuIdOf('Экспорт');
     });
+    expect(ownerId, 'адрес подменю «Экспорта» назван').not.toBeNull();
+    const submenuId = /** @type {string} */ (ownerId);
 
     await hoverItem(page, 'Экспорт');
     await page.clock.fastForward(OPEN_GRACE_MS);
     // Контроль состояния: «не открыто» ниже имеет смысл только если до ухода
     // курсора подменю было открыто.
-    expect(isOpen(await readMenu(page), ownerId), 'подменю открыто').toBe(true);
+    expect(isOpen(await readMenu(page), submenuId), 'подменю открыто').toBe(true);
 
-    // «Заметки» — обычный пункт без подменю: курсор ушёл в сторону, в дереве меню,
-    // и ему некуда идти. Обратная половина этого кейса — предыдущий тест, где
-    // та же траектория заканчивается входом в подменю.
-    await hoverItem(page, 'Заметки');
+    // Соседний пункт того же уровня: у «Нового» нет подменю, и он лежит в
+    // родительском уровне, то есть за расширением безопасной области в сторону
+    // владельца. Расширение на `SAFE_AREA_BUFFER` накрыло бы и его, и подменю
+    // перестало бы закрываться вовсе — поэтому кейс и держит именно соседа.
+    await hoverItem(page, 'Новый');
     // Срок закрытия ещё не истёк: подменю обязано быть на месте.
     await page.clock.fastForward(CLOSE_GRACE_MS - 50);
     const pending = await readMenu(page);
-    expect(isOpen(pending, ownerId), 'до истечения срока подменю на месте').toBe(true);
+    expect(isOpen(pending, submenuId), 'до истечения срока подменю на месте').toBe(true);
 
     await page.clock.fastForward(CLOSE_GRACE_MS);
     const after = await readMenu(page);
-    expect(isOpen(after, ownerId), 'подменю закрылось').toBe(false);
+    expect(isOpen(after, submenuId), 'подменю закрылось').toBe(false);
     expect(after.openCount, 'корень остался открытым').toBe(1);
     expect(expandedLabels(after), 'отметка развёрнутости снята').toEqual([]);
+  });
+
+  test('подменю, прижатое к краю вьюпорта, переживает переход через зазор', async ({ page }) => {
+    // Вьюпорта набора `wide` хватает, чтобы его подменю не поместилось ни справа, ни
+    // слева. Общий `beforeEach` ради этого менять нельзя: остальным кейсам файла его
+    // вьюпорт нужен для четырёх уровней вложенности.
+    await page.setViewportSize(NARROW_VIEWPORT);
+    await makeMenu(page, 'wide', 'surface');
+    await openAt(page, OPEN_WIDE);
+    const ownerId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Край');
+    });
+    expect(ownerId, 'адрес подменю назван').not.toBeNull();
+    const submenuId = /** @type {string} */ (ownerId);
+
+    await hoverItem(page, 'Край');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const opened = await readMenu(page);
+    expect(isOpen(opened, submenuId), 'подменю открыто').toBe(true);
+
+    // Предмет кейса — геометрия показа, и без её проверки «прижатое к краю» было бы
+    // предположением. Обе неудачные попытки позиционера проверяются явно, а не
+    // через `left === SAFETY_PADDING`: прижатым может оказаться и не тот край.
+    const owner = itemOf(opened, 'Край');
+    const shown = opened.levels.find((level) => {
+      return level.id === submenuId;
+    });
+    expect(shown, 'подменю показано').not.toBeUndefined();
+    const submenu = /** @type {LevelView} */ (shown);
+    expect(
+      owner.rect.right + SUBMENU_OFFSET + submenu.rect.width,
+      'справа не помещается',
+    ).toBeGreaterThan(NARROW_VIEWPORT.width - SAFETY_PADDING);
+    expect(
+      owner.rect.left - SUBMENU_OFFSET - submenu.rect.width,
+      'слева не помещается',
+    ).toBeLessThan(SAFETY_PADDING);
+    expect(submenu.rect.left, 'прижато к отступу').toBeCloseTo(SAFETY_PADDING, 1);
+    // Расширение в сторону владельца здесь не работает: подменю прижато к краю
+    // слева, а владелец стоит правее, и зазор между ними в разы больше
+    // `SUBMENU_OFFSET`. Переход держит сам прямоугольник и вход в подменю.
+    expect(
+      Math.abs(owner.rect.right - submenu.rect.left),
+      'зазор больше SUBMENU_OFFSET',
+    ).toBeGreaterThan(SUBMENU_OFFSET);
+
+    // Прямая к нижнему крайнему пункту прижатого подменю. Курсор идёт по отрезку
+    // `steps` точками, и часы стоят, поэтому переход через зазор не растягивается
+    // на `CLOSE_GRACE_MS`: проверяется решение по каждой точке, а не скорость
+    // настоящей руки.
+    const inset = 4;
+    const far = await page.evaluate((input) => {
+      const level = document.getElementById(input.id);
+      if (level === null) {
+        throw new Error('подменю показано, но узла нет');
+      }
+      const items = level.querySelectorAll('.vc-item');
+      const last = items[items.length - 1];
+      if (last === undefined) {
+        throw new Error('в подменю нет пунктов');
+      }
+      const rect = last.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.bottom - input.inset };
+    }, { id: submenuId, inset });
+    await page.mouse.move(far.x, far.y, { steps: 20 });
+    await page.clock.fastForward(CLOSE_GRACE_MS * 3);
+
+    const after = await readMenu(page);
+    expect(isOpen(after, submenuId), 'подменю пережило переход через зазор').toBe(true);
+    expect(expandedLabels(after), 'владелец всё ещё развёрнут').toEqual(['Край']);
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
   });
 
   test('переход на другой пункт усекает цепочку', async ({ page }) => {

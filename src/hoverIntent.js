@@ -1,15 +1,20 @@
-import { CLOSE_GRACE_MS, DEGENERATE_AREA, OPEN_GRACE_MS } from './constants.js';
+import { CLOSE_GRACE_MS, OPEN_GRACE_MS } from './constants.js';
 
 /**
  * Hover intent: решает, летит ли курсор к подменю. Пока курсор внутри
- * «безопасного треугольника» из трёх уже принятых точек, закрытие откладывается,
- * иначе решение принимает страховочный таймер.
+ * безопасной области, закрытие откладывается, иначе решение принимает
+ * страховочный таймер.
  *
- * Проверяемая точка в проверяемый многоугольник не входит: вершина треугольника
- * лежит в нём по определению, и такая проверка была бы тождественной. Поэтому
- * первая позиция после входа в подменю принимается без проверки.
+ * Область выводит вызывающий код из геометрии пары «владелец + подменю», а не из
+ * истории движения, и это принципиально. Движение к пункту подменю идёт почти по
+ * прямой, и площадь, построенная по опорным точкам траектории, на прямой равна
+ * нулю, то есть защищала ровно тот случай, который случается всегда. Прямоугольник
+ * на прямой не вырождается никогда, а отрезок от пункта-владельца к любому пункту
+ * подменю лежит в нём по построению: зазор между уровнями равен ровно
+ * `SUBMENU_OFFSET`, и он покрыт расширением в сторону владельца.
  *
- * Домен не трогается: точки `{x, y}` в координатах вьюпорта передаёт вызывающий код.
+ * Домен не трогается: точки `{x, y}` и область в координатах вьюпорта передаёт
+ * вызывающий код.
  */
 
 /**
@@ -21,15 +26,24 @@ import { CLOSE_GRACE_MS, DEGENERATE_AREA, OPEN_GRACE_MS } from './constants.js';
  */
 
 /**
+ * Прямоугольник безопасной области в координатах вьюпорта, px. Точка на границе
+ * считается принадлежащей области: переход к подменю проходит по её собственной
+ * кромке, и исключительная граница планировала бы закрытие ровно на пути к пункту.
+ *
+ * @typedef {object} SafeArea
+ * @property {number} left
+ * @property {number} top
+ * @property {number} right
+ * @property {number} bottom
+ */
+
+/**
  * Настройки контроллера. `schedule` и `cancel` обязательны по контракту: тесты
  * обязаны управлять временем руками, без реальных таймеров.
  *
  * @typedef {object} HoverIntentOptions
  * @property {number} [openDelayMs] задержка открытия, мс, `OPEN_GRACE_MS` по умолчанию.
  * @property {number} [closeDelayMs] задержка закрытия, мс, `CLOSE_GRACE_MS` по умолчанию.
- * @property {number} [degenerateArea] порог площади клина, px², `DEGENERATE_AREA` по
- *   умолчанию. Клин вырожден, если его площадь строго меньше порога, поэтому
- *   площадь ровно `degenerateArea` невырождена и решает принадлежность точки.
  * @property {(fn: () => void, ms: number) => unknown} [schedule] постановка задачи.
  *   По умолчанию глобальный `setTimeout`, вызванный как метод `globalThis`:
  *   отвязанная ссылка на `setTimeout` в некоторых браузерах бросает
@@ -45,19 +59,27 @@ import { CLOSE_GRACE_MS, DEGENERATE_AREA, OPEN_GRACE_MS } from './constants.js';
  *
  * @typedef {object} HoverIntentController
  * @property {() => void} itemEnter курсор на пункте-владельце: снимает
- *   запланированное закрытие прошлого подменю, сбрасывает его опорные точки и
- *   планирует открытие через `openDelayMs`. Повторный вход на тот же пункт отсчёт
- *   не перезапускает: задержка идёт от первого наведения.
- * @property {() => void} itemLeave курсор покинул пункт-владелец: запоминает
- *   последнюю позицию `pointerMove` якорем выхода и отменяет открытие.
- * @property {(point: Point) => void} submenuEnter курсор вошёл в подменю: точка
- *   становится якорем входа, вершина клина сбрасывается, запланированное закрытие
- *   снимается.
- * @property {(point: Point) => void} pointerMove позиция курсора. Первая позиция
- *   после входа принимается без проверки и становится вершиной клина; каждая
- *   следующая проверяется против клина из трёх уже принятых точек. Попадание внутрь
- *   оставляет вершину прежней, промах планирует закрытие и сам становится новой
- *   вершиной, то есть сужает клин.
+ *   запланированное закрытие прошлого подменю и планирует открытие через
+ *   `openDelayMs`. Повторный вход на тот же пункт отсчёт не перезапускает: задержка
+ *   идёт от первого наведения.
+ * @property {() => void} itemLeave курсор покинул пункт-владелец: отменяет
+ *   открытие. Позиция курсора не передаётся и не хранится — она ничего не решает,
+ *   потому что безопасная область приходит из геометрии подменю, а не из
+ *   траектории.
+ * @property {() => void} submenuEnter курсор вошёл в подменю: запланированное
+ *   закрытие снимается. Точка не передаётся: вход в подменю и есть решение, а
+ *   ждать сопровождающего его `pointermove` значило бы завязать корректность на
+ *   порядок событий. Этот шаг держит подменю открытым и там, куда безопасная
+ *   область не достаёт, — например при переходе через зазор больше `SUBMENU_OFFSET`
+ *   у подменю, прижатого к краю вьюпорта.
+ * @property {(point: Point, safeArea: SafeArea | null) => void} pointerMove позиция
+ *   курсора и безопасная область показанного подменю. Закрытие планируется тогда и
+ *   только тогда, когда области нет — то есть подменю не открыто — или точка вне
+   *   прямоугольника; попадание внутрь или на границу снимает запланированное
+   *   закрытие. Область обязана приходить свежей на каждый вызов: показ подменю
+   *   меняет геометрию, и область прежнего показа обслуживала бы уже другой
+   *   прямоугольник.
+
  * @property {() => boolean} isOpenPending `true`, пока задача открытия ждёт своего
  *   времени. Сбросить раньше времени могут `itemLeave`, `itemPress` и `cancelAll`.
  * @property {() => boolean} isClosePending `true`, пока задача закрытия ждёт своего
@@ -68,64 +90,20 @@ import { CLOSE_GRACE_MS, DEGENERATE_AREA, OPEN_GRACE_MS } from './constants.js';
  *   не делает: модуль судит по висящей задаче, а она снята и `itemLeave`, и
  *   `cancelAll` тоже, поэтому «уже открытое подменю» от «сорванного открытия» здесь
  *   неразличимо.
- * @property {() => void} cancelAll снимает обе задачи, сбрасывает флаги и все
- *   опорные точки, включая источник якоря выхода.
+ * @property {() => void} cancelAll снимает обе задачи и сбрасывает флаги.
  */
 
 /**
- * Векторное произведение векторов `AB` и `AC`: удвоенная знаковая площадь
- * треугольника `ABC`.
+ * Единственное место, где решается принадлежность точки области.
  *
- * @param {Point} a первая вершина.
- * @param {Point} b вторая вершина.
- * @param {Point} c третья вершина.
- * @returns {number} удвоенная знаковая площадь, px². Ноль у вырожденного треугольника.
+ * @param {SafeArea} area прямоугольник безопасной области.
+ * @param {Point} point проверяемая точка.
+ * @returns {boolean} `true`, если точка внутри прямоугольника или на границе.
  */
-function cross(a, b, c) {
-  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-}
-
-/**
- * @param {Point[]} triangle вершины треугольника в любом порядке.
- * @returns {number} площадь треугольника, px²: ориентация вершин не важна, у
- *   треугольника на одной прямой площадь нулевая.
- */
-function triangleArea(triangle) {
-  return Math.abs(cross(triangle[0], triangle[1], triangle[2])) / 2;
-}
-
-/**
- * Единственное место, где решается принадлежность точки треугольнику. Вырожденный
- * треугольник **не** считается содержащим любую точку: у трех коллинеарных точек
- * кросс-продукты выходят разных знаков, и предикат вернёт `false`. Безопасность
- * держит вызывающий код, проверяющий площадь через `degenerateArea`; при
- * `degenerateArea: 0` проверка на границе, и клин нулевой площади закрыл бы
- * подменю на каждом движении.
- *
- * Точка на стороне считается принадлежащей: все кросс-продукты нулевые или одного
- * знака.
- *
- * @param {Point[]} triangle невырожденный треугольник.
- * @param {Point} point проверяемая точка, не вершина `triangle`.
- * @returns {boolean} `true`, если точка внутри или на границе.
- */
-function containsPoint(triangle, point) {
-  const [a, b, c] = triangle;
-  const ab = cross(a, b, point);
-  const bc = cross(b, c, point);
-  const ca = cross(c, a, point);
-  return (ab >= 0 && bc >= 0 && ca >= 0) || (ab <= 0 && bc <= 0 && ca <= 0);
-}
-
-/**
- * Опорные точки копируются: якоря живут дольше вызова, а вызывающий код
- * свободен мутировать переданный объект.
- *
- * @param {Point} point точка вызывающего кода.
- * @returns {Point} независимая копия точки.
- */
-function copyPoint(point) {
-  return { x: point.x, y: point.y };
+function containsArea(area, point) {
+  return (
+    point.x >= area.left && point.x <= area.right && point.y >= area.top && point.y <= area.bottom
+  );
 }
 
 /**
@@ -157,21 +135,12 @@ export function createHoverIntent(options = {}) {
   const {
     openDelayMs = OPEN_GRACE_MS,
     closeDelayMs = CLOSE_GRACE_MS,
-    degenerateArea = DEGENERATE_AREA,
     schedule = defaultSchedule,
     cancel = defaultCancel,
     onOpen = () => {},
     onClose = () => {},
   } = options;
 
-  /** @type {Point | null} */
-  let exitPoint = null;
-  /** @type {Point | null} */
-  let entryPoint = null;
-  /** @type {Point | null} первая позиция после входа или последний промах. */
-  let wedgeTip = null;
-  /** @type {Point | null} последняя позиция `pointerMove`, источник якоря выхода. */
-  let lastPointerPoint = null;
   /** @type {unknown} */
   let openHandle = null;
   /** @type {unknown} */
@@ -221,9 +190,6 @@ export function createHoverIntent(options = {}) {
 
   function itemEnter() {
     clearClose();
-    exitPoint = null;
-    entryPoint = null;
-    wedgeTip = null;
     if (openPending) {
       return;
     }
@@ -232,52 +198,25 @@ export function createHoverIntent(options = {}) {
   }
 
   function itemLeave() {
-    if (lastPointerPoint !== null) {
-      exitPoint = lastPointerPoint;
-    }
     clearOpen();
   }
 
-  /**
-   * @param {Point} point точка входа в подменю.
-   * @returns {void}
-   */
-  function submenuEnter(point) {
-    entryPoint = copyPoint(point);
-    wedgeTip = null;
+  function submenuEnter() {
     clearClose();
   }
 
   /**
    * @param {Point} point текущая позиция курсора.
+   * @param {SafeArea | null} safeArea безопасная область показанного подменю либо
+   *   `null`, когда подменю не открыто.
    * @returns {void}
    */
-  function pointerMove(point) {
-    lastPointerPoint = copyPoint(point);
-
-    if (entryPoint === null || exitPoint === null) {
+  function pointerMove(point, safeArea) {
+    if (safeArea === null || !containsArea(safeArea, point)) {
       planClose();
       return;
     }
-    if (wedgeTip === null) {
-      wedgeTip = lastPointerPoint;
-      return;
-    }
-
-    const triangle = [exitPoint, entryPoint, wedgeTip];
-    // Клин площадью ровно `degenerateArea` невырожден: порог строгий, иначе
-    // граница вела бы себя как вырожденная.
-    if (triangleArea(triangle) >= degenerateArea && containsPoint(triangle, point)) {
-      clearClose();
-      return;
-    }
-
-    // Промах обязан стать вершиной: иначе клин не сузился бы, и подменю осталось
-    // бы открытым внутри треугольника, растущего от каждой принятой точки. В
-    // вырожденной ветке это же позволяет курсору вернуться ближе и сделать клин
-    // невырожденным.
-    wedgeTip = lastPointerPoint;
-    planClose();
+    clearClose();
   }
 
   function itemPress() {
@@ -291,10 +230,6 @@ export function createHoverIntent(options = {}) {
   function cancelAll() {
     clearOpen();
     clearClose();
-    exitPoint = null;
-    entryPoint = null;
-    wedgeTip = null;
-    lastPointerPoint = null;
   }
 
   return {
