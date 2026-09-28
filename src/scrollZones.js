@@ -75,8 +75,7 @@ export function createScrollZones(options) {
   // `requestAnimationFrame` ноль не отдаёт, и заглушка стенда тоже: иначе
   // «кадров нет» нельзя было бы отличить от «кадр один».
   let frame = 0;
-  // Направление цикла: `1` вниз, `-1` вверх, `0` — цикла нет. Само тело шага
-  // направление не читает, а читатель кода обязан.
+  // Направление цикла: `1` вниз, `-1` вверх, `0` — цикла нет.
   let direction = 0;
   // Отметка времени предыдущего кадра; `0` значит «время ещё не замерено».
   let previous = 0;
@@ -96,6 +95,18 @@ export function createScrollZones(options) {
   }
 
   /**
+   * Заблокирована ли зона, в которую идёт цикл.
+   *
+   * Аргумент всегда `±1`: `0` означает, что цикла нет, и шага с ним не бывает.
+   *
+   * @param {number} sign направление цикла.
+   * @returns {boolean}
+   */
+  function blocked(sign) {
+    return sign < 0 ? up.hasAttribute('data-vc-blocked') : down.hasAttribute('data-vc-blocked');
+  }
+
+  /**
    * @param {number} time
    * @returns {void}
    */
@@ -111,13 +122,16 @@ export function createScrollZones(options) {
     const distance = Math.round(speed * (time - previous) / 1000);
     previous = time;
     // Шаг округляется до целых пикселей, и кадр короче одного пикселя сдвига
-    // даёт ноль. Проверка упора стоит именно здесь: у такого кадра двигать
-    // нечего, и остановить его — значило бы убить цикл на середине пути.
+    // даёт ноль. Проверки упора стоят именно здесь: у такого кадра двигать
+    // нечем, и остановить его — значило бы убить цикл на середине пути.
     if (distance > 0) {
       const before = list.scrollTop;
       list.scrollTop += direction * distance;
       sync();
-      if (list.scrollTop === before) {
+      // Упоров два, и оба нужны. Зона могла заблокироваться при том, что запись
+      // список всё же сдвинула — остаток до низа меньше шага, — и тогда второй
+      // признак молчал бы, а цикл пошёл бы дальше по мёртвой зоне.
+      if (blocked(direction) || list.scrollTop === before) {
         stop();
         return;
       }
@@ -143,7 +157,7 @@ export function createScrollZones(options) {
   function begin(next) {
     // Зона, до которой не доскроллить, цикл не запускает: пустой кадр всё равно
     // должен был бы сразу же встать, но без этой проверки он ещё и мигает.
-    if (next < 0 ? up.hasAttribute('data-vc-blocked') : down.hasAttribute('data-vc-blocked')) {
+    if (blocked(next)) {
       return;
     }
     stop();
@@ -158,12 +172,18 @@ export function createScrollZones(options) {
    * `sync` зовётся и на уровне без перебора, иначе у зон остался бы признак
    * упора от прошлого показа.
    *
+   * Без перебора цикл останавливается: прокручивать больше нечего, и оставшийся
+   * кадр крутил бы список впустую. На прокручиваемом уровне пересчёт цикл не
+   * трогает — иначе он гасил бы прокрутку на каждом показе.
+   *
    * @returns {void}
    */
   function refresh() {
     level.removeAttribute('data-vc-scrollable');
     if (list.scrollHeight > list.clientHeight) {
       level.setAttribute('data-vc-scrollable', '');
+    } else {
+      stop();
     }
     sync();
   }

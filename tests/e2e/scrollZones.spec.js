@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { SCROLL_SPEED_PX_PER_SEC } from '../../src/constants.js';
 
 // Модуль подгружается динамическим импортом прямо в странице, и спецификатор
 // `../../src/scrollZones.js` обслуживает обе среды: в браузере от
@@ -11,12 +12,17 @@ import { expect, test } from '@playwright/test';
  */
 
 /**
+ * @typedef {import('../../src/scrollZones.js').ScrollZoneOptions} ScrollZoneOptions
+ */
+
+/**
  * Форма стенда: настоящие узлы с настоящей геометрией и ручной планировщик
  * кадров. Тип назван явно потому, что читают его кейсы из `page.evaluate`, где
  * выражения `typeof stand` из `mountStand` уже не видно: колбэк сериализуется
  * и выполняется в браузере, где выражений файла теста нет.
  *
  * @typedef {object} ScrollStand
+ * @property {HTMLElement} host обёртка стенда: снимается целиком перед следующим.
  * @property {HTMLElement} level
  * @property {HTMLElement} up
  * @property {HTMLElement} down
@@ -25,19 +31,37 @@ import { expect, test } from '@playwright/test';
  * @property {(time: number) => void} flush прогоняет ровно один кадр, отдавая
  *   ему заданное время.
  * @property {() => boolean} pending есть ли кадр, ждущий своего `flush`.
+ * @property {() => number} scheduled сколько кадров поставлено и ещё не
+ *   отменено. Настоящий `requestAnimationFrame` держит в очереди столько
+ *   callback'ов, сколько их поставили, и одна ячейка на стенде этого бы скрыла.
  */
+
+/**
+ * @typedef {object} StandConfig
+ * @property {number} viewportHeight высота рамки списка, px. Дробная высота даёт
+ *   дробный низ: `clientHeight` у такого списка нецелый, и порог снизу с
+ *   допуском в 1 px становится проверяемым по-настоящему.
+ * @property {number} contentHeight высота наполнителя, px. Задаётся при сборке,
+ *   поэтому каждый перебор требует своего стенда.
+ * @property {number} [speed] скорость контроллера, px в секунду. Без неё модуль
+ *   берёт `SCROLL_SPEED_PX_PER_SEC`, и это отдельная проверяемая ветка.
+ * @property {boolean} [liveFrames] не подменять планировщик: цикл пойдёт на
+ *   настоящем `requestAnimationFrame`, и `flush` станет нечем гонять.
+ * @property {boolean} [scaled] поставить на уровень `transform: scale(0.96)`,
+ *   как у живого меню.
+ */
+
+/**
+ * Скорость стенда, px в секунду. Задаётся стенду через `config` и оттуда же
+ * считается ожидаемый сдвиг, поэтому значение живёт в файле в одном экземпляре,
+ * а ожидаемое число выводится из него, а не выписывается на глаз.
+ */
+const STAND_SPEED_PX_PER_SEC = 100;
 
 /**
  * Стойка по умолчанию: список втрое выше своей рамки, прокручивать есть куда.
  */
-const STAND = { viewportHeight: 100, contentHeight: 1000 };
-
-/**
- * Скорость стенда, px в секунду. Второй экземпляр значения из `mountStand`:
- * числа проверяются в браузере и вернуться в Node не могут, а ожидаемый сдвиг
- * должен считаться, а не выводиться на глаз.
- */
-const STAND_SPEED_PX_PER_SEC = 100;
+const STAND = { viewportHeight: 100, contentHeight: 1000, speed: STAND_SPEED_PX_PER_SEC };
 
 /**
  * Отметка времени первого кадра, мс. Не ноль: модуль держит `previous === 0`
@@ -60,21 +84,25 @@ const FRAME_STEP_MS = 50;
 const FRAME_STEP_PX = STAND_SPEED_PX_PER_SEC * FRAME_STEP_MS / 1000;
 
 /**
- * Сверяет прочитанный `scrollTop` числом с допуском, а не ровно и не строкой.
+ * Сверяет прочитанный `scrollTop` числом с допуском, а не ровно.
  *
  * Значение приходит из движка, и то, как именно он представляет результат
- * целочисленной записи, — его дело, а не поведение контроллера: тот же стенд под
- * `.vc-menu` в firefox отдавал `5.2166…` вместо `5` из-за `scale(0.96)`. Допуск в
- * сотые доли пикселя на порядок меньше шага стенда в 5 px, поэтому ошибку шага он
- * по-прежнему видит, а округление представления перестаёт быть его ошибкой.
+ * записи, — его дело, а не поведение контроллера: под `scale(0.96)` firefox
+ * округляет `scrollTop` до своей сетки и отдаёт `5.2166…` вместо `5`. Допуск
+ * виден только тем величинам, которые на порядок больше него, поэтому ошибку
+ * расчёта он по-прежнему ловит, а округление представления перестаёт быть ошибкой
+ * расчёта.
  *
- * @param {number} actual прочитанный `scrollTop`, px.
- * @param {number} expected ожидаемый сдвиг, px.
+ * @param {number} actual прочитанная величина, px.
+ * @param {number} expected ожидаемая величина, px.
  * @param {string} name имя величины в сообщении об ошибке.
+ * @param {number} [digits] сколько знаков после запятой обязано совпасть. По
+ *   умолчанию 2; дробному низу под масштабом хватает одного, потому что там
+ *   округление движка достигает сотой пикселя.
  * @returns {void}
  */
-function expectPx(actual, expected, name) {
-  expect(actual, name).toBeCloseTo(expected, 2);
+function expectPx(actual, expected, name, digits = 2) {
+  expect(actual, name).toBeCloseTo(expected, digits);
 }
 
 /**
@@ -84,15 +112,29 @@ function expectPx(actual, expected, name) {
  * иначе одинаковый сдвиг пришлось бы угадывать в трёх движках сразу.
  *
  * Скорость стенда 100 px в секунду, то есть 5 px за кадр при `dt` 50 мс: круглое
- * число, вокруг которого расхождение видно сразу.
+ * число, вокруг которого расхождение видно сразу. Задаётся она через `config`,
+ * иначе скорость стенда жила бы в двух экземплярах — в браузере и в ожидаемом
+ * числе.
+ *
+ * Стенд намеренно собран без класса `.vc-menu`, а значит без `transform:
+ * scale(0.96)`, который задаёт живое меню. Отсюда два следствия, и оба нужны
+ * кейсам: `scrollTop` стенда — целое число, поэтому большинство проверок смотрит
+ * на него точно, а кейс с дробной геометрией (`scaled: true`) надевает масштаб
+ * сам, иначе дробного низа просто не было бы.
+ *
+ * Прежний стенд снимается целиком: иначе его разметка и пять его слушателей
+ * дожили бы до конца кейса, а второй вызов в том же кейсе только стёр бы ссылку
+ * на него.
  *
  * @param {import('@playwright/test').Page} page
- * @param {{ viewportHeight: number, contentHeight: number }} config
+ * @param {StandConfig} config
  * @returns {Promise<void>}
  */
 async function mountStand(page, config) {
   await page.evaluate(async (options) => {
     const { createScrollZones } = await import('../../src/scrollZones.js');
+    const scope = /** @type {{ __stand?: ScrollStand }} */ (/** @type {unknown} */ (globalThis));
+    scope.__stand?.host.remove();
     const host = document.createElement('div');
     host.style.cssText = 'position: absolute; top: 0; left: 0; width: 120px;';
     const up = document.createElement('div');
@@ -108,45 +150,67 @@ async function mountStand(page, config) {
     // Класс `.vc-menu` стенду не нужен и вреден: он тянет за собой `position:
     // fixed` с шириной по содержимому, под которой прокручиваемый потомок в
     // трёх движках перестаёт быть прокручиваемым (`scrollHeight` сходится с
-    // `clientHeight`, `scrollTop` не двигается), и `scale(0.96)`, из-за которого
-    // firefox округляет `scrollTop` до своей сетки. Ни то, ни другое ничего не
-    // говорит о контроллере; стенду нужна геометрия списка, а не вид меню.
+    // `clientHeight`, `scrollTop` не двигается). Ничего общего с контроллером это
+    // не имеет: стенду нужна геометрия списка, а не вид меню.
+    if (options.scaled === true) {
+      // Масштаб живого меню — единственная причина, по которой у настоящего
+      // списка `scrollTop` и высота оказываются дробными. Без него допуск в 1 px
+      // у нижнего порога нечего проверять: на целых высотах он ничего не меняет.
+      level.style.transform = 'scale(0.96)';
+    }
     level.append(up, list, down);
     host.appendChild(level);
     document.body.appendChild(host);
 
-    // Ровно один кадр в очереди: `requestFrame` зовётся только когда очередь пуста,
-    // а `flush` забирает кадр до вызова, иначе кадр, поставленный самим `step`,
-    // попал бы в тот же прогон и `flush` крутил бы цикл вечно.
-    /** @type {((time: number) => void) | null} */
-    let queued = null;
+    // Очередь кадров, а не одна ячейка: настоящий `requestAnimationFrame` держит
+    // столько callback'ов, сколько ему поставили, и стенд с ячейкой терял бы
+    // вторую постановку вместо того, чтобы её показать. `flush` по-прежнему
+    // прогоняет ровно один кадр — самый старый.
+    /** @type {Map<number, (time: number) => void>} */
+    const frames = new Map();
+    let lastHandle = 0;
+    /** @type {ScrollZoneOptions} */
+    const zonesOptions = {
+      list,
+      level,
+      up,
+      down,
+      /**
+       * @param {(time: number) => void} callback
+       * @returns {number}
+       */
+      requestFrame: (callback) => {
+        lastHandle += 1;
+        frames.set(lastHandle, callback);
+        return lastHandle;
+      },
+      /**
+       * @param {number} handle
+       * @returns {void}
+       */
+      cancelFrame: (handle) => {
+        frames.delete(handle);
+      },
+    };
+    // Скорость попадает в опции только когда её задали: умолчание модуля — это
+    // отдельный путь, и подстановка константы здесь закрыла бы его навсегда.
+    if (typeof options.speed === 'number') {
+      zonesOptions.speed = options.speed;
+    }
+    if (options.liveFrames === true) {
+      // Живые кадры вместо ручных: подмену снимаем целиком, и модуль берёт свои
+      // умолчания — `globalThis.requestAnimationFrame` и `cancelAnimationFrame`.
+      delete zonesOptions.requestFrame;
+      delete zonesOptions.cancelFrame;
+    }
     /** @type {ScrollStand} */
     const stand = {
+      host,
       level,
       up,
       down,
       list,
-      zones: createScrollZones({
-        list,
-        level,
-        up,
-        down,
-        speed: 100,
-        /**
-         * @param {(time: number) => void} callback
-         * @returns {number}
-         */
-        requestFrame: (callback) => {
-          queued = callback;
-          return 1;
-        },
-        /**
-         * @returns {void}
-         */
-        cancelFrame: () => {
-          queued = null;
-        },
-      }),
+      zones: createScrollZones(zonesOptions),
       /**
        * Прогоняет ровно один кадр, отдавая ему заданное время.
        *
@@ -154,21 +218,25 @@ async function mountStand(page, config) {
        * @returns {void}
        */
       flush(time) {
-        if (queued === null) {
+        for (const [handle, callback] of frames) {
+          frames.delete(handle);
+          callback(time);
           return;
         }
-        const callback = queued;
-        queued = null;
-        callback(time);
       },
       /**
        * Есть ли кадр, ждущий своего `flush`.
        *
        * @returns {boolean}
        */
-      pending: () => queued !== null,
+      pending: () => frames.size > 0,
+      /**
+       * Сколько кадров поставлено и ещё не отменено.
+       *
+       * @returns {number}
+       */
+      scheduled: () => frames.size,
     };
-    const scope = /** @type {{ __stand?: ScrollStand }} */ (/** @type {unknown} */ (globalThis));
     scope.__stand = stand;
   }, config);
 }
@@ -199,7 +267,7 @@ test('refresh снимает и возвращает признак прокру
   expect(overflown.before).toBe(false);
   expect(overflown.after).toBe(true);
 
-  await mountStand(page, { viewportHeight: 100, contentHeight: 100 });
+  await mountStand(page, { viewportHeight: 100, contentHeight: 100, speed: STAND_SPEED_PX_PER_SEC });
   const exact = await page.evaluate(() => {
     const scope = /** @type {{ __stand: ScrollStand }} */ (/** @type {unknown} */ (globalThis));
     const stand = scope.__stand;
@@ -257,6 +325,49 @@ test('refresh гасит устаревший признак, оставшийс
   expect(result.after.down).toBe(true);
 });
 
+test('refresh останавливает цикл, когда перебора нет', async ({ page }) => {
+  await mountStand(page, STAND);
+  const result = await page.evaluate(() => {
+    const scope = /** @type {{ __stand: ScrollStand }} */ (/** @type {unknown} */ (globalThis));
+    const stand = scope.__stand;
+    stand.zones.refresh();
+    stand.down.dispatchEvent(new PointerEvent('pointerenter'));
+    const running = stand.pending();
+    // Пунктов стало меньше, и список в обрез: перебора нет, а цикл ещё жив.
+    stand.list.style.height = '1000px';
+    stand.zones.refresh();
+    const afterShrink = {
+      pending: stand.pending(),
+      scrollable: stand.level.hasAttribute('data-vc-scrollable'),
+    };
+    // Пункты вернулись, и цикл снова заводится: `refresh` на прокручиваемом
+    // уровне трогать его не должен, иначе пересчёт гасил бы прокрутку на каждом
+    // показе.
+    stand.list.style.height = '100px';
+    stand.zones.refresh();
+    stand.down.dispatchEvent(new PointerEvent('pointerenter'));
+    const restarted = stand.pending();
+    stand.zones.refresh();
+    return {
+      running,
+      afterShrink,
+      scrollable: stand.level.hasAttribute('data-vc-scrollable'),
+      restarted,
+      pendingAfterRefresh: stand.pending(),
+    };
+  });
+
+  // Контроль: цикл был жив, иначе остановка ничего бы не значила.
+  expect(result.running).toBe(true);
+  // Перебора нет — и цикл встал, а не остался висеть на несуществующем списке.
+  expect(result.afterShrink.scrollable).toBe(false);
+  expect(result.afterShrink.pending).toBe(false);
+  // Контроль: пересчёт на прокручиваемом уровне цикл не трогает.
+  expect(result.scrollable).toBe(true);
+  expect(result.restarted).toBe(true);
+  expect(result.pendingAfterRefresh).toBe(true);
+});
+
 test('верхняя зона заблокирована в начале, нижняя свободна', async ({ page }) => {
   await mountStand(page, STAND);
   const result = await page.evaluate(() => {
@@ -296,7 +407,7 @@ test('нижняя зона заблокирована в конце, верхн
 });
 
 test('переполнение меньше пикселя гасит обе зоны', async ({ page }) => {
-  await mountStand(page, { viewportHeight: 100, contentHeight: 100.5 });
+  await mountStand(page, { viewportHeight: 100, contentHeight: 100.5, speed: STAND_SPEED_PX_PER_SEC });
   const result = await page.evaluate(() => {
     const scope = /** @type {{ __stand: ScrollStand }} */ (/** @type {unknown} */ (globalThis));
     const stand = scope.__stand;
@@ -313,6 +424,104 @@ test('переполнение меньше пикселя гасит обе з�
   // нижняя зона осталась бы незаблокированной, хотя прокручивать больше некуда.
   expect(result.overflowPx).toBeLessThanOrEqual(1);
   expect(result.up).toBe(true);
+  expect(result.down).toBe(true);
+});
+
+test('дробный низ: зона гаснет за пиксель до низа, и цикл встаёт по ней', async ({ page }) => {
+  // Первый стенд: перебора меньше пикселя под живым масштабом. Обе зоны
+  // заблокированы, а уровень по контракту остаётся помеченным прокручиваемым —
+  // «видно, но крутить некуда» на неразличимом.
+  await mountStand(page, {
+    viewportHeight: 100,
+    contentHeight: 100.5,
+    speed: STAND_SPEED_PX_PER_SEC,
+    scaled: true,
+  });
+  const subPixel = await page.evaluate(() => {
+    const scope = /** @type {{ __stand: ScrollStand }} */ (/** @type {unknown} */ (globalThis));
+    const stand = scope.__stand;
+    stand.zones.refresh();
+    return {
+      overflowPx: stand.list.scrollHeight - stand.list.clientHeight,
+      scrollable: stand.level.hasAttribute('data-vc-scrollable'),
+      up: stand.up.hasAttribute('data-vc-blocked'),
+      down: stand.down.hasAttribute('data-vc-blocked'),
+    };
+  });
+
+  // Контроль: перебора меньше пикселя, и оба упора на расстоянии неполного
+  // пикселя — ровно то состояние, ради которого у порога снизу есть допуск.
+  expect(subPixel.overflowPx).toBeGreaterThan(0);
+  expect(subPixel.overflowPx).toBeLessThanOrEqual(1);
+  // Контроль: уровень помечен прокручиваемым — по строгому порогу `refresh`, в
+  // отличие от зон, и это плата за допуск, названная в спецификации.
+  expect(subPixel.scrollable).toBe(true);
+  expect(subPixel.up).toBe(true);
+  expect(subPixel.down).toBe(true);
+
+  // Второй стенд: длинный список, до низа которого меньше пикселя. Масштаба на
+  // нём нет намеренно: под `scale(0.96)` firefox округляет записанный `scrollTop`
+  // вниз на величину до 0.43 px (замерено: запись 899.4 читается как 898.967), и
+  // кейс мерил бы округление движка, а не порог контроллера. Окно в 1 px
+  // воспроизводится одинаково во всех трёх движках, и в нём допуск виден
+  // буквально: строгий порог «до самого низа» на нём не срабатывает.
+  await mountStand(page, STAND);
+  const result = await page.evaluate((frames) => {
+    const scope = /** @type {{ __stand: ScrollStand }} */ (/** @type {unknown} */ (globalThis));
+    const stand = scope.__stand;
+    const maxScroll = stand.list.scrollHeight - stand.list.clientHeight;
+    // За 0.6 px до низа: строгий порог ещё не выполнен, а прокручивать больше
+    // некуда, и наведение на зону упиралось бы в стену.
+    stand.list.scrollTop = maxScroll - 0.6;
+    stand.zones.refresh();
+    const tolerance = {
+      travel: maxScroll - stand.list.scrollTop,
+      strictBottom: stand.list.scrollTop + stand.list.clientHeight >= stand.list.scrollHeight,
+      up: stand.up.hasAttribute('data-vc-blocked'),
+      down: stand.down.hasAttribute('data-vc-blocked'),
+    };
+    // Первая причина встать: цикл, дошедший до низа, встаёт по заблокированной
+    // зоне, а не по неподвижному списку. За четыре с половиной пикселя до низа
+    // зона ещё свободна, и один кадр в 5 px её дожимает — сдвиг при этом
+    // остаётся, и второй признак упора молчит.
+    stand.list.scrollTop = maxScroll - 4.6;
+    stand.zones.refresh();
+    const free = !stand.down.hasAttribute('data-vc-blocked');
+    const before = stand.list.scrollTop;
+    stand.down.dispatchEvent(new PointerEvent('pointerenter'));
+    const started = stand.pending();
+    stand.flush(frames.first);
+    stand.flush(frames.first + frames.step);
+    return {
+      tolerance,
+      free,
+      started,
+      before,
+      moved: stand.list.scrollTop,
+      landed: maxScroll - stand.list.scrollTop,
+      pending: stand.pending(),
+      down: stand.down.hasAttribute('data-vc-blocked'),
+    };
+  }, { first: FIRST_FRAME_MS, step: FRAME_STEP_MS });
+
+  // Контроль: до низа остался неполный пиксель, и низа строго не достигнуто —
+  // без допуска зона осталась бы свободной.
+  expect(result.tolerance.travel).toBeGreaterThan(0);
+  expect(result.tolerance.travel).toBeLessThanOrEqual(1);
+  expectPx(result.tolerance.travel, 1, 'остаток пути до низа');
+  expect(result.tolerance.strictBottom).toBe(false);
+  // Допуск сработал вниз и не перекрыл верх: список в середине, до верха далеко.
+  expect(result.tolerance.down).toBe(true);
+  expect(result.tolerance.up).toBe(false);
+  // Контроль: за четыре с половиной пикселя до низа зона свободна, и цикл
+  // завёлся, иначе встать было бы нечему.
+  expect(result.free).toBe(true);
+  expect(result.started).toBe(true);
+  // Сдвиг состоялся — значит, второй признак упора молчал, и встать могла только
+  // заблокированная зона.
+  expect(result.moved).toBeGreaterThan(result.before);
+  expectPx(result.landed, 0, 'остаток пути после зажима');
+  expect(result.pending).toBe(false);
   expect(result.down).toBe(true);
 });
 
@@ -335,6 +544,53 @@ test('наведение на свободную зону запускает ц�
   expect(result.atTop).toBe(false);
   // Середина: та же зона та же, а цикл уже идёт.
   expect(result.atBottom).toBe(true);
+});
+
+test('повторный вход в зону не оставляет второго кадра', async ({ page }) => {
+  await mountStand(page, STAND);
+  const result = await page.evaluate((frames) => {
+    const scope = /** @type {{ __stand: ScrollStand }} */ (/** @type {unknown} */ (globalThis));
+    const stand = scope.__stand;
+    // Середина списка: обе зоны свободны, иначе переход нечего было бы проверять.
+    stand.list.scrollTop = 450;
+    stand.zones.refresh();
+    const zonesFree = {
+      up: !stand.up.hasAttribute('data-vc-blocked'),
+      down: !stand.down.hasAttribute('data-vc-blocked'),
+    };
+    stand.down.dispatchEvent(new PointerEvent('pointerenter'));
+    stand.flush(frames.first);
+    const running = stand.pending();
+    const whileDown = stand.scheduled();
+    // Курсор перешёл на верхнюю зону, а цикл вниз ещё жив. Без отмены висело бы
+    // два кадра: настоящий `requestAnimationFrame` поставил бы вторую цепочку, и
+    // список поехал бы вдвое быстрее.
+    stand.up.dispatchEvent(new PointerEvent('pointerenter'));
+    const afterReentry = stand.scheduled();
+    // Первый кадр нового цикла только запоминает время, поэтому движение видно
+    // только на втором: переход обязан сменить направление, а не замереть.
+    stand.flush(frames.first + frames.step);
+    const afterFirstFrame = stand.list.scrollTop;
+    stand.flush(frames.first + 2 * frames.step);
+    return {
+      zonesFree,
+      running,
+      whileDown,
+      afterReentry,
+      afterFirstFrame,
+      afterSecondFrame: stand.list.scrollTop,
+    };
+  }, { first: FIRST_FRAME_MS, step: FRAME_STEP_MS });
+
+  // Контроль: обе зоны свободны, и цикл вниз был жив с ровно одним кадром.
+  expect(result.zonesFree).toEqual({ up: true, down: true });
+  expect(result.running).toBe(true);
+  expect(result.whileDown).toBe(1);
+  // Контроль: после перехода кадр тоже один — второго не появилось.
+  expect(result.afterReentry).toBe(1);
+  // Переход сменил направление: список поехал вверх, и поехал на один шаг.
+  expect(result.afterFirstFrame).toBe(450);
+  expect(result.afterSecondFrame).toBe(450 - FRAME_STEP_PX);
 });
 
 test('кадр сдвигает список на speed умноженное на dt', async ({ page }) => {
@@ -367,6 +623,95 @@ test('кадр сдвигает список на speed умноженное н�
   expectPx(result.down[2], 2 * FRAME_STEP_PX, 'сдвиг вниз за два кадра');
   expect(result.upFirst).toBe(450);
   expectPx(result.upSecond, 450 - FRAME_STEP_PX, 'сдвиг вверх за кадр');
+});
+
+test('скорость по умолчанию — SCROLL_SPEED_PX_PER_SEC', async ({ page }) => {
+  // Константа закреплена числом: она и есть контракт скорости для всех меню
+  // библиотеки, и без закрепления она одинаково съехала бы в сторону вместе со
+  // всем остальным.
+  expect(SCROLL_SPEED_PX_PER_SEC).toBe(240);
+
+  // Скорость не задана: контроллер обязан взять свою, а не стендовую.
+  await mountStand(page, { viewportHeight: 100, contentHeight: 1000 });
+  const result = await page.evaluate((frames) => {
+    const scope = /** @type {{ __stand: ScrollStand }} */ (/** @type {unknown} */ (globalThis));
+    const stand = scope.__stand;
+    stand.zones.refresh();
+    stand.down.dispatchEvent(new PointerEvent('pointerenter'));
+    /** @type {number[]} */
+    const down = [];
+    for (let frame = 0; frame < 3; frame += 1) {
+      stand.flush(frames.first + frame * frames.step);
+      down.push(stand.list.scrollTop);
+    }
+    return { down, travel: stand.list.scrollHeight - stand.list.clientHeight };
+  }, { first: FIRST_FRAME_MS, step: FRAME_STEP_MS });
+
+  // Контроль: список прокручиваем, иначе шагу некуда было бы дойти.
+  expect(result.travel).toBe(900);
+  // Первый кадр не сдвигает, дальше — 240 px в секунду, то есть 12 px за кадр при
+  // `dt` 50 мс. Ровно вдвое больше стендовых 5 px: стендовая скорость сюда не
+  // подставляется, иначе кейс прошёл бы на подставленном значении.
+  expect(result.down[0]).toBe(0);
+  expectPx(result.down[1], SCROLL_SPEED_PX_PER_SEC * FRAME_STEP_MS / 1000, 'сдвиг за кадр по умолчанию');
+  expectPx(result.down[2], 2 * SCROLL_SPEED_PX_PER_SEC * FRAME_STEP_MS / 1000, 'сдвиг за два кадра по умолчанию');
+});
+
+test('без подмены кадров цикл идёт на настоящем requestAnimationFrame и stop его отменяет', async ({ page }) => {
+  // Ни скорости, ни планировщика: оба умолчания модуля должны работать сами.
+  await mountStand(page, { viewportHeight: 100, contentHeight: 1000, liveFrames: true });
+  const result = await page.evaluate(async () => {
+    const scope = /** @type {{ __stand: ScrollStand }} */ (/** @type {unknown} */ (globalThis));
+    const stand = scope.__stand;
+    // Счётчики на самих глобалах: функции остаются умолчаниями модуля, мы только
+    // видим, что зовутся именно они.
+    const rawRequest = globalThis.requestAnimationFrame;
+    const rawCancel = globalThis.cancelAnimationFrame;
+    let requested = 0;
+    let cancelled = 0;
+    globalThis.requestAnimationFrame = (callback) => {
+      requested += 1;
+      return rawRequest.call(globalThis, callback);
+    };
+    globalThis.cancelAnimationFrame = (handle) => {
+      cancelled += 1;
+      rawCancel.call(globalThis, handle);
+    };
+    stand.list.scrollTop = 450;
+    stand.zones.refresh();
+    stand.down.dispatchEvent(new PointerEvent('pointerenter'));
+    const scheduled = requested;
+    const before = stand.list.scrollTop;
+    // Живые часы вместо стендовых: ждём самого движения, но не его величины.
+    const deadline = performance.now() + 2000;
+    while (stand.list.scrollTop === before && performance.now() < deadline) {
+      await new Promise((resolve) => {
+        rawRequest.call(globalThis, () => { resolve(undefined); });
+      });
+    }
+    const moved = stand.list.scrollTop;
+    const requestedWhileRunning = requested;
+    stand.zones.stop();
+    const cancelledByStop = cancelled;
+    for (let frame = 0; frame < 5; frame += 1) {
+      await new Promise((resolve) => {
+        rawRequest.call(globalThis, () => { resolve(undefined); });
+      });
+    }
+    const afterStop = stand.list.scrollTop;
+    globalThis.requestAnimationFrame = rawRequest;
+    globalThis.cancelAnimationFrame = rawCancel;
+    return { scheduled, requestedWhileRunning, cancelledByStop, before, moved, afterStop };
+  });
+
+  // Контроль: цикл пошёл по живым кадрам и увёл список. Единичного кадра
+  // недостаточно — цикл обязан переставлять себя, иначе это не цикл.
+  expect(result.scheduled).toBeGreaterThanOrEqual(1);
+  expect(result.requestedWhileRunning).toBeGreaterThan(result.scheduled);
+  expect(result.moved).toBeGreaterThan(result.before);
+  // `stop` отменил живой кадр, который висел на этот момент.
+  expect(result.cancelledByStop).toBe(1);
+  expect(result.afterStop).toBe(result.moved);
 });
 
 test('кадр без сдвига не останавливает цикл', async ({ page }) => {
@@ -431,7 +776,7 @@ test('цикл встаёт у упора', async ({ page }) => {
 });
 
 test('цикл встаёт, когда список не двигается', async ({ page }) => {
-  await mountStand(page, { viewportHeight: 100, contentHeight: 100 });
+  await mountStand(page, { viewportHeight: 100, contentHeight: 100, speed: STAND_SPEED_PX_PER_SEC });
   const withoutOverflow = await page.evaluate(() => {
     const scope = /** @type {{ __stand: ScrollStand }} */ (/** @type {unknown} */ (globalThis));
     const stand = scope.__stand;
@@ -452,7 +797,8 @@ test('цикл встаёт, когда список не двигается', a
   expect(withoutOverflow.scrollTop).toBe(0);
 
   // Второй стенд с настоящим перебором: цикл, дошедший до упора, следующего
-  // кадра не ставит. Геометрия у стенда одна на страницу, поэтому она своя.
+  // кадра не ставит. Стенд нужен второй, а не перестроенный: высота
+  // наполнителя задаётся при сборке, и на стенде без перебора её не отрастить.
   await mountStand(page, STAND);
   const atStop = await page.evaluate((frames) => {
     const scope = /** @type {{ __stand: ScrollStand }} */ (/** @type {unknown} */ (globalThis));
