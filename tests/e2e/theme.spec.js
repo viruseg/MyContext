@@ -967,11 +967,12 @@ test.describe('прокручиваемый список', () => {
     // селектором: у `.vc-menu` их в файле несколько, и объявление в соседнем
     // прошло бы здесь молча.
     for (const selector of THEME_SELECTORS) {
-      expect(readBlock(css, selector), `бегунок в палитре ${selector}`)
+      const palette = readBlock(css, selector);
+      expect(palette, `бегунок в палитре ${selector}`)
         .toContain(`--vc-scrollbar-thumb: ${SCROLLBAR_THUMB}`);
       // Ссылка обязана разрешаться: `color-mix` с необъявленным `--vc-muted` даёт
       // невычисленное значение, и `scrollbar-color` молча откатился бы на `auto`.
-      expect(readBlock(css, selector), `приглушённый объявлен в палитре ${selector}`)
+      expect(palette, `приглушённый объявлен в палитре ${selector}`)
         .toMatch(/--vc-muted:\s/);
     }
 
@@ -1054,9 +1055,9 @@ test.describe('прокручиваемый список', () => {
         resolveColor(page, measured.thumbToken),
         resolveColor(page, 'transparent'),
       ]);
-      // `String` не украшение: движок, который не отдаёт пару, отдаст `undefined`,
-      // и разбор молча дал бы пустой список вместо падения с внятным сообщением.
-      const pair = [...String(measured.scrollbarColor).matchAll(/(?:rgba?|color)\([^)]*\)/g)]
+      // Проба уже установила, что движок отдаёт пару строкой, поэтому разбор
+      // страхует форму записи, а не отсутствие свойства.
+      const pair = [...measured.scrollbarColor.matchAll(/(?:rgba?|color)\([^)]*\)/g)]
         .map((match) => match[0]);
       expect(pair, `цвет полосы разобран: ${measured.scrollbarColor}`).toHaveLength(2);
       // Бегунок непрозрачен и равен токену палитры: при `auto` вместо пары, при
