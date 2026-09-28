@@ -3,6 +3,7 @@ import { CLOSE_GRACE_MS, OPEN_GRACE_MS } from '../../src/constants.js';
 import { createHoverIntent } from '../../src/hoverIntent.js';
 
 /**
+ * @typedef {import('../../src/hoverIntent.js').Point} Point
  * @typedef {import('../../src/hoverIntent.js').HoverIntentController} HoverIntentController
  */
 
@@ -121,6 +122,23 @@ const OUTSIDE_POINT = { x: 200, y: 350 };
 // На левой границе области: принадлежность границе обязана быть включительной, иначе
 // переход к подменю планировал бы закрытие ровно на собственной кромке.
 const EDGE_POINT = { x: 100, y: 250 };
+// Прямая от пункта-владельца к дальнему углу подменю: исходный дефект был ровно на
+// этом пути. Точка владельца вне области намеренно — накрывать его расширением не
+// нужно, потому что движение по нему до `pointerMove` не доходит.
+const OWNER_POINT = { x: 96, y: 104 };
+const FAR_POINT = { x: 296, y: 396 };
+/** Доля прямой, на которой отрезок пересекает левую границу области, то есть конец зазора. */
+const GAP_END = (AREA.left - OWNER_POINT.x) / (FAR_POINT.x - OWNER_POINT.x);
+
+/**
+ * @param {Point} from начало отрезка.
+ * @param {Point} to конец отрезка.
+ * @param {number} part доля пути от `from` к `to`.
+ * @returns {Point} точка на отрезке.
+ */
+function alongSegment(from, to, part) {
+  return { x: from.x + (to.x - from.x) * part, y: from.y + (to.y - from.y) * part };
+}
 
 test.describe('открытие', () => {
   test('itemEnter планирует открытие через openDelayMs', () => {
@@ -286,21 +304,39 @@ test.describe('безопасная область', () => {
     expect(calls).toEqual([]);
   });
 
+  test('зазор перед границей области планирует закрытие, а сама граница — нет', () => {
+    const { hover } = setup();
+
+    // Шаг в 1 px, а не крупнее: зазор между уровнями равен `SUBMENU_OFFSET`, и сетка
+    // шире него перепрыгнула бы зазор целиком, после чего кейс прошёл бы при любой
+    // границе области правее него.
+    for (let x = OWNER_POINT.x; x < AREA.left; x += 1) {
+      const part = (x - OWNER_POINT.x) / (FAR_POINT.x - OWNER_POINT.x);
+      hover.pointerMove(alongSegment(OWNER_POINT, FAR_POINT, part), AREA);
+
+      // Над самим владельцем точка вне области, и это верно: решение там принимает
+      // оркестратор, а движение по владельцу до `pointerMove` не доходит вовсе.
+      expect(hover.isClosePending(), `x = ${x} ещё вне области`).toBe(true);
+    }
+
+    hover.pointerMove(alongSegment(OWNER_POINT, FAR_POINT, GAP_END), AREA);
+
+    // Граница принадлежит области: расширение в сторону владельца дотянулось ровно до
+    // его обращённого края, и зазор перекрыт целиком. Исключительной границу делать
+    // нельзя — переход к подменю идёт ровно по ней.
+    expect(hover.isClosePending(), 'граница области не планирует закрытие').toBe(false);
+  });
+
   test('прямое движение к дальнему углу подменю не планирует закрытие', () => {
     const { hover } = setup();
-    // Прямая от пункта-владельца к дальнему углу подменю: исходный дефект был ровно
-    // на этом пути. Первая точка вне пункта уже заходит в расширенную область, а
-    // дальше весь отрезок лежит в ней по построению.
-    const from = { x: 96, y: 104 };
-    const to = { x: 296, y: 396 };
+    // Продолжение той же прямой, что и в кейсе выше: от границы области до дальнего
+    // угла подменю. Зазор у границы уже проверен, здесь — весь остальной путь, и
+    // никакая его точка не имеет права сузить защиту.
+    const from = alongSegment(OWNER_POINT, FAR_POINT, GAP_END);
     const steps = 20;
 
     for (let step = 1; step <= steps; step += 1) {
-      const t = step / steps;
-      hover.pointerMove(
-        { x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t },
-        AREA,
-      );
+      hover.pointerMove(alongSegment(from, FAR_POINT, step / steps), AREA);
 
       expect(hover.isClosePending(), `шаг ${step} из ${steps} не планирует закрытие`).toBe(false);
     }

@@ -127,6 +127,8 @@ const VIEWPORT = { width: 1000, height: 700 };
  * в него ни справа, ни слева и прижимается к `padding`.
  */
 const NARROW_VIEWPORT = { width: 600, height: 700 };
+/** Насколько точка у края пункта отстоит от него самого, px. */
+const EDGE_INSET = 2;
 
 /**
  * Точки правого клика. Левая нужна, чтобы подменю помещалось справа, правая —
@@ -230,6 +232,27 @@ async function hoverItem(page, label) {
 }
 
 /**
+ * Точка у правого края пункта — того края, который смотрит в сторону подменю. Ровно
+ * центр для таких проверок не годится: он отстоит от обращённой границы пункта
+ * почти на половину строки, и кейс прошёл бы при расширении безопасной области в
+ * сторону владельца хоть на `SAFE_AREA_BUFFER`. Отступ от самого края — потому что
+ * край и есть граница попадания.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {string} label
+ * @returns {Promise<{ x: number, y: number }>}
+ */
+async function facingEdgeOf(page, label) {
+  const rect = await page.evaluate((name) => {
+    const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+    return scope.__mc.rectOf(name);
+  }, label);
+  expect(rect, `пункт «${label}» есть в разметке`).not.toBeNull();
+  const found = /** @type {MenuRect} */ (rect);
+  return { x: found.right - EDGE_INSET, y: found.top + found.height / 2 };
+}
+
+/**
  * Подписи владельцев, у которых `aria-expanded` стоит в `"true"`. Снимок, а не
  * одиночный пункт: утверждение «после закрытия не развёрнуто» проходит на
  * пустом дереве, если не видно, что до закрытия развёрнуто было хоть что-то.
@@ -323,9 +346,9 @@ test.beforeEach(async ({ page }) => {
      * цепочка обрезалась на два уровня глубже корня. «Скачать» лежит рядом с «PNG»
      * внутри подменю «Экспорта», а не в корне: усечение проверяется переходом на
      * соседа внутри одного уровня, и только там «глубже» имеет смысл отличать от
-     * «в другой ветке». У «Экспорта» четыре пункта: двумя обрезать нечего, и
-     * проверка «курсор ушёл в сторону» на последнем пункте попадала бы в его
-     * геометрию вместо геометрии клина.
+     * «в другой ветке». Последний пункт подменю «Экспорта» обычный, без подменю:
+     * кейсы о прямом движении останавливают на нём курсор, и владелец на этом месте
+     * открыл бы третий уровень поверх проверяемого.
      *
      * @type {Record<string, Array<MenuItem | SeparatorItem>>}
      */
@@ -838,8 +861,9 @@ test.describe('показ подменю', () => {
 
     // Соседний пункт того же уровня: у «Нового» нет подменю, и он лежит в
     // родительском уровне, то есть за расширением безопасной области в сторону
-    // владельца. Расширение на `SAFE_AREA_BUFFER` накрыло бы и его, и подменю
-    // перестало бы закрываться вовсе — поэтому кейс и держит именно соседа.
+    // владельца. В центре пункта это почти полстроки мимо, и кейс прошёл бы при
+    // расширении в ту же сторону хоть на `SAFE_AREA_BUFFER`; край соседа закрепляют
+    // два кейса ниже.
     await hoverItem(page, 'Новый');
     // Срок закрытия ещё не истёк: подменю обязано быть на месте.
     await page.clock.fastForward(CLOSE_GRACE_MS - 50);
@@ -847,6 +871,68 @@ test.describe('показ подменю', () => {
     expect(isOpen(pending, submenuId), 'до истечения срока подменю на месте').toBe(true);
 
     await page.clock.fastForward(CLOSE_GRACE_MS);
+    const after = await readMenu(page);
+    expect(isOpen(after, submenuId), 'подменю закрылось').toBe(false);
+    expect(after.openCount, 'корень остался открытым').toBe(1);
+    expect(expandedLabels(after), 'отметка развёрнутости снята').toEqual([]);
+  });
+
+  test('край соседнего пункта родительского уровня не защищает подменю', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const ownerId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Экспорт');
+    });
+    expect(ownerId, 'адрес подменю «Экспорта» назван').not.toBeNull();
+    const submenuId = /** @type {string} */ (ownerId);
+
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    expect(isOpen(await readMenu(page), submenuId), 'подменю открыто').toBe(true);
+
+    // Край соседа, а не его центр: центр отстоит от обращённой границы пункта почти на
+    // половину строки, и такой кейс прошёл бы при расширении в сторону владельца хоть
+    // на `SAFE_AREA_BUFFER`. Именно край и отличает соседа от владельца, поэтому
+    // правило «расширять в сторону владельца можно ровно на зазор» закрепляется здесь.
+    await moveTo(page, await facingEdgeOf(page, 'Новый'));
+    await page.clock.fastForward(CLOSE_GRACE_MS);
+
+    const after = await readMenu(page);
+    expect(isOpen(after, submenuId), 'подменю закрылось').toBe(false);
+    expect(after.openCount, 'корень остался открытым').toBe(1);
+    expect(expandedLabels(after), 'отметка развёрнутости снята').toEqual([]);
+
+    // Контроль живости: точка стояла на соседе, а не в пустоте меню, — назад по
+    // наведению подменю открывается тем же уровнем. Без этого шага «закрылось» не
+    // отличалось бы от «меню перестало показывать подменю вообще».
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    expect(isOpen(await readMenu(page), submenuId), 'подменю снова открыто').toBe(true);
+  });
+
+  test('край соседнего пункта-владельца, не раскрытого, не защищает подменю', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const ownerId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Экспорт');
+    });
+    expect(ownerId, 'адрес подменю «Экспорта» назван').not.toBeNull();
+    const submenuId = /** @type {string} */ (ownerId);
+
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    expect(isOpen(await readMenu(page), submenuId), 'подменю открыто').toBe(true);
+
+    // Тот же край, но сосед — отключённый владелец: подменю у него есть и не
+    // раскрыто быть не может, то есть по виду он от владельца «Экспорта» не
+    // отличается. Проверять надо именно его: показ подменю на соседе снял бы
+    // запланированное закрытие и скрыл бы промах, а здесь решения принимает
+    // геометрия безопасной области.
+    await moveTo(page, await facingEdgeOf(page, 'Глухой'));
+    await page.clock.fastForward(CLOSE_GRACE_MS);
+
     const after = await readMenu(page);
     expect(isOpen(after, submenuId), 'подменю закрылось').toBe(false);
     expect(after.openCount, 'корень остался открытым').toBe(1);

@@ -454,9 +454,9 @@ export class MyContext {
   };
 
   /**
-   * @type {(event: PointerEvent) => void}
+   * @type {() => void}
    */
-  #onItemLeave = (event) => {
+  #onItemLeave = () => {
     if (this.#destroyed) {
       return;
     }
