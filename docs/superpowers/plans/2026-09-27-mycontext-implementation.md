@@ -1100,7 +1100,7 @@ Expected: FAIL — глобальные слушатели не реализов
 - `pointerdown` на `document` в capture-фазе: если цель не внутри `.vc-menu` и не внутри привязанного контейнера — `#closeMenu({returnFocus: false})`. Только основная кнопка: правый клик приходит отдельным событием `contextmenu`, и нажатие средней кнопки закрывать меню не повод
 - `contextmenu` на `document` в capture-фазе: `preventDefault()` только если цель внутри `.vc-menu`; иначе `#closeMenu({returnFocus: false})` без подавления системного меню
 - `keydown` на `document` в capture-фазе: только `Escape`, и только когда цель вне дерева меню. **Проверяется именно дерево, а не дерево вместе с контейнером**: контейнер не часть меню, и фокус на нём — обычное состояние после клика по кнопке, где у клавиатурного пользователя не должно быть выхода. **Не передавать остальные клавиши в `keyboard.handleKeydown`**: движок уже слушает `keydown` на самом уровне (`MyContext.js:823`, Task 8), второй путь обработает клавиши дважды
-- `scroll` на `window` в capture-фазе с `passive: true`: если `event.target` — не `document` и не `body`, пропустить; иначе `#closeMenu({returnFocus: false})`. Опция обязательна и на снятии: `removeEventListener` с другими опциями не найдёт подписку, и обработчик переживёт `destroy()`
+- `scroll` на `window` в capture-фазе с `passive: true`: если `event.target` — не `document` и не `body`, пропустить; иначе `#closeMenu({returnFocus: false})`. Опция нужна ради скорости отклика на прокрутку, а не ради снятия: `removeEventListener` смотрит только на `capture`, и расхождение по `passive` подписку не оставляет
 - `resize` на `window`: `#closeMenu({returnFocus: false})`
 
 - [ ] **Step 4: Реализовать `#unbindGlobalHandlers` и вызовы в `destroy`**
