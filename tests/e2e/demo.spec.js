@@ -151,9 +151,6 @@ const DEMO_DARK_TEXT = '#eceaf5';
 /** Подпись, которой страница сообщает, что блок открывает меню правым кликом. */
 const HINT = 'Правый клик по блоку открывает его меню.';
 
-/** Подпись, которую получает блок `basic` после выбора пункта с действием. */
-const CHOSEN_HINT = 'Выбрано: Открыть.';
-
 /**
  * Атрибуты, которых у очищенного svg-узла быть не может: каждый из них был бы
  * мостом из недоверенной разметки в стили, поведение или семантику страницы.
@@ -499,6 +496,59 @@ async function clickItem(page, levelId, label) {
 }
 
 /**
+ * Кликает по разделителю уровня.
+ *
+ * Через координаты, как `clickItem`, и по той же причине: у разделителя нет ни
+ * подписи, ни ключа пункта, и найти его можно только по классу.
+ *
+ * @param {Page} page
+ * @param {string} levelId
+ * @returns {Promise<void>}
+ */
+function clickSeparator(page, levelId) {
+  return page
+    .evaluate((id) => {
+      const level = document.getElementById(id);
+      if (level === null) {
+        throw new Error(`в документе нет уровня «${id}»`);
+      }
+      const separator = level.querySelector('.vc-separator');
+      if (separator === null) {
+        throw new Error(`в уровне «${id}» нет разделителя`);
+      }
+      const rect = separator.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    }, levelId)
+    .then((point) => {
+      return page.mouse.click(point.x, point.y);
+    });
+}
+
+/**
+ * Строки журнала кликов блока сценария, по порядку.
+ *
+ * Отсутствие журнала — ошибка, а не пустой список: без журнала и с журнагом,
+ * в который ничего не писалось, чтение выглядит одинаково, и кейс про клик
+ * прошёл бы на странице, где журнала нет вовсе.
+ *
+ * @param {Page} page
+ * @param {string} id идентификатор сценария.
+ * @returns {Promise<string[]>}
+ */
+function logLines(page, id) {
+  return page.evaluate((scenarioId) => {
+    const block = document.querySelector(`[data-scenario="${scenarioId}"]`);
+    const log = block === null ? null : block.querySelector('.demo-log');
+    if (log === null) {
+      throw new Error(`у блока «${scenarioId}» нет журнала кликов`);
+    }
+    return Array.from(log.querySelectorAll('li')).map((line) => {
+      return String(line.textContent);
+    });
+  }, id);
+}
+
+/**
  * Владелец подменю после раскрытия: адрес подменю, отметка развёрнутости и
  * глубина. Снимок целиком, потому что «подменю открылось» читается по связке из
  * трёх признаков, а по одному из них утверждение проходило бы на нераскрытом
@@ -628,35 +678,135 @@ test('демо: правый клик по рабочей области отк�
   ).toBeLessThanOrEqual(VIEWPORT.height - SAFETY_PADDING);
 });
 
-test('демо: клик по пункту с действием пишет выбор в подсказку и закрывает меню', async ({ page }) => {
+test('демо: клик по пункту пишет его подпись в лог своего блока и закрывает меню', async ({ page }) => {
   const rootId = await openScenario(page, 'basic');
 
-  const before = await page.evaluate(() => {
-    const block = document.querySelector('[data-scenario="basic"]');
-    const hint = block === null ? null : block.querySelector('.demo-scenario__hint');
-    return hint === null ? '' : String(hint.textContent);
-  });
-  expect(before, 'до клика подсказка блока штатная').toBe(HINT);
+  expect(await logLines(page, 'basic'), 'до клика журнал блока пуст').toEqual([]);
+  expect(
+    await page.evaluate(() => {
+      const block = document.querySelector('[data-scenario="basic"]');
+      const hint = block === null ? null : block.querySelector('.demo-scenario__hint');
+      return hint === null ? '' : String(hint.textContent);
+    }),
+    'подсказка блока штатная',
+  ).toBe(HINT);
 
   await clickItem(page, rootId, 'Открыть');
 
-  // Обе половины читаются одним снимком: действие пишет подсказку, а закрытие
-  // происходит в `finally` после него, то есть это один и тот же факт. Без
-  // второй половины кейс прошёл бы на действии, которое записало подсказку и
-  // оставило меню висеть, — а закрытие здесь половина контракта, а не деталь.
+  // Обе половины читаются одним снимком: действие пишет строку журнала, а закрытие
+  // происходит в `finally` после него, то есть это один и тот же факт. Без второй
+  // половины кейс прошёл бы на действии, которое записало строку и оставило меню
+  // висеть, — а закрытие здесь половина контракта, а не деталь.
   const after = await page.evaluate((levelId) => {
     const block = document.querySelector('[data-scenario="basic"]');
+    const log = block === null ? null : block.querySelector('.demo-log');
     const hint = block === null ? null : block.querySelector('.demo-scenario__hint');
     const level = document.getElementById(levelId);
     return {
+      lines: log === null ? null : Array.from(log.querySelectorAll('li')).map((line) => {
+        return String(line.textContent);
+      }),
       hint: hint === null ? '' : String(hint.textContent),
       open: level !== null && level.matches(':popover-open'),
     };
   }, rootId);
-  expect(after.hint, 'подсказка блока назвала выбранный пункт').toBe(CHOSEN_HINT);
-  expect(after.hint, 'подсказка действительно изменилась').not.toBe(HINT);
+  expect(after.lines, 'в журнале ровно одна строка, и это подпись пункта').toEqual(['Открыть']);
+  // Подсказка больше не переписывается: журнал накапливает клики, а подсказка
+  // объясняет, как открыть меню, и должна такой остаться.
+  expect(after.hint, 'подсказка блока не переписана выбором').toBe(HINT);
   expect(after.open, 'меню закрылось').toBe(false);
   expect((await readMenu(page)).openCount, 'открытых уровней не осталось').toBe(0);
+
+  // Второй клик в том же блоке дописывает строку, а не заменяет журнал: одна
+  // перезаписываемая подпись — ровно то, чем журнал был заменён.
+  const again = await openScenario(page, 'basic');
+  await clickItem(page, again, 'Свойства');
+  expect(await logLines(page, 'basic'), 'журнал накапливает клики по порядку').toEqual([
+    'Открыть',
+    'Свойства',
+  ]);
+
+  // Второй блок: клик попадает в свой журнал, а журнал первого не растёт. Общий
+  // экземпляр на шесть блоков или журнал на страницу проявились бы именно здесь.
+  const iconsId = await openScenario(page, 'icons');
+  await clickItem(page, iconsId, 'Эмодзи');
+
+  expect(await logLines(page, 'icons'), 'клик записан в журнал своего блока').toEqual(['Эмодзи']);
+  expect(await logLines(page, 'basic'), 'журнал первого блока не изменился').toEqual([
+    'Открыть',
+    'Свойства',
+  ]);
+});
+
+test('демо: клик по пункту подменю пишет его подпись в лог своего блока', async ({ page }) => {
+  const rootId = await openScenario(page, 'nested');
+
+  // Подменю раскрывается наведением — тем же путём, каким до него доходит читатель
+  // страницы, и с тем же осмысленным ожиданием, что и в кейсе о раскрытии цепочки.
+  await hoverItem(page, rootId, 'Ветка');
+  await waitForSubmenu(page, rootId, 'Ветка');
+  const owner = await expandedOwner(page, rootId, 'Ветка');
+  const childId = /** @type {string} */ (owner.owns);
+
+  // Клик по владельцу подменю открывает подменю и своего действия не зовёт, поэтому
+  // строки в журнале от него нет. Утверждение держит на этом и проверку клика по
+  // листу подменю: без него «одна строка» прошла бы и там, где подменю не
+  // пройдено, а запись есть только на верхнем уровне.
+  expect(await logLines(page, 'nested'), 'открытие подменю лога не дало').toEqual([]);
+
+  await clickItem(page, childId, 'Простой пункт');
+
+  expect(await logLines(page, 'nested'), 'клик по пункту подменю записан').toEqual(['Простой пункт']);
+  expect((await readMenu(page)).openCount, 'меню закрылось').toBe(0);
+});
+
+test('демо: клик по разделителю и отключённому пункту лога не даёт', async ({ page }) => {
+  const rootId = await openScenario(page, 'disabled');
+
+  await clickSeparator(page, rootId);
+  expect(await logLines(page, 'disabled'), 'клик по разделителю лога не дал').toEqual([]);
+  // Разделитель не действие, и закрывать им меню нечем: «лог пуст» на закрытом
+  // меню прошло бы и на странице, где журнал не пишется вовсе.
+  expect((await readMenu(page)).openCount, 'меню после клика по разделителю осталось открытым').toBe(1);
+
+  await clickItem(page, rootId, 'Отключённый пункт');
+  expect(await logLines(page, 'disabled'), 'клик по отключённому пункту лога не дал').toEqual([]);
+  expect(
+    (await readMenu(page)).openCount,
+    'меню после клика по отключённому пункту осталось открытым',
+  ).toBe(1);
+
+  // Контрольная строка в том же открытом меню: после двух кликов, не давших
+  // ничего, клик по доступному пункту пишет в тот же журнал ровно одну строку.
+  await clickItem(page, rootId, 'Доступно');
+  expect(await logLines(page, 'disabled'), 'доступный пункт записался').toEqual(['Доступно']);
+});
+
+test('демо: у каждого блока свой лог', async ({ page }) => {
+  const logs = await page.evaluate(() => {
+    return Array.from(document.querySelectorAll('[data-scenario]')).map((block) => {
+      const log = block.querySelector('.demo-log');
+      return {
+        id: block.getAttribute('data-scenario') ?? '',
+        tagName: log === null ? '' : log.tagName.toLowerCase(),
+        live: log === null ? '' : log.getAttribute('aria-live') ?? '',
+        lines: log === null ? -1 : log.querySelectorAll('li').length,
+      };
+    });
+  });
+
+  expect(logs.map((entry) => {
+    return entry.id;
+  })).toEqual(SCENARIO_IDS);
+  for (const entry of logs) {
+    // `ol` даёт журналу семантику упорядоченного списка, а `aria-live` —
+    // объявление скринридером: переписываемая подсказка не объявлялась ничем
+    // вовсе. Сами строки в журнале проверяются кейсом про клик; здесь их быть не
+    // должно, потому список и пуст.
+    expect(entry.tagName, `журнал блока «${entry.id}» — это ol`).toBe('ol');
+    expect(entry.live, `журнал блока «${entry.id}» объявлен для скринридера`).toBe('polite');
+    expect(entry.lines, `журнал блока «${entry.id}» пуст при загрузке страницы`).toBe(0);
+  }
 });
 
 test('демо: сценарий с 4 уровнями вложенности раскрывается целиком', async ({ page }) => {
