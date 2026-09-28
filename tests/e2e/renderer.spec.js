@@ -5,6 +5,7 @@ import {
   DEFAULT_ITEM_HEIGHT,
   SAFETY_PADDING,
 } from '../../src/constants.js';
+import { resolveColor } from '../helpers/resolveColor.js';
 
 // Модуль подгружается динамическим импортом прямо в странице, и спецификатор
 // `../../src/renderer.js` обслуживает обе среды: в браузере от
@@ -608,22 +609,6 @@ test.describe('сетка пункта', () => {
           .map((part) => Number(part.trim()));
         return Math.atan2(numbers[1] ?? 0, numbers[0] ?? 1);
       };
-      /**
-       * Токен приводится к вычисленному цвету подстановкой в `color` пустого
-       * элемента: сравнивать пришлось бы с вычисленным цветом глифа, а с записью
-       * токена сравнение было бы тождеством.
-       *
-       * @param {string} name имя токена.
-       * @returns {string} разрешённый цвет.
-       */
-      const resolveToken = (name) => {
-        const probe = document.createElement('span');
-        probe.style.color = getComputedStyle(item).getPropertyValue(name);
-        document.body.appendChild(probe);
-        const resolved = getComputedStyle(probe).color;
-        probe.remove();
-        return resolved;
-      };
       return {
         // Псевдоэлемент обязан быть порождён, иначе все остальные значения были
         // бы начальными, а не вычисленными.
@@ -640,16 +625,16 @@ test.describe('сетка пункта', () => {
         // три варианта не различила бы.
         angle: angleOf(glyph.transform),
         // Глиф обязан быть цвета шеврона: `currentColor` переносит на него любой
-        // цвет, который тема задаст `.vc-chevron`. Цвет рамки берётся уже на
-        // активной строке — в базовом состоянии обе стороны равны `--vc-muted`, и
-        // проверка была бы тождеством.
+        // цвет, который тема задаст `.vc-chevron`.
         color: glyph.borderRightColor,
-        // Токен приглушённого цвета, чтобы равенство «цвет глифа равен цвету
-        // шеврона» прошло бы по-настоящему, а не потому что оба стали
-        // приглушёнными.
-        muted: resolveToken('--vc-muted'),
+        // Токен приглушённого цвета, разрешённый общим для проекта `resolveColor`:
+        // сравнивать с записью токена было бы тождеством. Равенство
+        // `color === muted` тоже не тождество — без `color: var(--vc-muted)` в
+        // `.vc-chevron` стрелка унаследовала бы `--vc-text` пункта.
+        mutedToken: getComputedStyle(item).getPropertyValue('--vc-muted'),
       };
     });
+    const muted = await resolveColor(page, result.mutedToken);
 
     expect(result.content, 'порождён ли ::before').not.toBe('none');
     // Рамка непустая, видимая и покрывает ровно две соседние стороны: диагональ
@@ -672,10 +657,9 @@ test.describe('сетка пункта', () => {
     // поворотом срезанного угла квадрата, а не его формой.
     expect(result.angle).toBeCloseTo(-Math.PI / 4, 5);
     // Приглушённый цвет и на активной строке: заливка тонированная, шеврон внутри
-    // неё остаётся тем же, что и в любом другом пункте, и контраст строки задаёт
-    // её текст, а не стрелка. Контракт 4.5:1 на активной строке живёт в
-    // `theme.spec.js`.
-    expect(result.color).toBe(result.muted);
+    // неё остаётся тем же, что и в любом другом пункте, и контракт строки задаёт
+    // её текст, а не стрелка.
+    expect(result.color).toBe(muted);
   });
 
   test('шеврон реально разворачивается: transform в состояниях left и right различаются', async ({ page }) => {

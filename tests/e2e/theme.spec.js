@@ -7,6 +7,7 @@ import {
   DEFAULT_RADIUS,
   SAFETY_PADDING,
 } from '../../src/constants.js';
+import { resolveColor } from '../helpers/resolveColor.js';
 
 // Модули подгружаются динамическим импортом прямо в странице, и спецификатор
 // `../../src/theme.js` обслуживает обе среды: в браузере от
@@ -28,6 +29,16 @@ const THEME_SELECTORS = [
   '.vc-menu[data-vc-theme="auto"]',
   '.vc-menu[data-vc-theme="dark"]',
 ];
+
+/**
+ * Тёмные палитры файла. Отдельно от `THEME_SELECTORS` — потому что у них своя
+ * плотность наведения, и это отдельное дизайнерское решение, а не перенос
+ * светлого значения.
+ */
+const DARK_SELECTORS = THEME_SELECTORS.slice(1);
+
+/** Плотность наведения в тёмных палитрах, ровно как она записана в файле. */
+const DARK_HOVER_BG = 'color-mix(in srgb, var(--vc-text) 10%, transparent)';
 
 /**
  * Все сочетания темы и системной схемы, которые имеет смысл мерить. Явная тема
@@ -108,7 +119,7 @@ const MENU_CONTENT_HTML = `<div class="vc-list" role="group">
           <span class="vc-label" id="${PLAIN_ITEM}">Без иконки</span>
           <span class="vc-chevron" id="chevron-plain"></span>
         </div>
-        <div class="vc-item" role="menuitem" tabindex="-1" aria-disabled="true">
+        <div class="vc-item" role="menuitem" tabindex="-1" aria-disabled="true" id="item-disabled">
           <span class="vc-icon-slot"></span>
           <span class="vc-label">Отключено</span>
           <span class="vc-chevron"></span>
@@ -390,33 +401,19 @@ function contrast(foreground, background) {
  * @returns {Promise<ThemeSnapshot>} снимок стилей открытого меню.
  */
 async function readSnapshot(page) {
-  return page.evaluate(() => {
+  const measured = await page.evaluate(() => {
     const menu = /** @type {HTMLElement} */ (document.getElementById('m'));
     const list = /** @type {HTMLElement} */ (document.querySelector('.vc-list'));
     const item = /** @type {HTMLElement} */ (document.querySelector('.vc-item'));
     const style = getComputedStyle(menu);
 
-    /**
-     * Токен приводится к `rgb()` тем же путём, каким браузер приводит цвет:
-     * подстановкой в `color` пустого элемента. Само значение `#1f2023` сравнивать
-     * не с чем.
-     *
-     * @param {string} value значение токена.
-     * @returns {string} разрешённый цвет.
-     */
-    function resolve(value) {
-      const probe = document.createElement('span');
-      probe.style.color = value;
-      document.body.appendChild(probe);
-      const resolved = getComputedStyle(probe).color;
-      probe.remove();
-      return resolved;
-    }
-
     return {
       backgroundColor: style.backgroundColor,
-      solidBackground: resolve(style.getPropertyValue('--vc-bg-solid')),
-      text: resolve(style.getPropertyValue('--vc-text')),
+      // Токены едут отдельными значениями: приводит их к вычисленным цветам
+      // `resolveColor`, и второй заход в страницу для них — плата за то, что
+      // трюк один на проект, а не за то, что он дорог.
+      solidToken: style.getPropertyValue('--vc-bg-solid'),
+      textToken: style.getPropertyValue('--vc-text'),
       paddingToken: style.getPropertyValue('--vc-padding'),
       itemHeightToken: style.getPropertyValue('--vc-item-height'),
       iconSizeToken: style.getPropertyValue('--vc-icon-size'),
@@ -435,6 +432,31 @@ async function readSnapshot(page) {
       flexShrink: getComputedStyle(item).flexShrink,
     };
   });
+  const [solidBackground, text] = await Promise.all([
+    resolveColor(page, measured.solidToken),
+    resolveColor(page, measured.textToken),
+  ]);
+  return {
+    backgroundColor: measured.backgroundColor,
+    solidBackground,
+    text,
+    paddingToken: measured.paddingToken,
+    itemHeightToken: measured.itemHeightToken,
+    iconSizeToken: measured.iconSizeToken,
+    chevronSizeToken: measured.chevronSizeToken,
+    radiusToken: measured.radiusToken,
+    durationToken: measured.durationToken,
+    maxHeight: measured.maxHeight,
+    maxWidth: measured.maxWidth,
+    listMaxHeight: measured.listMaxHeight,
+    opacity: measured.opacity,
+    transform: measured.transform,
+    transitionBehavior: measured.transitionBehavior,
+    transitionProperty: measured.transitionProperty,
+    transitionDuration: measured.transitionDuration,
+    gridTemplateColumns: measured.gridTemplateColumns,
+    flexShrink: measured.flexShrink,
+  };
 }
 
 /**
@@ -557,7 +579,6 @@ async function settleMenu(page) {
  * @typedef {object} ActiveRow
  * @property {string} label цвет текста активной строки.
  * @property {string} rowBg вычисленный фон активной строки.
- * @property {string} menuBg вычисленный фон меню.
  * @property {string} activeBg разрешённый `--vc-active-bg`.
  * @property {string} hoverBg разрешённый `--vc-hover-bg`.
  * @property {string} muted разрешённый `--vc-muted`.
@@ -601,30 +622,15 @@ async function readActiveRow(page, theme, scheme, disabled = false) {
       active.setAttribute('aria-disabled', 'true');
     }
     // Отключённый пункт фикстуры — отдельная строка, а не та же самая: её заливка
-    // обязана отсутствовать там, где у отмеченной строки заливка есть.
-    const disabledRow = document.querySelector(
-      '.vc-item[aria-disabled="true"]:not([data-active])',
-    );
+    // обязана отсутствовать там, где у отмеченной строки заливка есть. Ищется по
+    // `id`, а не составным селектором: сообщение об отсутствии узла должно
+    // указывать на узел, а составной селектор повторял бы `:not([data-active])`,
+    // который задача сняла с таблицы стилей.
+    const disabledRow = document.getElementById('item-disabled');
     if (!(disabledRow instanceof HTMLElement)) {
-      throw new Error('в фикстуре нет отключённого пункта');
+      throw new Error('в фикстуре нет узла item-disabled');
     }
     const menuStyle = getComputedStyle(menu);
-
-    /**
-     * Токен приводится к `rgb()` подстановкой в `color` пустого элемента: само
-     * значение `color-mix(in srgb, …)` сравнивать не с чем.
-     *
-     * @param {string} name имя токена.
-     * @returns {string} разрешённый цвет.
-     */
-    const resolve = (name) => {
-      const probe = document.createElement('span');
-      probe.style.color = menuStyle.getPropertyValue(name);
-      document.body.appendChild(probe);
-      const resolved = getComputedStyle(probe).color;
-      probe.remove();
-      return resolved;
-    };
 
     return {
       // Цвета строки: её собственный фон, её текст и фон подложки, на которую
@@ -636,28 +642,32 @@ async function readActiveRow(page, theme, scheme, disabled = false) {
       // фон меню сам по себе полупрозрачный. В фикстуре он непрозрачный, иначе
       // модель считала бы композит поверх прозрачного чёрного.
       page: getComputedStyle(document.body).backgroundColor,
-      activeBg: resolve('--vc-active-bg'),
-      hoverBg: resolve('--vc-hover-bg'),
-      muted: resolve('--vc-muted'),
+      activeToken: menuStyle.getPropertyValue('--vc-active-bg'),
+      hoverToken: menuStyle.getPropertyValue('--vc-hover-bg'),
+      mutedToken: menuStyle.getPropertyValue('--vc-muted'),
       disabledLabel: getComputedStyle(disabledRow).color,
       disabledBg: getComputedStyle(disabledRow).backgroundColor,
     };
   }, disabled);
+  const [activeBg, hoverBg, muted] = await Promise.all([
+    resolveColor(page, measured.activeToken),
+    resolveColor(page, measured.hoverToken),
+    resolveColor(page, measured.mutedToken),
+  ]);
   // Стекло меню, дочитанное страницей под ним, — подложка для полного столба.
   const glass = composite(parseColor(measured.menu), parseColor(measured.page));
   return {
     label: measured.label,
     rowBg: measured.row,
-    menuBg: measured.menu,
-    activeBg: measured.activeBg,
-    hoverBg: measured.hoverBg,
-    muted: measured.muted,
+    activeBg,
+    hoverBg,
+    muted,
     disabledLabel: measured.disabledLabel,
     disabledBg: measured.disabledBg,
     ratio: contrast(parseColor(measured.label), composite(parseColor(measured.row), glass)),
     tonedRatio: contrast(
       parseColor(measured.label),
-      composite(parseColor(measured.hoverBg), parseColor(measured.menu)),
+      composite(parseColor(hoverBg), parseColor(measured.menu)),
     ),
     // Прозрачная заливка отключённого пункта в композит не вносит ничего, и
     // `composite` отдаёт под ним стекло меню — ровно то, на чём строка стоит.
@@ -1397,6 +1407,15 @@ test.describe('пункты и состояния', () => {
     // Список фокуса не получает, и кольцо на нём вернулось бы тем же UA-путём,
     // если бы кто-то завёл его правило.
     expect(readRule(css, '.vc-list'), 'кольцо не заведено на список').not.toContain('outline');
+    // Счёт по всему файлу, а не по перечисленным селекторам: кольцо, вернувшееся
+    // под `:focus-within` или под любым другим именем, предыдущими тремя
+    // утверждениями прошло бы — регексп голого `:focus` на `:focus-within` не
+    // срабатывает. Отрисованное `box-shadow` или рамкой кольцо эта охрана не видит:
+    // ловить его — отдельная задача, и здесь сказано, чего охрана не делает.
+    expect(
+      [...css.matchAll(/outline:[^;]*/g)].map((match) => match[0]).sort(),
+      'все объявления outline в файле: ровно два, и оба — none',
+    ).toEqual(['outline: none', 'outline: none']);
 
     // Вживую: живое меню, клавиша навигации, и отметка обязана быть ровно одна —
     // на сфокусированном пункте, с заливкой мышиной и без кольца.
@@ -1410,18 +1429,6 @@ test.describe('пункты и состояния', () => {
       }
       const menu = /** @type {HTMLElement} */ (active.closest('.vc-menu'));
       const style = getComputedStyle(active);
-      /**
-       * @param {string} value значение токена.
-       * @returns {string} разрешённый цвет.
-       */
-      const resolve = (value) => {
-        const probe = document.createElement('span');
-        probe.style.color = value;
-        document.body.appendChild(probe);
-        const resolved = getComputedStyle(probe).color;
-        probe.remove();
-        return resolved;
-      };
       return {
         isItem: active.matches('.vc-item'),
         isMarked: active.hasAttribute('data-active'),
@@ -1433,10 +1440,14 @@ test.describe('пункты и состояния', () => {
         // ничем не рисуется, то есть судить по ней было бы неверно.
         ringStyle: style.outlineStyle,
         // Заливка, которую получит пункт под курсором: с ней и сравнивается
-        // выделение с клавиатуры.
-        hoverFill: resolve(getComputedStyle(menu).getPropertyValue('--vc-hover-bg')),
+        // выделение с клавиатуры. Приводится к вычисленному цвету отдельно,
+        // общим для проекта `resolveColor`.
+        hoverToken: getComputedStyle(menu).getPropertyValue('--vc-hover-bg'),
       };
     });
+    // Заливка, которую получит пункт под курсором: с ней и сравнивается выделение
+    // с клавиатуры.
+    const hoverFill = parseColor(await resolveColor(page, focused.hoverToken));
 
     // Клавиша навигации дала отметку тому же пункту, которому отдала фокус, и
     // ровно одну: второй писатель подсветки означал бы, что «последнее
@@ -1451,7 +1462,7 @@ test.describe('пункты и состояния', () => {
     expect(
       parseColor(focused.fill),
       'выделение с клавиатуры совпадает с мышиным',
-    ).toEqual(parseColor(focused.hoverFill));
+    ).toEqual(hoverFill);
 
     // Кольца на пункте нет. Контрольной пробы здесь нет намеренно: кольцо на
     // элементе уровня ловит соседний кейс, где проба обязана быть.
@@ -1518,7 +1529,8 @@ test.describe('пункты и состояния', () => {
      * Фон и отметки обоих пунктов: подсветка обязана быть делом одного пункта,
      * и отключённый не должен попадать в её число.
      *
-     * @returns {Promise<{ available: string, disabled: string, marks: number, marked: boolean }>}
+     * @returns {Promise<{ available: string, disabled: string, marks: number,
+     *   marked: boolean, hoverToken: string }>}
      */
     const readRows = () => {
       return page.evaluate(() => {
@@ -1541,6 +1553,7 @@ test.describe('пункты и состояния', () => {
           disabled: getComputedStyle(disabled).backgroundColor,
           marks: level.querySelectorAll('.vc-item[data-active]').length,
           marked: disabled.hasAttribute('data-active'),
+          hoverToken: getComputedStyle(level).getPropertyValue('--vc-hover-bg'),
         };
       });
     };
@@ -1559,6 +1572,9 @@ test.describe('пункты и состояния', () => {
     const idle = await readRows();
     // Подсветки нет ни на ком пункте, пока курсор не на дереве меню.
     expect(idle.marks, 'до наведения отметок нет').toBe(0);
+    // Заливка мышиная, а не произвольная тонировка: снимается один раз, тема
+    // на протяжении кейса не меняется.
+    const hoverFill = parseColor(await resolveColor(page, idle.hoverToken));
 
     await page.mouse.move(centres[1].x, centres[1].y);
     const onDisabled = await readRows();
@@ -1575,10 +1591,14 @@ test.describe('пункты и состояния', () => {
     // Обратный порядок: подсветка уехала на доступный пункт, и отключённый вернулся
     // в то же прозрачное состояние, в котором был до наведения.
     expect(onAvailable.available, 'доступный пункт залит').not.toBe('rgba(0, 0, 0, 0)');
+    expect(parseColor(onAvailable.available), 'заливка равна мышиной')
+      .toEqual(hoverFill);
     expect(onAvailable.marks, 'отметка ровно одна').toBe(1);
     expect(onAvailable.disabled, 'отключённый пункт снова прозрачен')
       .toBe(onDisabled.disabled);
-    expect(onAvailable.available, 'заливка совпадает с исходным состоянием соседа')
+    // Заливка не растекается на соседа: у отключённого пункта её нет вовсе, и
+    // равенство с ним означало бы, что залиты оба.
+    expect(onAvailable.available, 'заливка не ушла на отключённый пункт')
       .not.toBe(onAvailable.disabled);
   });
 
@@ -1630,6 +1650,13 @@ test.describe('пункты и состояния', () => {
       // `#6b7280` на 6 % заливке даёт в светлой палитре около 4.3:1, и ни AA, ни
       // «просто посмотрим» здесь не выполнимы — состояния нет. Пол 4:1 держит
       // ровно одно: палитра не уехала до состояния, в котором строка нечитаема.
+      // Основание пола не в тексте, а в геометрии: тот же порог держал шеврон
+      // внутри активного пункта, потому что шеврон наследовал цвет строки, а
+      // контраст строки проверялся здесь же. Теперь шеврон рисуется рамками, то
+      // есть это не текст, и к нему применим порог 3:1 для графики, который
+      // 4.31:1 проходит. Читать это утверждение как «4.5:1 на приглушённом
+      // неважно» нельзя: приглушённый цвет теперь на заливке каждого активного
+      // пункта, и пол держит палитру, а не состояние.
       expect(result.tonedRatio, `читаемость disabled на активной строке, ${where}`)
         .toBeGreaterThanOrEqual(4);
     }
@@ -1644,6 +1671,20 @@ test.describe('пункты и состояния', () => {
     for (const selector of THEME_SELECTORS) {
       expect(readRule(css, selector), `токен в палитре ${selector}`)
         .toContain('--vc-active-bg: var(--vc-hover-bg)');
+      // Мышиная заливка, на которую ручка ссылается, обязана быть объявлена в
+      // каждой палитре. Пропавшее объявление в тёмных блоках поймали бы только эти
+      // утверждения: обе стороны равенства — и `activeBg`, и `hoverBg` —
+      // резолвились бы в одно и то же унаследованное `var(--vc-text) 6%`, то
+      // есть равенство, контраст и живая проверка заливки остались бы зелёными.
+      expect(readRule(css, selector), `наведение объявлено в палитре ${selector}`)
+        .toMatch(/--vc-hover-bg:\s/);
+    }
+    // Плотность наведения в тёмных палитрах вдвое выше светлой, и это решение,
+    // а не перенос: на тёмной подложке та же доля невидимого текста не дала бы
+    // строке признака, а наведение — единственный носитель признака выделения.
+    for (const selector of DARK_SELECTORS) {
+      expect(readRule(css, selector), `плотность наведения, ${selector}`)
+        .toContain(`--vc-hover-bg: ${DARK_HOVER_BG}`);
     }
 
     // И вживую: ручка по умолчанию равна мышиной заливке, то есть выделение с
