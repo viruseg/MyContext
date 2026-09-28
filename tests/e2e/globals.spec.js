@@ -81,6 +81,11 @@ const PAGE_HTML = `<!doctype html>
          style="position: fixed; left: 20px; top: 60px; width: 320px; height: 200px; background: rgb(238, 238, 238)"></div>
     <div id="far" tabindex="0"
          style="position: fixed; left: 620px; top: 480px; width: 200px; height: 120px; background: rgb(204, 204, 204)"></div>
+    <!-- Прокручиваемая обёртка — типовой каркас приложения. Скролл приходит с
+         целью в этом div, и это не прокрутка меню, поэтому закрыть его обязан. -->
+    <div id="shell" style="position: fixed; left: 20px; top: 320px; width: 320px; height: 200px; overflow: auto; background: rgb(244, 244, 244)">
+      <div style="height: 1200px"></div>
+    </div>
     <div id="backdrop" tabindex="0"
          style="height: 2400px; background: linear-gradient(rgb(250, 250, 250), rgb(200, 200, 255))"></div>
   </body>
@@ -93,6 +98,9 @@ const SURFACE_POINT = { x: 150, y: 150 };
 
 /** Пустота страницы: далеко от меню, контейнера и обоих краёв вьюпорта. */
 const VOID_POINT = { x: 940, y: 640 };
+
+/** Точка внутри прокручиваемой обёртки: меню открыто там, где им и открывают. */
+const SHELL_POINT = { x: 180, y: 400 };
 
 /** Второй контейнер — тоже в стороне от первого и от меню. */
 const FAR_POINT = { x: 700, y: 520 };
@@ -733,6 +741,42 @@ test.describe('глобальные слушатели', () => {
 
     const after = await readMenu(page);
     expect(after.openCount, 'внутренний скролл не закрыл меню').toBe(1);
+  });
+
+  test('скролл прокручиваемой обёртки страницы закрывает меню', async ({ page }) => {
+    await makeMenu(page, 'first', 'chain', 'surface');
+    await openAt(page, 'first', SHELL_POINT);
+    expect((await readMenu(page)).openCount, 'меню открыто').toBe(1);
+
+    // Прокручиваемость обёртки проверяется здесь же и тем же ходом, что сама
+    // прокрутка: `scrollTop` на непрокручиваемом узле — тихий no-op, и кейс прошёл
+    // бы, ни разу не доставив события. Это предусловие, а не украшение.
+    const scrolled = await page.evaluate(() => {
+      const shell = document.getElementById('shell');
+      if (!(shell instanceof HTMLElement)) {
+        return null;
+      }
+      const scrollable = shell.scrollHeight > shell.clientHeight;
+      shell.scrollTop = 120;
+      return { scrollable, scrollTop: shell.scrollTop };
+    });
+    expect(scrolled, 'обёртка на странице есть').not.toBeNull();
+    const moved = /** @type {{ scrollable: boolean, scrollTop: number }} */ (scrolled);
+    expect(moved.scrollable, 'обёртка прокручивается').toBe(true);
+    expect(moved.scrollTop, 'обёртка прокрутилась').toBeGreaterThan(0);
+
+    // Ожидание состояния, а не снимка сразу после `evaluate`: `scroll`
+    // доставляется браузером уже после возврата, и чтение на этом шаге читало бы
+    // состояние до обработчика. Утверждается «меню закрылось», а не «меню уже
+    // закрылось к моменту возврата» — так же, как в кейсе про скролл страницы.
+    await page.waitForFunction(() => {
+      const levels = Array.from(document.querySelectorAll('.vc-menu'));
+      return levels.length > 0 && levels.every((level) => !level.matches(':popover-open'));
+    });
+
+    const after = await readMenu(page);
+    expect(after.openCount, 'скролл обёртки закрыл меню').toBe(0);
+    expect(after.errors, 'страница без ошибок').toEqual([]);
   });
 
   test('resize окна закрывает меню', async ({ page }) => {

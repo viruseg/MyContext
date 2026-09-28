@@ -610,8 +610,12 @@ export class MyContext {
    *
    * `scroll` ловится на `window` в capture-фазе, потому что `scroll` не всплывает
    * и на элементе сбрасывает событие до цели, — а нужно узнать, что оно пришло из
-   *нутри меню: прокрутка длинного списка не должна его сносить. Признак внутренней
-   * прокрутки — цель не `document` и не `body`.
+   *нутри меню: прокрутка длинного списка не должна его сносить. Внутренним считается
+   * ровно тот скролл, чья цель лежит в дереве меню, и это говорит `#isInsideMenu`.
+   * Проверка «цель не `document` и не `body`» была бы верна только на страницах,
+   * где между документом и меню не прокручивается ничего, — а типовой каркас
+   * приложения с обёрткой `overflow: auto` прокручивает именно её, и меню осталось
+   * бы висеть оторванным от якоря.
    *
    * @type {(event: Event) => void}
    */
@@ -619,8 +623,7 @@ export class MyContext {
     if (this.#destroyed) {
       return;
     }
-    const target = event.target;
-    if (target !== document && target !== document.body) {
+    if (this.#isInsideMenu(event.target)) {
       return;
     }
     this.#closeMenu({ returnFocus: false });
