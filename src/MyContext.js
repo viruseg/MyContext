@@ -738,13 +738,24 @@ export class MyContext {
    * реестр в движке пуст (спека 5.4), и разбирать `Escape` больше некому. Пропуск
    * «внутри меню» здесь оставил бы висящий показ, и меню воскресло бы.
    *
+   * Этот путь возвращает фокус, а у скролла, `resize` и клика — нет, и разница по
+   * существу: в окне закрытия фокус наш, он стоит на гаснущем уровне, и оставить его
+   * там нельзя — через анимацию `hidePopover()` роняет его на `<body>`, то есть
+   * клавиатурный пользователь, закрывший меню `Escape`, оказался бы в начале
+   * документа. В живом меню тот же `Escape` возвращает фокус через `closeAll()`, так
+   * что одна клавиша не должна давать два разных ответа по фокусу.
+   *
    * @type {(event: KeyboardEvent) => void}
    */
   #onGlobalKeydown = (event) => {
     if (this.#destroyed || event.key !== 'Escape' || event.defaultPrevented) {
       return;
     }
-    if (this.#isInsideMenu(event.target) && this.#reopenHandle === null) {
+    if (this.#reopenHandle !== null) {
+      this.#closeMenu({ returnFocus: true });
+      return;
+    }
+    if (this.#isInsideMenu(event.target)) {
       return;
     }
     this.#closeMenu({ returnFocus: false });
