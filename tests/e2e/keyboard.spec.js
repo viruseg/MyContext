@@ -41,8 +41,15 @@ import { expect, test } from '@playwright/test';
  * показа. Отметок в показанном подменю при этом не появляется, и состояние «уровень
  * движку известен, активного пункта нет» получается самим собой.
  *
+ * `hover` и `leave-tree` — мышиная сторона контракта, и оба не отправляют событий:
+ * движок мышь не слушает, решение о выделении принимает вызывающий код, и проба
+ * повторяет именно это решение. `hover` — курсор встал на доступный пункт, то есть
+ * `activateFromPointer`; `leave-tree` — курсор ушёл с дерева меню, то есть полный
+ * сброс отметок. Ход событий страницы эти шаги не моделируют намеренно: он
+ * проверяется там, где события настоящие, — в `submenu.spec.js`.
+ *
  * @typedef {object} Step
- * @property {'press' | 'press-outside' | 'press-list' | 'show-submenu' | 'read' | 'reset'} command
+ * @property {'press' | 'press-outside' | 'press-list' | 'show-submenu' | 'hover' | 'leave-tree' | 'read' | 'reset'} command
  * @property {string} [key]
  * @property {ItemAt} [at]
  */
@@ -767,6 +774,38 @@ test.beforeEach(async ({ page }) => {
           levels: read(pathsOfRun).levels,
         };
       }
+      if (step.command === 'hover') {
+        // Курсор встал на пункт: ровно то решение, которое оркестратор принимает в
+        // `#onLevelPointerMove`. Отключённый пункт и разделитель мимо — они вне
+        // цикла роуминга, и выделение на них недостижимо по построению.
+        const at = step.at ?? { path: [], index: 0 };
+        const item = itemAt(at);
+        if (item.focusable) {
+          keyboard.activateFromPointer(levelOf(at.path), item);
+        }
+        return {
+          command: step.command,
+          key: null,
+          prevented: false,
+          target: labelIn(item.element),
+          focus: focusState(),
+          levels: read(pathsOfRun).levels,
+        };
+      }
+      if (step.command === 'leave-tree') {
+        // Курсор ушёл с дерева меню: единственное место полного сброса. Фокус после
+        // него стоит на элементе корневого уровня, поэтому следующая клавиша
+        // адресуется меню, а не странице.
+        keyboard.clearActive(openedRoot());
+        return {
+          command: step.command,
+          key: null,
+          prevented: false,
+          target: outside.id,
+          focus: focusState(),
+          levels: read(pathsOfRun).levels,
+        };
+      }
       if (step.command === 'press-list') {
         // Цель внутри меню, но не под пунктом: прокручиваемый список.
         const list = openedRoot().element.querySelector('.vc-list');
@@ -1194,6 +1233,138 @@ test.describe('роуминг-фокус', () => {
       order: [],
     });
     expect(result.after.actions).toEqual([]);
+  });
+
+  test('наведение мыши выделяет пункт и перебивает клавиатуру', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'tree',
+      paths: { root: [] },
+      steps: [
+        // Клавиатура идёт первой: выделение создано ею, и мышь обязана его снять.
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'hover', at: { path: [], index: 1 } },
+      ],
+    });
+
+    expect(result.steps[1].levels.root.activeMarks, 'выделено ровно одно').toBe(1);
+    expect(result.steps[1].levels.root.tabStops, 'ровно один пункт в цикле Tab').toBe(1);
+    // Отметка ушла с пункта, который выбрала клавиатура: два писателя выделения дали
+    // бы две подсветки сразу, а «последнее взаимодействие выигрывает» — одну, на том,
+    // к чему пользователь пришёл последним.
+    expect(marksOf(result.after.levels.root)).toEqual([
+      ['Открыть', '-1', false],
+      ['Экспорт', '0', true],
+      ['Печать', '-1', false],
+      ['Пустое подменю', '-1', false],
+      [null, null, false],
+      ['Выход', '-1', false],
+    ]);
+    expect(result.after.levels.root.activeIndex).toBe(1);
+    // Фокус ушёл за отметкой, а не остался на прежнем пункте: `handleKeydown` берёт
+    // уровень из цели события, и рассинхрон означал бы, что клавиши поедут не туда,
+    // где горит подсветка.
+    expect(result.after.focus.label).toBe('Экспорт');
+  });
+
+  test('стрелка считает следующий пункт от того, что под курсором', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'tree',
+      paths: { root: [] },
+      steps: [
+        { command: 'hover', at: { path: [], index: 2 } },
+        { command: 'press', key: 'ArrowDown' },
+      ],
+    });
+
+    // Отсчёт от пункта под курсором, а не от края уровня: активным перед стрелкой был
+    // третий пункт, и шаг дал четвёртого. Отсчёт от пустого состояния дал бы первого,
+    // и «мышь перебивает клавиатуру» было бы нечем доказать.
+    expect(result.steps[0].levels.root.activeIndex, 'под курсором третий').toBe(2);
+    expect(result.steps[1].levels.root.activeIndex, 'стрелка дала четвёртого').toBe(3);
+    expect(result.after.levels.root.focusLabel).toBe('Пустое подменю');
+    expect(result.after.levels.root.activeMarks).toBe(1);
+    // Отдельного правила «считать от того, что под курсором» в движке нет и не
+    // требуется: активным всегда стоит последний, кого тронули, — мышью он или
+    // клавиатурой. Утверждение заодно фиксирует, что владелец подменю наведением не
+    // открывается: показ решает вызывающий код, а не движок.
+    expect(result.after.calls.order, 'подменю мышью не открыто').toEqual([]);
+  });
+
+  test('уход курсора сбрасывает выделение, и стрелка снова даёт крайний пункт', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'tree',
+      paths: { root: [] },
+      steps: [
+        { command: 'hover', at: { path: [], index: 2 } },
+        { command: 'leave-tree' },
+        { command: 'press', key: 'ArrowDown' },
+      ],
+    });
+
+    // Сброс полный: отметок нет ни на одном пункте, `tabindex` у всех вернулся в
+    // `-1`, а `activeIndex` — в `-1`. Частичный сброс оставил бы цикл роуминга
+    // продолжаться от пункта, которого пользователь уже не видит.
+    expect(result.steps[1].levels.root.activeMarks, 'отметок не осталось').toBe(0);
+    expect(result.steps[1].levels.root.tabStops, 'ни одного пункта в цикле Tab').toBe(0);
+    expect(result.steps[1].levels.root.activeIndex).toBe(-1);
+    // Фокус вернулся на элемент уровня, а не на контейнер: иначе следующая клавиша
+    // ушла бы в страницу, и меню перестало бы отвечать на стрелку сразу после того,
+    // как пользователь убрал курсор.
+    expect(result.steps[1].focus.inMenu, 'фокус в меню').toBe(true);
+    expect(result.steps[1].focus.label, 'фокус не на пункте').toBe(null);
+    expect(result.after.levels.root.activeIndex, 'стрелка дала первый').toBe(0);
+    expect(result.after.levels.root.focusLabel).toBe('Открыть');
+  });
+
+  test('сброс выделения касается всех уровней, а не только корневого', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'tree',
+      paths: { root: [], sub: [1] },
+      steps: [
+        { command: 'hover', at: { path: [], index: 1 } },
+        { command: 'press', key: 'ArrowRight' },
+        { command: 'hover', at: { path: [1], index: 0 } },
+        { command: 'leave-tree' },
+      ],
+    });
+
+    // Показ подменю отметку владельца не снимает, а наведение в подменю ставит свою:
+    // перед уходом курсора отмечены оба уровня, и сброс обязан снять обе отметки.
+    // Снимок `steps[2]` снят после наведения, то есть до ухода: у шага своя отметка
+    // снимается уже после того, как он отработал.
+    expect(result.steps[2].levels.root.activeMarks, 'до сброса корень отмечен').toBe(1);
+    expect(result.steps[2].levels.sub.activeMarks, 'до сброса подменю отмечено').toBe(1);
+    expect(result.after.levels.root.activeMarks).toBe(0);
+    expect(result.after.levels.root.activeIndex).toBe(-1);
+    expect(result.after.levels.sub.activeMarks).toBe(0);
+    expect(result.after.levels.sub.activeIndex).toBe(-1);
+    expect(result.after.levels.sub.tabStops).toBe(0);
+    // Фокус после сброса стоит на элементе корневого уровня, а не на глубине: показ
+    // подменю фокус не переносит, и возвращать его туда незачем.
+    expect(result.after.focus.label, 'фокус не на пункте').toBe(null);
+    expect(result.after.focus.inMenu).toBe(true);
+  });
+
+  test('клавиатура перебивает мышь', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'tree',
+      paths: { root: [] },
+      steps: [
+        { command: 'hover', at: { path: [], index: 2 } },
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'hover', at: { path: [], index: 1 } },
+      ],
+    });
+
+    // Обратный порядок: мышь выделила третий, клавиатура увела выделение на
+    // четвёртого, и последним касанием снова стала мышь. Выигрывает именно последнее
+    // взаимодействие, поэтому итог — не то, что оставила стрелка.
+    expect(result.steps[1].levels.root.activeIndex, 'стрелка увела выделение').toBe(3);
+    expect(result.after.levels.root.activeIndex, 'мышь вернула своё').toBe(1);
+    expect(result.after.levels.root.focusLabel).toBe('Экспорт');
+    expect(result.after.levels.root.activeMarks).toBe(1);
+    expect(result.after.levels.root.tabStops).toBe(1);
+    expect(result.after.focus.label).toBe('Экспорт');
   });
 });
 

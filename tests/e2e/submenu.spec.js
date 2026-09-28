@@ -39,6 +39,9 @@ import { CLOSE_GRACE_MS, OPEN_GRACE_MS, SAFETY_PADDING, SUBMENU_OFFSET } from '.
 /**
  * @typedef {object} ItemView
  * @property {string} label подпись пункта; `''` у разделителя.
+ * @property {boolean} active несёт ли пункт `data-active` — подсветку роуминга.
+ *   Читается прямо с узла: отметку ставит движок, и по DOM её видно ровно там,
+ *   где её ждёт `styles/mycontext.css`.
  * @property {string | null} haspopup `aria-haspopup`.
  * @property {string | null} expanded `aria-expanded`. Слой снимает отметку при
  *   закрытии, а не пишет `"false"`, поэтому `null` — это и есть «не развёрнуто».
@@ -277,6 +280,27 @@ function expandedLabels(snapshot) {
 }
 
 /**
+ * Подписи пунктов, помеченных `data-active`, по всем уровням. Снимок, а не одиночный
+ * пункт: «выделен ровно один» прошло бы на пустом дереве, если не видно, что до
+ * этого отмечено было хоть что-то.
+ *
+ * @param {Snapshot} snapshot
+ * @returns {string[]}
+ */
+function activeLabels(snapshot) {
+  /** @type {string[]} */
+  const labels = [];
+  for (const level of snapshot.levels) {
+    for (const item of level.items) {
+      if (item.active) {
+        labels.push(item.label);
+      }
+    }
+  }
+  return labels;
+}
+
+/**
  * Пункт по подписи из любого уровня.
  *
  * @param {Snapshot} snapshot
@@ -417,6 +441,7 @@ test.beforeEach(async ({ page }) => {
       const rect = item.getBoundingClientRect();
       return {
         label: label === null ? '' : String(label.textContent),
+        active: item.hasAttribute('data-active'),
         haspopup: item.getAttribute('aria-haspopup'),
         expanded: item.getAttribute('aria-expanded'),
         owns: item.getAttribute('aria-owns'),
@@ -583,11 +608,42 @@ test.describe('показ подменю', () => {
     expect(isOpen(after, ownerId), 'подменю показано').toBe(true);
     expect(after.openCount, 'открыты корень и подменю').toBe(2);
     expect(expandedLabels(after), 'владелец отмечен развёрнутым').toEqual(['Экспорт']);
-    // Показ подменю мышью фокус из родительского уровня не уводит (спека 6.2):
-    // подписью пункта фокус не обзаведён, потому что не переносился. Реестр движка
-    // при этом пополнен, иначе открытое мышью подменю было бы мёртво с клавиатуры —
-    // это проверяет кейс про `ArrowRight` ниже.
-    expect(after.focusLabel, 'фокус в показанное подменю не перенесён').toBe(null);
+    // Показ подменю мышью фокус в подменю не уводит (спека 6.2), и фокус стоит на
+    // владельце — том самом пункте, по которому пришёл курсор: наведение выделяет
+    // пункт, и отметка с фокусом неразлучны. Реестр движка при этом пополнен, иначе
+    // открытое мышью подменю было бы мёртво с клавиатуры — это проверяет кейс про
+    // `ArrowRight` ниже.
+    expect(after.focusLabel, 'фокус на владельце, а не в подменю').toBe('Экспорт');
+  });
+
+  test('наведение мыши выделяет пункт, и стрелка считает следующий от него', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+
+    // Настоящее наведение, а не вызов движка из пробы: выделение приходит из
+    // `pointermove` по пункту, и кейс держит в проверке именно эту проводку.
+    // Пункт взят не первый и не последний: от края уровня стрелка дала бы тот же
+    // результат, и «отсчёт от того, что под курсором» было бы нечем доказать.
+    await hoverItem(page, 'Пустой');
+    const hovered = await readMenu(page);
+    // Отметка ровно одна, и она на том пункте, где курсор: два писателя выделения
+    // дали бы подсветку сразу на двух пунктах.
+    expect(activeLabels(hovered), 'отмечен только пункт под курсором').toEqual(['Пустой']);
+    expect(itemOf(hovered, 'Пустой').active).toBe(true);
+    // Фокус ушёл за отметкой: клавиши адресуются меню по цели события, и без этого
+    // стрелка уехала бы с пункта, который пользователь видит отмеченным.
+    expect(hovered.focusLabel, 'фокус на пункте под курсором').toBe('Пустой');
+    // Наведение на пункт с пустым подменю не открывает ничего: владельцем он не
+    // является, и уровня за ним нет.
+    expect(hovered.openCount, 'наведение ничего не открыло').toBe(1);
+
+    // Клавиша приходит на пункт под курсором и считает следующий от него, а не от
+    // края: после «Пустого» в наборе идёт «Заметки», а от края стрелка дала бы
+    // «Новый».
+    await page.keyboard.press('ArrowDown');
+    const afterKey = await readMenu(page);
+    expect(activeLabels(afterKey), 'стрелка увела выделение с пункта под курсором').toEqual(['Заметки']);
+    expect(afterKey.focusLabel).toBe('Заметки');
   });
 
   test('уход курсора до истечения задержки не открывает подменю', async ({ page }) => {
@@ -1158,10 +1214,11 @@ test.describe('показ подменю', () => {
 
     const after = await readMenu(page);
     expect(after.openCount, 'открыты корень и три подменю').toBe(4);
-    // Показ по наведению фокус не переносит ни на один уровень (спека 6.2), и вся
-    // цепочка показывается мышью: подписью пункта с фокусом кейс не обзаведён, а
-    // геометрия ниже проверяется по каждому уровню отдельно.
-    expect(after.focusLabel, 'фокус остался в корневом уровне').toBe(null);
+    // Показ по наведению фокус в подменю не переносит ни на один уровень (спека 6.2):
+    // фокус стоит на владельце последнего показанного подменю, то есть в самой
+    // глубокой точке, до которой дошёл курсор. Подписью пункта под фокусом кейс не
+    // обзаведён, а геометрия ниже проверяется по каждому уровню отдельно.
+    expect(after.focusLabel, 'фокус на последнем владельце цепочки').toBe('Один');
     // Геометрия каждого уровня по отдельности: «всего четыре открыто» проверяло бы
     // число, а не то, что они помещаются.
     const shown = after.levels.filter((level) => {

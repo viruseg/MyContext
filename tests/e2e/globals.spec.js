@@ -39,6 +39,9 @@ import { CLOSE_GRACE_MS, OPEN_GRACE_MS } from '../../src/constants.js';
  * @typedef {object} Snapshot
  * @property {LevelView[]} levels уровни в порядке документа.
  * @property {number} openCount сколько из них в Top Layer.
+ * @property {string[]} activeLabels подписи пунктов с `data-active` по всем уровням.
+ *   Сама подсветка на странице не проверяется, а отметка на узле: окрашивает её
+ *   таблица стилей, и интересен факт отметки, а не её цвет.
  * @property {string | null} focusOwnerId `id` элемента с фокусом либо имя тега.
  * @property {string[]} log метки сработавших действий, по порядку.
  * @property {string[]} errors сообщения необработанных ошибок страницы.
@@ -355,6 +358,10 @@ test.describe('глобальные слушатели', () => {
         return {
           levels,
           openCount: levels.filter((level) => level.popoverOpen).length,
+          activeLabels: Array.from(document.querySelectorAll('.vc-item[data-active]')).map((item) => {
+            const label = item.querySelector('.vc-label');
+            return label === null ? '' : String(label.textContent);
+          }),
           focusOwnerId: active === null ? null : active.id !== '' ? active.id : active.tagName.toLowerCase(),
           log,
           errors,
@@ -598,6 +605,45 @@ test.describe('глобальные слушатели', () => {
     // Подменю обязано закрыться само: точка подаётся в `hoverIntent` и мимо клина.
     // Каскад при этом цел — контейнер и есть опора меню.
     expect(after.openCount, 'подменю закрылось, корень остался').toBe(1);
+  });
+
+  test('уход курсора с дерева меню сбрасывает выделение', async ({ page }) => {
+    await makeMenu(page, 'first', 'chain', 'surface');
+    await openAt(page, 'first', SURFACE_POINT);
+
+    // Отмечены оба уровня, и отмечены настоящими наведениями: на корень — на
+    // владельце, в подменю — на своём первом пункте. Снимок с обеими отметками
+    // обязателен: «выделение снято» прошло бы и на меню, в котором его не было.
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    await hoverItem(page, 'PDF');
+    const marked = await readMenu(page);
+    expect(marked.openCount, 'открыты корень и подменю').toBe(2);
+    expect(marked.activeLabels.sort(), 'отмечены оба уровня').toEqual(['PDF', 'Экспорт']);
+
+    // Курсор уходит на контейнер: это страница, а не меню, и выделение обязано
+    // сброситься целиком, хотя корень остаётся открытым, а подменю закроется по
+    // своей задержке. Клика тут нет — иначе фокус ушёл бы на контейнер, и сброс
+    // выделения нельзя было бы отличить от обычного ухода фокуса.
+    await page.mouse.move(30, 70);
+    const gone = await readMenu(page);
+    expect(gone.activeLabels, 'выделение сброшено').toEqual([]);
+    expect(gone.openCount, 'до задержки закрытия оба уровня на месте').toBe(2);
+    // Фокус вернулся на элемент корневого уровня, а не на контейнер: меню обязано
+    // снова отвечать на клавиши, и первая же стрелка после ухода курсора даёт
+    // крайний пункт. Уровни перечислены в порядке документа, и корень — первый.
+    expect(gone.focusOwnerId, 'фокус на элементе корневого уровня').toBe(gone.levels[0].id);
+    expect(gone.errors, 'страница без ошибок').toEqual([]);
+
+    await page.clock.fastForward(CLOSE_GRACE_MS * 3);
+    const after = await readMenu(page);
+    expect(after.openCount, 'подменю закрылось, корень остался').toBe(1);
+    expect(after.activeLabels, 'выделение не вернулось вместе с подменю').toEqual([]);
+    // Возврат фокуса в меню после сброса — не пустое утверждение: сначала
+    // выделение было, и без сброса фокус остался бы на пункте под курсором.
+    await page.keyboard.press('ArrowDown');
+    const keyed = await readMenu(page);
+    expect(keyed.activeLabels, 'стрелка снова даёт крайний пункт').toEqual(['Новый']);
   });
 
   test('Escape на самом контейнере закрывает меню', async ({ page }) => {
