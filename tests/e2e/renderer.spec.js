@@ -1088,6 +1088,9 @@ test.describe('каркас уровня', () => {
         popover: level.element.getAttribute('popover'),
         className: level.element.className,
         ariaLabel: level.element.getAttribute('aria-label'),
+        // Фокусируем программно, но не с клавиатуры: пока активного пункта нет,
+        // уровень держит фокус на себе, и клавиши приходят на него.
+        tabIndex: level.element.getAttribute('tabindex'),
         listRole: list.getAttribute('role'),
         listClass: list.className,
         // Внутри уровня — только список: всё остальное строится при открытии.
@@ -1104,6 +1107,9 @@ test.describe('каркас уровня', () => {
       popover: 'manual',
       className: 'vc-menu',
       ariaLabel: 'Меню файла',
+      // `-1`, а не `0`: вкладка не должна попадать в меню, а сфокусировать уровень
+      // программно без `tabindex` нельзя.
+      tabIndex: '-1',
       listRole: 'group',
       listClass: 'vc-list',
       children: 1,

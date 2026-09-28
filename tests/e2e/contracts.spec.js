@@ -243,6 +243,10 @@ test.describe('контракты на стыке модулей', () => {
               const item = label.closest('.vc-item');
               if (item instanceof HTMLElement) {
                 item.focus();
+                // Клавиша активации работает по активному пункту, а не по
+                // сфокусированному узлу: без отметки `Enter` не делает ничего, и
+                // проба проверяла бы не путь активации, а произвольный фокус.
+                item.setAttribute('data-active', '');
                 item.dispatchEvent(
                   new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
                 );
@@ -277,6 +281,8 @@ test.describe('контракты на стыке модулей', () => {
 
     // Клавиатура, а не мышь: именно этот путь звал `host.closeAll()` без проверки
     // и бросал `MyContext: экземпляр уничтожен` наружу из обработчика клавиш.
+    // Проверяется именно то, что `closeAll` после `destroy()` не бросает, — сама
+    // активация подтверждается журналом.
     await page.evaluate(() => {
       const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
       scope.__mc.activateWithKeyboard('Закрыть навсегда');

@@ -583,10 +583,11 @@ test.describe('показ подменю', () => {
     expect(isOpen(after, ownerId), 'подменю показано').toBe(true);
     expect(after.openCount, 'открыты корень и подменю').toBe(2);
     expect(expandedLabels(after), 'владелец отмечен развёрнутым').toEqual(['Экспорт']);
-    // Показанный уровень обязан достаться движку: реестр движка наполняет только
-    // `focusFirst`, а уровень вне реестра не отвечает на клавиши. Открытое мышью
-    // подменю без фокуса было бы видимо и мёртво.
-    expect(after.focusLabel, 'фокус в показанном подменю').toBe('PDF');
+    // Показ подменю мышью фокус из родительского уровня не уводит (спека 6.2):
+    // подписью пункта фокус не обзаведён, потому что не переносился. Реестр движка
+    // при этом пополнен, иначе открытое мышью подменю было бы мёртво с клавиатуры —
+    // это проверяет кейс про `ArrowRight` ниже.
+    expect(after.focusLabel, 'фокус в показанное подменю не перенесён').toBe(null);
   });
 
   test('уход курсора до истечения задержки не открывает подменю', async ({ page }) => {
@@ -713,10 +714,14 @@ test.describe('показ подменю', () => {
     });
 
     // Клавиатурный путь показа на настоящем экземпляре: движок зовёт
-    // `host.openSubmenu` и больше ничего не делает, а показ и отдачу уровня
-    // движку с переносом фокуса делает один `#openSubmenu`. Если бы фокус в
-    // подменю переносил сам движок, его убрали бы — и на этом месте кейс
-    // погас бы, оставив мышиные пути единственной проверкой.
+    // `host.openSubmenu` и больше не показывает, а фокус в подменю переносит сам —
+    // иначе у клавиатуры было бы два места переноса, и мышиные пути показа перестали
+    // бы быть эталоном. Если бы фокус переносил показ, движок молчал бы на этом
+    // месте — и кейс погас бы, оставив мышиные пути единственной проверкой.
+    //
+    // Два шага вниз, а не один: показ меню выделения не оставляет, а первым
+    // доступным в корне стоит «Новый» — у него подменю нет.
+    await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowRight');
 
@@ -753,6 +758,9 @@ test.describe('показ подменю', () => {
     // ушедшая задача снесла бы подменю, открытое уже на новом месте.
     await openAt(page, OPEN_FAR);
     expect(isOpen(await readMenu(page), exportId), 'подменю прежней постановки скрыто').toBe(false);
+    // Два шага вниз: показ не отмечает пунктов, а первым доступным в корне стоит
+    // «Новый» — у него подменю нет.
+    await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowRight');
     await page.clock.fastForward(CLOSE_GRACE_MS);
@@ -771,10 +779,16 @@ test.describe('показ подменю', () => {
       return scope.__mc.submenuIdOf('Экспорт');
     });
 
-    await hoverItem(page, 'Экспорт');
-    await page.clock.fastForward(OPEN_GRACE_MS);
-    await hoverItem(page, 'PNG');
-    await page.clock.fastForward(OPEN_GRACE_MS);
+    // Вход в цепочку с клавиатуры. Показ подменю мышью фокус из родительского
+    // уровня не уводит (спека 6.2), и `Escape` после такого показа закрыл бы всё
+    // меню одним нажатием вместо самого глубокого уровня. Показ не отмечает пунктов,
+    // поэтому каждому уровню предшествует шаг вниз: в корне их два — до «Экспорта»,
+    // в подменю «Экспорта» один — до «PNG».
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
     expect((await readMenu(page)).openCount, 'открыты корень и два подменю').toBe(3);
 
     // Escape закрывает уровень, где стоит фокус, — в обход `#hideSubmenuFor`, и
@@ -1144,7 +1158,10 @@ test.describe('показ подменю', () => {
 
     const after = await readMenu(page);
     expect(after.openCount, 'открыты корень и три подменю').toBe(4);
-    expect(after.focusLabel, 'фокус дошёл до четвёртого уровня').toBe('Глубоко');
+    // Показ по наведению фокус не переносит ни на один уровень (спека 6.2), и вся
+    // цепочка показывается мышью: подписью пункта с фокусом кейс не обзаведён, а
+    // геометрия ниже проверяется по каждому уровню отдельно.
+    expect(after.focusLabel, 'фокус остался в корневом уровне').toBe(null);
     // Геометрия каждого уровня по отдельности: «всего четыре открыто» проверяло бы
     // число, а не то, что они помещаются.
     const shown = after.levels.filter((level) => {
@@ -1173,12 +1190,17 @@ test.describe('показ подменю', () => {
     await makeMenu(page, 'tree', 'surface');
     await openAt(page, OPEN_MIDDLE);
 
-    await hoverItem(page, 'Экспорт');
-    await page.clock.fastForward(OPEN_GRACE_MS);
-    await hoverItem(page, 'PNG');
-    await page.clock.fastForward(OPEN_GRACE_MS);
-    await hoverItem(page, 'Один');
-    await page.clock.fastForward(OPEN_GRACE_MS);
+    // Вход в цепочку с клавиатуры: показ подменю мышью фокус из родительского уровня
+    // не уводит, и четыре `Escape` после такого показа закрыли бы всё меню первым
+    // же нажатием. Каждому уровню предшествует шаг вниз — показ не отмечает
+    // пунктов, — а в корне их два: до «Экспорта» от «Нового» ещё один шаг.
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
     expect((await readMenu(page)).openCount, 'открыты четыре уровня').toBe(4);
 
     // По одному на уровень, от глубокого к корню. Число нажатий закреплено, а не

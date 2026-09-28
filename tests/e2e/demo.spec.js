@@ -927,28 +927,37 @@ test('демо: сценарий с отключёнными пунктами н
   // Клавиатурная дверь проверяется первой и до всяких кликов мышью: `mousedown`
   // по `div[tabindex="-1"]` переводит на него фокус сам, браузерным правилом, и
   // после клика по отключённому пункту «фокус стоит на первом доступном» было бы
-  // уже неверно. Отключённый пункт не входит в цикл роуминга, поэтому фокус на
-  // него не попадёт и `ArrowRight` его не разберёт. Список подписей под фокусом —
-  // и есть проверка этого, и она же показывает, что роуминг вообще идёт: иначе
-  // «отключённых в списке нет» прошло бы на неподвижном фокусе.
+  // уже неверно. Показ сценария выделения не оставляет вовсе: фокус стоит на
+  // элементе уровня, и подписи у него нет. Отключённый пункт не входит в цикл
+  // роуминга, поэтому фокус на него не попадёт и `ArrowRight` его не разберёт.
+  // Список подписей под фокусом — и есть проверка этого, и она же показывает, что
+  // роуминг вообще идёт: иначе «отключённых в списке нет» прошло бы на неподвижном
+  // фокусе. Подпись берётся у пункта под фокусом, а не у любого потомка: у элемента
+  // уровня подписи нет, но `querySelector` нашёл бы в нём первую подпись меню.
   const focusBefore = await page.evaluate(() => {
     const active = document.activeElement;
-    const label = active === null ? null : active.querySelector('.vc-label');
+    const item = active === null ? null : active.closest('.vc-item');
+    const label = item === null ? null : item.querySelector('.vc-label');
     return label === null ? null : String(label.textContent);
   });
-  expect(focusBefore, 'фокус на первом доступном пункте').toBe('Доступно');
+  expect(focusBefore, 'выделения после открытия нет').toBe(null);
   /** @type {string[]} */
   const visited = [];
   for (let step = 0; step < 6; step += 1) {
     await page.keyboard.press('ArrowDown');
     visited.push(await page.evaluate(() => {
       const active = document.activeElement;
-      const label = active === null ? null : active.querySelector('.vc-label');
+      const item = active === null ? null : active.closest('.vc-item');
+      const label = item === null ? null : item.querySelector('.vc-label');
       return label === null ? '' : String(label.textContent);
     }));
   }
-  expect(visited[0], 'роуминг идёт по доступным пунктам').toBe('Доступный владелец');
-  expect(visited[2], 'роуминг обходит отключённые').toBe('Доступно');
+  // Первая стрелка даёт первый доступный пункт, а дальше цикл идёт по доступным:
+  // из «Доступно» шаг ведёт сразу к владельцу, минуя отключённые, из владельца — к
+  // пустому подменю, минуя разделитель.
+  expect(visited[0], 'роуминг начинается с первого доступного').toBe('Доступно');
+  expect(visited[1], 'роуминг идёт по доступным пунктам').toBe('Доступный владелец');
+  expect(visited[2], 'роуминг обходит отключённые и разделитель').toBe('Пустое подменю');
   expect(
     visited.filter((label) => {
       return label.startsWith('Отключённый');

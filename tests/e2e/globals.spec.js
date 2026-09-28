@@ -518,9 +518,10 @@ test.describe('глобальные слушатели', () => {
 
     // Цепочка из трёх уровней через клавиатуру: наведение здесь не годится, его
     // задержка сделала бы кейс зависимым от часов дважды, а здесь проверяется
-    // закрытие, а не показ. `focusFirst` ставит фокус на первый пункт, поэтому до
-    // «Экспорта» — один шаг вниз.
+    // закрытие, а не показ. Показ меню выделения не оставляет, поэтому до первого
+    // пункта и до «Экспорта» идут два шага вниз, а внутри подменю — один, до «PNG».
     const exportId = await submenuIdOf(page, 'Экспорт');
+    await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowRight');
     const pngId = await submenuIdOf(page, 'PNG');
@@ -554,6 +555,8 @@ test.describe('глобальные слушатели', () => {
   test('возврат курсора в дерево закрывает один уровень, а не каскад', async ({ page }) => {
     await makeMenu(page, 'first', 'chain', 'surface');
     await openAt(page, 'first', SURFACE_POINT);
+    // Показ не отмечает пунктов, и до «Экспорта» — два шага вниз.
+    await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowRight');
     await page.keyboard.press('ArrowDown');
@@ -580,6 +583,8 @@ test.describe('глобальные слушатели', () => {
   test('уход курсора на контейнер закрывает подменю, но не каскад', async ({ page }) => {
     await makeMenu(page, 'first', 'chain', 'surface');
     await openAt(page, 'first', SURFACE_POINT);
+    // Показ не отмечает пунктов, и до «Экспорта» — два шага вниз.
+    await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowRight');
     expect((await readMenu(page)).openCount, 'открыты корень и подменю').toBe(2);

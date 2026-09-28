@@ -35,14 +35,14 @@ import { expect, test } from '@playwright/test';
  * середине сценария, когда сравнивать «до» и «после» нужно не на краях.
  * `reset` зовёт `reset()` движка — вызывающий код делает это при закрытии меню.
  * `press-list` отправляет клавишу в прокручиваемый список уровня, а не в пункт:
- * цель внутри меню, но не под пунктом, и роуминг на такой цели не должен идти.
- * `show-submenu` — то, что делает вызывающий код по наведению: открывает подменю
- * пункта и отдаёт его движку, как обязан после каждого показа. `clear` снимает
- * отметки с корневого уровня руками, не забывая его: так ведёт себя перерисовка
- * уровня, и состояние без активного пункта обязано быть определённым.
+ * цель внутри меню, но не под пунктом, и уровень обязан разобрать такую клавишу так
+ * же, как пришедшую на пункт. `show-submenu` — то, что делает вызывающий код по
+ * наведению: открывает подменю пункта и отдаёт его движку, как обязан после каждого
+ * показа. Отметок в показанном подменю при этом не появляется, и состояние «уровень
+ * движку известен, активного пункта нет» получается самим собой.
  *
  * @typedef {object} Step
- * @property {'press' | 'press-outside' | 'press-list' | 'show-submenu' | 'read' | 'reset' | 'clear'} command
+ * @property {'press' | 'press-outside' | 'press-list' | 'show-submenu' | 'read' | 'reset'} command
  * @property {string} [key]
  * @property {ItemAt} [at]
  */
@@ -297,8 +297,9 @@ test.beforeEach(async ({ page }) => {
 
     /**
      * Уровень без единого доступного пункта: отключённый пункт и разделитель.
-     * Помечать нечего, и `focusFirst` на таком уровне обязан закончиться
-     * молчанием, а не исключением.
+     * Регистрировать его всё равно надо, а помечать нечего, поэтому
+     * `registerLevel` на таком уровне обязан закончиться регистрацией, а не
+     * исключением.
      *
      * @type {Array<MenuItem | SeparatorItem>}
      */
@@ -463,11 +464,11 @@ test.beforeEach(async ({ page }) => {
     // `closeAll` фокуса не трогает намеренно: возвращать его — дело задачи 9, а
     // если бы возвращал, кейс про `Tab` проходил бы и без `focusOwner`.
     //
-    // `openSubmenu` отдаёт уровень движку через `focusFirst` — ровно как это делает
-    // `#openSubmenu` в `MyContext`. Договорённость «показывающий код отдаёт
-    // уровень и переносит в него фокус» тут и проверяется: если бы фокус
-    // переносил сам движок, фикстура не отличалась бы от него и кейс про фокус в
-    // подменю ничего бы не значил.
+    // `openSubmenu` отдаёт уровень движку через `registerLevel` и фокуса не трогает —
+    // ровно как это делает `#openSubmenu` в `MyContext`. Проверяется тут и разделение
+    // ответственности: хост, который переносил бы фокус в подменю сам, скрыл бы от
+    // кейса, кто перенос делает на самом деле, и «фокус ушёл в подменю» проходило бы
+    // в обоих случаях.
     /** @type {KeyboardHost} */
     const host = {
       closeAll() {
@@ -480,7 +481,7 @@ test.beforeEach(async ({ page }) => {
         calls.openSubmenu += 1;
         calls.openSubmenuIds.push(entry.element.id);
         openedLayer().showSubmenu(entry);
-        keyboard.focusFirst(entry);
+        keyboard.registerLevel(entry, { focus: false });
       },
       closeCurrentLevel() {
         calls.order.push('closeCurrentLevel');
@@ -706,25 +707,6 @@ test.beforeEach(async ({ page }) => {
      * @returns {StepResult}
      */
     function execute(step) {
-      if (step.command === 'clear') {
-        // Отметки снимает вызывающий код, а уровень движку остаётся известным:
-        // `reset` был бы другим состоянием — он и отметки снимает, и уровень
-        // забывает.
-        const entry = openedRoot();
-        for (const item of entry.items) {
-          item.element.tabIndex = -1;
-          item.element.removeAttribute('data-active');
-        }
-        entry.activeIndex = -1;
-        return {
-          command: step.command,
-          key: null,
-          prevented: false,
-          target: null,
-          focus: focusState(),
-          levels: read(pathsOfRun).levels,
-        };
-      }
       if (step.command === 'reset') {
         keyboard.reset();
         return {
@@ -843,7 +825,7 @@ test.beforeEach(async ({ page }) => {
           buildTree(root, items, 0);
         }
         openedLayer().showRoot(root, { x: 60, y: 60 });
-        keyboard.focusFirst(root);
+        keyboard.registerLevel(root, { focus: true });
       },
       ensureSubmenu(index) {
         const entry = openedRoot();
@@ -932,6 +914,59 @@ function focusTrail(steps) {
 }
 
 test.describe('роуминг-фокус', () => {
+  test('после открытия отметок нет, а первая стрелка даёт крайний пункт', async ({ page }) => {
+    const opened = await runScenario(page, {
+      set: 'tail',
+      paths: { root: [] },
+      steps: [{ command: 'read' }],
+    });
+    const down = await runScenario(page, {
+      set: 'tail',
+      paths: { root: [] },
+      steps: [{ command: 'press', key: 'ArrowDown' }],
+    });
+    const up = await runScenario(page, {
+      set: 'tail',
+      paths: { root: [] },
+      steps: [{ command: 'press', key: 'ArrowUp' }],
+    });
+
+    // Показ не отмечает ничего: отметка появляется там, где последним дотронулись до
+    // пункта, а открытие — это ещё не касание. Снимок `before` снят в том же
+    // `evaluate`, что и `open()`, иначе он догнал бы меню после первого шага.
+    expect(opened.before.levels.root.activeMarks, 'свежее меню без отметок').toBe(0);
+    expect(opened.before.levels.root.tabStops).toBe(0);
+    expect(opened.before.levels.root.activeIndex).toBe(-1);
+    expect(marksOf(opened.before.levels.root)).toEqual([
+      ['Первый', '-1', false],
+      ['Второй', '-1', false],
+      ['Третий', '-1', false],
+      ['Хвост', '-1', false],
+      [null, null, false],
+    ]);
+    // Фокус при этом в меню и на самом уровне: без этого клавиши некуда было бы
+    // адресовать, и первая же стрелка не создала бы выделения.
+    expect(opened.before.focus.inMenu, 'фокус на элементе уровня').toBe(true);
+    expect(opened.before.focus.label, 'фокус не на пункте').toBe(null);
+    expect(opened.before.calls.order, 'показ никого не звал').toEqual([]);
+    expect(opened.after.levels.root).toEqual(opened.before.levels.root);
+
+    // Первая стрелка создаёт выделение с края: `ArrowDown` даёт первого, `ArrowUp` —
+    // последнего. Оба сценария открывают меню заново, иначе второй считал бы не
+    // пустое состояние, а состояние после первой стрелки.
+    expect(down.after.levels.root.activeMarks).toBe(1);
+    expect(down.after.levels.root.focusLabel, 'ArrowDown даёт первый').toBe('Первый');
+    expect(down.after.levels.root.activeIndex).toBe(0);
+    expect(up.after.levels.root.activeMarks).toBe(1);
+    expect(up.after.levels.root.focusLabel, 'ArrowUp даёт последний').toBe('Третий');
+    expect(up.after.levels.root.activeIndex).toBe(2);
+    // Клавиша пришла на элемент уровня, а не на пункт, и разобрана всё равно:
+    // `describeTarget` отдаёт `id` уровня именно потому, что под целью нет пункта.
+    expect(down.steps[0].target, 'цель — элемент уровня').toBe(down.after.levels.root.id);
+    expect(down.steps[0].prevented, 'стрелка разобрана движком').toBe(true);
+    expect(up.steps[0].prevented).toBe(true);
+  });
+
   test('ArrowDown переключает активный пункт циклически, минуя disabled и разделители', async ({ page }) => {
     const result = await runScenario(page, {
       set: 'cycle',
@@ -945,38 +980,39 @@ test.describe('роуминг-фокус', () => {
       ],
     });
 
-    // Открытие отдало фокус первому доступному пункту — иначе «цикл» был бы циклом
-    // относительно произвольной точки.
-    expect(result.before.levels.root.focusLabel).toBe('Первый');
-    // Четыре нажатия возвращают к первому, как велит бриф. Порядок зафиксирован
-    // целиком: цикл из двух доступных пунктов сошёлся бы и на первой половине, а
-    // цикл с прыжком через отключённый пункт дал бы другой порядок.
-    expect(focusTrail(result.steps)).toEqual(['Второй', 'Первый', 'Второй', 'Первый']);
-    // После первого нажатия снят прежний активный: у «Первого» не осталось ни
-    // `tabindex="0"`, ни `data-active`, ни фокуса. Без этого на уровне стояло бы
-    // два `tabindex="0"` сразу.
+    // Открытие не отметило ничего: фокус стоит на элементе уровня, и подписью пункта
+    // он не обзаведён. Стартовать циклу не от чего, и первая стрелка обязана дать
+    // крайний пункт.
+    expect(result.before.levels.root.focusLabel).toBe(null);
+    // Четыре нажатия: первое даёт первого, а дальше цикл идёт по кругу. Порядок
+    // зафиксирован целиком: цикл из двух доступных пунктов сошёлся бы и на первой
+    // половине, а цикл с прыжком через отключённый пункт дал бы другой порядок.
+    expect(focusTrail(result.steps)).toEqual(['Первый', 'Второй', 'Первый', 'Второй']);
+    // После первого нажатия отмечен ровно один пункт: у «Первого» есть и
+    // `tabindex="0"`, и `data-active`, и фокус. Без этого на уровне стояло бы
+    // два `tabindex="0"` сразу либо ни одного.
     expect(rovingOf(result.steps[1].levels.root)).toEqual([
-      ['Первый', '-1', false, false],
+      ['Первый', '0', true, true],
       ['Заблокированный', '-1', false, false],
       [null, null, false, false],
-      ['Второй', '0', true, true],
+      ['Второй', '-1', false, false],
     ]);
     // Отключённый пункт и разделитель в цикл не попали ни разу: у них нет ни
     // `tabindex`, ни `data-active`, ни фокуса. У разделителя атрибута `tabindex`
     // нет вовсе — `-1` был бы числом в никуда.
     expect(rovingOf(result.after.levels.root)).toEqual([
-      ['Первый', '0', true, true],
+      ['Первый', '-1', false, false],
       ['Заблокированный', '-1', false, false],
       [null, null, false, false],
-      ['Второй', '-1', false, false],
+      ['Второй', '0', true, true],
     ]);
     // Ровно один пункт уровня держит фокус и ровно один помечен.
     expect(result.after.levels.root.tabStops).toBe(1);
     expect(result.after.levels.root.activeMarks).toBe(1);
     // `activeIndex` — индекс в `entry.items`, а не в списке доступных: между
     // первым и последним доступным стоят отключённый пункт и разделитель.
-    expect(result.steps[1].levels.root.activeIndex).toBe(3);
-    expect(result.after.levels.root.activeIndex).toBe(0);
+    expect(result.steps[1].levels.root.activeIndex).toBe(0);
+    expect(result.after.levels.root.activeIndex).toBe(3);
     // Стрелки разобраны движком, поэтому действие по умолчанию подавлено.
     expect(result.steps.map((step) => step.prevented)).toEqual([true, false, true, true, true]);
   });
@@ -1056,25 +1092,28 @@ test.describe('роуминг-фокус', () => {
     expect(stops).toHaveLength(1);
     expect(stops[0].active).toBe(true);
     expect(stops[0].focused).toBe(true);
-    expect(level.focusLabel).toBe('Третий');
-    // Пункт, с которого ушли, отметку потерял: без этого на уровне осталось бы два
-    // `tabindex="0"` и два `data-active` сразу.
+    expect(level.focusLabel).toBe('Второй');
+    // Свежее меню отметок не имеет ни на одном пункте: равенство трёх вещей
+    // проверяется не сразу после открытия, а на состоянии с активным пунктом, и
+    // состояние без выделения — законная часть контракта, а не его отсутствие.
     expect(rovingOf(result.before.levels.root)).toEqual([
-      ['Первый', '0', true, true],
+      ['Первый', '-1', false, false],
       ['Второй', '-1', false, false],
       ['Третий', '-1', false, false],
       ['Хвост', '-1', false, false],
       [null, null, false, false],
     ]);
+    // Пункт, с которого ушли, отметку потерял: без этого на уровне осталось бы два
+    // `tabindex="0"` и два `data-active` сразу.
     expect(rovingOf(level)).toEqual([
       ['Первый', '-1', false, false],
-      ['Второй', '-1', false, false],
-      ['Третий', '0', true, true],
+      ['Второй', '0', true, true],
+      ['Третий', '-1', false, false],
       ['Хвост', '-1', false, false],
       [null, null, false, false],
     ]);
     // `activeIndex` совпадает с активным пунктом по индексу в `entry.items`.
-    expect(level.activeIndex).toBe(2);
+    expect(level.activeIndex).toBe(1);
   });
   test('длинный уровень: активный пункт долистывается в видимую часть списка', async ({ page }) => {
     const result = await runScenario(page, {
@@ -1096,7 +1135,10 @@ test.describe('роуминг-фокус', () => {
       result.before.levels.root.list.clientHeight,
     );
     expect(result.before.levels.root.items[39].inView).toBe(false);
-    expect(result.before.levels.root.focusLabel).toBe('Пункт 1');
+    // Открытие длинного уровня ничего не отмечает, поэтому за нижним краем списка
+    // лежат не «отмеченные, но невидимые» пункты, а просто не тронутые: сравнение
+    // вниз ведётся от состояния без выделения.
+    expect(result.before.levels.root.focusLabel).toBe(null);
     // `End` уводит роуминг на последний пункт, и список долистывается до него:
     // `focus({ preventScroll: true })` не прокручивает `.vc-list`, поэтому без
     // `scrollIntoView` отметка, `tabindex="0"` и фокус оказались бы на пункте под
@@ -1137,9 +1179,10 @@ test.describe('роуминг-фокус', () => {
     expect(result.after.levels.root.tabStops).toBe(0);
     expect(result.after.levels.root.activeMarks).toBe(0);
     expect(result.after.levels.root.activeIndex).toBe(-1);
-    // Фокус в меню не встал: вставать некуда, и `focusFirst` обязан закончиться
-    // молчанием, а не исключением.
-    expect(result.after.focus.inMenu).toBe(false);
+    // Фокус встал на элемент уровня: доступных пунктов нет, помечать некого, но
+    // уровень зарегистрирован и держит фокус — иначе клавиши ему адресовать было бы
+    // нечем, а он обязан разбирать их молча.
+    expect(result.after.focus.inMenu).toBe(true);
     expect(result.after.focus.label).toBe(null);
     // Ничего не активировано и хост не тронут.
     expect(result.after.calls).toEqual({
@@ -1161,9 +1204,12 @@ test.describe('переходы между уровнями', () => {
       paths: { root: [], sub: [1] },
       steps: [
         // Роуминг доходит до владельца раньше, чем в него входят: активным
-        // пунктом уровня остаётся носитель `data-active`, а не цель события.
+        // пунктом уровня остаётся носитель `data-active`, а не цель события. Открытое
+        // меню выделения не имеет, и до владельца надо дойти двумя шагами.
+        { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowRight' },
+        { command: 'press', key: 'ArrowDown' },
       ],
     });
 
@@ -1173,14 +1219,26 @@ test.describe('переходы между уровнями', () => {
     expect(result.after.calls.openSubmenuIds).toEqual([result.after.levels.sub.id]);
     expect(result.after.levels.sub.open).toBe(true);
     expect(result.after.levels.sub.popoverOpen).toBe(true);
-    // Фокус ушёл в первый доступный пункт подменю, а не остался на владельце.
-    expect(focusTrail(result.steps)).toEqual(['Экспорт', 'PDF']);
+    // Фокус ушёл из подменю на его первый доступный пункт, а не остался на владельце:
+    // след показывает и то, что `ArrowRight` открывает подменю, и то, что перенос
+    // фокуса делает движок, а не показ.
+    expect(focusTrail(result.steps)).toEqual(['Открыть', 'Экспорт', 'PDF', 'PNG']);
     expect(result.after.focus.inMenu).toBe(true);
-    expect(rovingOf(result.after.levels.sub)).toEqual([
+    // Показ подменю отметок в нём не оставил: переносом фокуса занялся `moveTo`, а
+    // не `registerLevel`. Проверяется на снимке сразу после `ArrowRight`, иначе
+    // следующий шаг скрыл бы, что помечал именно он.
+    expect(rovingOf(result.steps[2].levels.sub)).toEqual([
       ['PDF', '0', true, true],
       ['PNG', '-1', false, false],
     ]);
-    expect(result.after.levels.sub.activeIndex).toBe(0);
+    expect(result.steps[2].levels.sub.activeIndex).toBe(0);
+    expect(result.steps[2].levels.sub.tabStops).toBe(1);
+    // Роуминг подменю продолжается по списку, а не застрял на первом пункте.
+    expect(rovingOf(result.after.levels.sub)).toEqual([
+      ['PDF', '-1', false, false],
+      ['PNG', '0', true, true],
+    ]);
+    expect(result.after.levels.sub.activeIndex).toBe(1);
     // Владелец в родительском уровне остался активным: ровно один `tabindex="0"` и
     // одна отметка на уровень, а не по одному на всё меню. По нему же видно, что
     // подменю открылось через слой, а не мимо него.
@@ -1188,18 +1246,24 @@ test.describe('переходы между уровнями', () => {
     expect(result.after.levels.root.items[1].expanded).toBe('true');
     expect(result.after.levels.root.tabStops).toBe(1);
     expect(result.after.levels.sub.tabStops).toBe(1);
-    expect(result.steps[1].prevented).toBe(true);
+    expect(result.steps[2].prevented).toBe(true);
   });
 
   test('ArrowRight на пункте без подменю ничего не делает', async ({ page }) => {
     const result = await runScenario(page, {
       set: 'tree',
       paths: { root: [], sub: [1] },
-      // Клавиша уходит в активный пункт — «Открыть», у которого подменю нет.
-      steps: [{ command: 'press', key: 'ArrowRight' }],
+      // Клавиша уходит в активный пункт — «Открыть», у которого подменю нет. Без
+      // шага вниз активного пункта не было бы, и «ничего не делает» означало бы
+      // «нечего делать», а не «нечего открывать».
+      steps: [
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'ArrowRight', at: { path: [], index: 0 } },
+      ],
     });
 
-    expect(result.steps[0].target).toBe('Открыть');
+    expect(result.steps[1].focus.label, 'активен пункт без подменю').toBe('Открыть');
+    expect(result.steps[1].target, 'цель — тот же пункт').toBe('Открыть');
     // Ни одного вызова хоста: подменю у пункта нет, и открывать нечего.
     expect(result.after.calls).toEqual({
       closeAll: 0,
@@ -1209,14 +1273,15 @@ test.describe('переходы между уровнями', () => {
       focusOwner: 0,
       order: [],
     });
-    // Уровень не тронут вовсе — ни отметок, ни фокуса. Сравнение всего снимка
-    // вместо отдельных полей: любое изменение состояния роняет кейс.
-    expect(result.after.levels.root).toEqual(result.before.levels.root);
-    expect(result.after.focus).toEqual(result.before.focus);
+    // Уровень не тронут вовсе — ни отметок, ни фокуса. Сравнение снимков до и после
+    // самой стрелки вместо сравнения с показом: любое изменение состояния роняет
+    // кейс, а «до» здесь — состояние с активным пунктом, а не свежее меню.
+    expect(result.after.levels.root).toEqual(result.steps[1].levels.root);
+    expect(result.after.focus).toEqual(result.steps[1].focus);
     // Клавишу движок всё же разобрал, поэтому её действие по умолчанию подавлено:
     // иначе стрелка вела бы себя по-разному в зависимости от пункта, и прокрутка
     // страницы зависела бы от того, где стоит фокус.
-    expect(result.steps[0].prevented).toBe(true);
+    expect(result.steps[1].prevented).toBe(true);
   });
 
   test('ArrowLeft закрывает подменю и возвращает фокус на пункт-владелец', async ({ page }) => {
@@ -1224,6 +1289,7 @@ test.describe('переходы между уровнями', () => {
       set: 'tree',
       paths: { root: [], sub: [1] },
       steps: [
+        { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowRight' },
         // Перед возвратом активный пункт подменя уводится со первого: иначе «фокус
@@ -1233,7 +1299,9 @@ test.describe('переходы между уровнями', () => {
       ],
     });
 
-    expect(focusTrail(result.steps)).toEqual(['Экспорт', 'PDF', 'PNG', 'Экспорт']);
+    expect(focusTrail(result.steps)).toEqual([
+      'Открыть', 'Экспорт', 'PDF', 'PNG', 'Экспорт',
+    ]);
     // Закрыт текущий уровень, а не всё меню.
     expect(result.after.calls.closeCurrentLevel).toBe(1);
     expect(result.after.calls.closeAll).toBe(0);
@@ -1255,11 +1323,46 @@ test.describe('переходы между уровнями', () => {
     expect(result.after.levels.root.items[1].owns).toBe(result.before.levels.sub.id);
   });
 
+  test('ArrowLeft из подменю возвращает отметку пункту-владельцу', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'tree',
+      paths: { root: [], sub: [1] },
+      steps: [
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'ArrowRight' },
+        { command: 'press', key: 'ArrowLeft' },
+        // Роуминг продолжается от владельца, а не от края уровня: без отметки на
+        // владельце следующая стрелка встала бы на первый пункт уровня, и
+        // возвращение из подменю выглядело бы как потеря места.
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'ArrowUp' },
+      ],
+    });
+
+    expect(focusTrail(result.steps)).toEqual([
+      'Открыть', 'Экспорт', 'PDF', 'Экспорт', 'Печать', 'Экспорт',
+    ]);
+    // Отметка вернулась владельцу, а не растворилась: в родительском уровне снова
+    // ровно один `tabindex="0"` и одна `data-active`.
+    expect(result.steps[3].levels.root.activeIndex).toBe(1);
+    expect(result.steps[3].levels.root.tabStops).toBe(1);
+    expect(result.steps[3].levels.root.activeMarks).toBe(1);
+    // Подменю закрыто, но его собственные отметки не тронуты: возврат фокуса — это
+    // дело родительского уровня, и закрытый уровень просто перестал быть видимым.
+    expect(result.steps[3].levels.sub.open).toBe(false);
+    expect(result.after.levels.root.activeIndex).toBe(1);
+    expect(result.after.levels.root.tabStops).toBe(1);
+    expect(result.after.calls.closeCurrentLevel).toBe(1);
+    expect(result.after.calls.closeAll).toBe(0);
+  });
+
   test('ArrowLeft на корневом уровне вызывает closeAll', async ({ page }) => {
     const result = await runScenario(page, {
       set: 'tree',
       paths: { root: [], sub: [1] },
       steps: [
+        { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowRight' },
         // Возврат в корень: следующая стрелка влево обязана увидеть уровень без
@@ -1295,10 +1398,15 @@ test.describe('переходы между уровнями', () => {
       const probe = scope.__vcKb;
       probe.open('offLimits');
       // Отключённый пункт с непустым подменю — не владелец, поэтому у него нет
-      // зарезервированного адреса, а `ensureLevel` без адреса бросает. Состояние
+      // зарезервированного адреса, а `ensureLevel` без адреса бросит. Состояние
       // «открытое подменю при неактивном владельце», ради которого прежний кейс
       // этого места строил такой уровень руками, теперь недостижимо: сделать его
       // может только слой, а он не согласится.
+      //
+      // Роуминг приводится в движение шагом вниз: открытое меню выделения не имеет,
+      // и без этого шага сравнивать было бы нечего — «у отключённого нет отметки» на
+      // пустом уровне не отличало бы его от любого другого пункта.
+      probe.run([{ command: 'press', key: 'ArrowDown' }], { root: [] });
       return {
         deaf: probe.ensureSubmenu(1),
         live: probe.ensureSubmenu(2),
@@ -1318,7 +1426,7 @@ test.describe('переходы между уровнями', () => {
     expect(deaf.hasSubmenu, 'отключённый пункт не владелец').toBe(false);
     expect(deaf.haspopup, 'нет `aria-haspopup`').toBe(null);
     expect(deaf.owns, 'адрес подменю не зарезервирован').toBe(null);
-    // Роуминг остался на живом пункте, и у отключённого не появилось ни отметки,
+    // Роуминг встал на живой пункт, и у отключённого не появилось ни отметки,
     // ни `tabindex="0"`, ни фокуса: он вне цикла, и отметка роуминга сделала бы
     // его целью табуляции.
     expect(rovingOf(result.snapshot.levels.root)).toEqual([
@@ -1336,6 +1444,7 @@ test.describe('переходы между уровнями', () => {
       steps: [
         // Последний тронутый движком уровень — подменю, и фокус в нём.
         { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowRight' },
         { command: 'read' },
         // Клавиша приходит в пункт корневого уровня — в тот самый, который остался
@@ -1350,40 +1459,50 @@ test.describe('переходы между уровнями', () => {
     expect(result.after.focus.label).toBe('Печать');
     // Снимок до движения действительно видел фокус в подменю, иначе сравнение
     // ниже было бы сравнением уровня с самим собой.
-    expect(result.steps[2].levels.sub.focusLabel).toBe('PDF');
+    expect(result.steps[3].levels.sub.focusLabel).toBe('PDF');
     // Подменю не тронуто: его отметки те же, а фокус ушёл — и сравниваются именно
     // отметки, потому что фокус уровня меняется оттого, что его получил сосед.
-    expect(marksOf(result.after.levels.sub)).toEqual(marksOf(result.steps[2].levels.sub));
+    expect(marksOf(result.after.levels.sub)).toEqual(marksOf(result.steps[3].levels.sub));
     expect(result.after.levels.sub.activeIndex).toBe(0);
     expect(result.after.calls.order).toEqual([`openSubmenu:${result.before.levels.sub.id}`]);
   });
 
   test('уровень без активного пункта начинает цикл с края', async ({ page }) => {
     const result = await runScenario(page, {
-      set: 'tail',
-      paths: { root: [] },
+      set: 'tree',
+      paths: { root: [], sub: [1] },
       steps: [
-        { command: 'clear' },
+        // Активный пункт в корне: он нужен владельцу, из которого открывается
+        // подменю, и самому себе — фокус после показа остаётся в корне.
         { command: 'press', key: 'ArrowDown' },
-        { command: 'clear' },
-        { command: 'press', key: 'ArrowUp' },
+        { command: 'press', key: 'ArrowDown' },
+        // Показ подменю — так поступает вызывающий код по наведению: уровень
+        // зарегистрирован, отметок в нём нет, и фокус в него не перенесён.
+        { command: 'show-submenu', at: { path: [], index: 1 } },
+        { command: 'press', key: 'ArrowDown', at: { path: [1], index: 0 } },
+        // Повторный показ того же подменю возвращает его в то же состояние: показ
+        // снимает протухшие отметки, и состояние «уровень известен, активного пункта
+        // нет» получается уже не вручную.
+        { command: 'show-submenu', at: { path: [], index: 1 } },
+        { command: 'press', key: 'ArrowUp', at: { path: [1], index: 0 } },
       ],
     });
 
-    // Отметки снял вызывающий код, а уровень движку остался известен: активного
-    // пункта нет, и циклу не от чего отталкиваться.
-    expect(result.steps[0].levels.root.activeIndex).toBe(-1);
-    expect(result.steps[0].levels.root.tabStops).toBe(0);
-    expect(result.steps[0].levels.root.activeMarks).toBe(0);
+    // Отметок нет, а уровень движку известен: циклу не от чего отталкиваться, и он
+    // не молчит.
+    expect(result.steps[2].levels.sub.activeIndex).toBe(-1);
+    expect(result.steps[2].levels.sub.tabStops).toBe(0);
+    expect(result.steps[2].levels.sub.activeMarks).toBe(0);
     // `ArrowDown` без активного идёт с первого, `ArrowUp` — с последнего. Отсчёт от
     // `-1` ушёл бы на минус один элемент списка, и `ArrowUp` встал бы на
     // предпоследний вместо последнего.
-    expect(result.steps[1].levels.root.focusLabel).toBe('Первый');
-    expect(result.steps[1].levels.root.activeIndex).toBe(0);
-    expect(result.steps[2].levels.root.activeIndex).toBe(-1);
-    expect(result.steps[3].levels.root.focusLabel).toBe('Третий');
-    expect(result.after.levels.root.activeIndex).toBe(2);
-    expect(result.after.levels.root.tabStops).toBe(1);
+    expect(result.steps[3].levels.sub.focusLabel).toBe('PDF');
+    expect(result.steps[3].levels.sub.activeIndex).toBe(0);
+    expect(result.steps[4].levels.sub.activeIndex).toBe(-1);
+    expect(result.steps[4].levels.sub.tabStops).toBe(0);
+    expect(result.steps[5].levels.sub.focusLabel).toBe('PNG');
+    expect(result.after.levels.sub.activeIndex).toBe(1);
+    expect(result.after.levels.sub.tabStops).toBe(1);
   });
 
   test('незаведённый уровень подменю: пункт-владелец молчит, а не активируется', async ({ page }) => {
@@ -1393,6 +1512,8 @@ test.describe('переходы между уровнями', () => {
       buildSubmenus: false,
       paths: { root: [] },
       steps: [
+        // Открытое меню выделения не имеет, и до владельца доходят двумя шагами.
+        { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowRight' },
         { command: 'press', key: 'Enter' },
@@ -1405,6 +1526,9 @@ test.describe('переходы между уровнями', () => {
     expect(result.after.levels.root.items[1].hasSubmenu).toBe(true);
     expect(result.after.levels.root.items[1].haspopup).toBe('menu');
     expect(result.after.levels.root.children).toBe(0);
+    // Открытое меню выделения не имеет: без шага вниз «не активировалось» было бы
+    // свойством пустого состояния, а не отсутствующего уровня.
+    expect(result.before.focus.label, 'выделения после открытия нет').toBe(null);
     // Ничего не открыто — показывать нечего, — и ничего не активировано: молчание
     // предпочтительнее активации пункта, чьё подменю так и не появится.
     expect(result.after.calls).toEqual({
@@ -1427,6 +1551,7 @@ test.describe('переходы между уровнями', () => {
       paths: { root: [], sub: [1] },
       steps: [
         { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowRight' },
         { command: 'reset' },
         // Клавиши в уже списанный уровень обязаны остаться нетронутыми.
@@ -1437,7 +1562,7 @@ test.describe('переходы между уровнями', () => {
     });
 
     // Снимок после `reset` — отдельный шаг, иначе «до» и «после» совпали бы.
-    const cleared = result.steps[2].levels.root;
+    const cleared = result.steps[3].levels.root;
     expect(cleared.tabStops).toBe(0);
     expect(cleared.activeMarks).toBe(0);
     expect(cleared.activeIndex).toBe(-1);
@@ -1445,14 +1570,14 @@ test.describe('переходы между уровнями', () => {
       return item.tabindex !== '0' && !item.active;
     })).toBe(true);
     // Подменю сброшено тем же вызовом: снимок не разбирает уровни по одному.
-    expect(result.steps[2].levels.sub.tabStops).toBe(0);
-    expect(result.steps[2].levels.sub.activeIndex).toBe(-1);
+    expect(result.steps[3].levels.sub.tabStops).toBe(0);
+    expect(result.steps[3].levels.sub.activeIndex).toBe(-1);
     // Фокус `reset` не забирает: куда его девать, решает вызывающий код.
-    expect(result.steps[2].focus.label).toBe('PDF');
+    expect(result.steps[3].focus.label).toBe('PDF');
     // Забытый уровень ни на что не отвечает: клавиши не разобраны, события не
     // гасятся, хост не тронут. Иначе движок продолжал бы работать с меню, которое
     // вызывающий код уже списал.
-    expect(result.steps.slice(3).map((step) => step.prevented)).toEqual([false, false, false]);
+    expect(result.steps.slice(4).map((step) => step.prevented)).toEqual([false, false, false]);
     expect(result.after.calls).toEqual({
       closeAll: 0,
       closeCurrentLevel: 0,
@@ -1473,11 +1598,16 @@ test.describe('активация', () => {
     const result = await runScenario(page, {
       set: 'tree',
       paths: { root: [], sub: [1] },
-      // Клавиша уходит в активный пункт, то есть в первый доступный.
-      steps: [{ command: 'press', key: 'Enter' }],
+      // Открытое меню выделения не имеет, поэтому активации предшествует шаг вниз:
+      // без него клавиша не нашла бы активного пункта и молчала бы, а кейс проверял
+      // бы не активацию, а отсутствие выделения.
+      steps: [
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'Enter', at: { path: [], index: 0 } },
+      ],
     });
 
-    expect(result.steps[0].target).toBe('Открыть');
+    expect(result.steps[1].target).toBe('Открыть');
     // `action` отработал ровно один раз, и у того пункта, который активен.
     expect(result.after.actions).toEqual(['Открыть']);
     // Активация идёт кликом по пункту: единственный путь, одинаковый для мыши и
@@ -1490,7 +1620,7 @@ test.describe('активация', () => {
     expect(result.after.calls.order).toEqual(['action:Открыть', 'closeAll']);
     expect(result.after.levels.root.open).toBe(false);
     expect(result.after.levels.root.popoverOpen).toBe(false);
-    expect(result.steps[0].prevented).toBe(true);
+    expect(result.steps[1].prevented).toBe(true);
   });
 
   test('Enter на пункте-владельце открывает подменю и не вызывает action', async ({ page }) => {
@@ -1498,6 +1628,8 @@ test.describe('активация', () => {
       set: 'tree',
       paths: { root: [], sub: [1] },
       steps: [
+        // До владельца — два шага: открытое меню выделения не имеет.
+        { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'Enter' },
       ],
@@ -1517,7 +1649,7 @@ test.describe('активация', () => {
     // Фокус ушёл в подменю, как при `ArrowRight`: подменю открыто и видимо, а без
     // отметок в нём роуминга нет — стрелки двигали бы родителя при открытом
     // ребёнке, и `Enter` лишь переоткрывал бы его.
-    expect(focusTrail(result.steps)).toEqual(['Экспорт', 'PDF']);
+    expect(focusTrail(result.steps)).toEqual(['Открыть', 'Экспорт', 'PDF']);
     expect(result.after.levels.root.activeIndex).toBe(1);
     expect(result.after.levels.sub.activeIndex).toBe(0);
     expect(result.after.levels.sub.tabStops).toBe(1);
@@ -1560,6 +1692,7 @@ test.describe('активация', () => {
         // «Печать» — третий доступный пункт корня, и у него подменю в два уровня.
         { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: ' ' },
       ],
     });
@@ -1571,10 +1704,17 @@ test.describe('активация', () => {
     expect(result.after.calls.openSubmenuIds).toEqual([result.after.levels.sub.id]);
     expect(result.after.levels.sub.open).toBe(true);
     expect(result.after.calls.closeAll).toBe(0);
-    // Фокус перенесён туда же, куда его уводит `Enter` у владельца.
+    // Фокус перенесён туда же, куда его уводит `Enter` у владельца: дорога одна, и
+    // переносом занимается движок, а не показ.
+    expect(focusTrail(result.steps)).toEqual(['Открыть', 'Экспорт', 'Печать', 'Глубже']);
     expect(result.after.focus.label).toBe('Глубже');
+    expect(result.after.levels.sub.activeIndex).toBe(0);
     expect(result.after.levels.sub.tabStops).toBe(1);
     expect(result.after.levels.sub.activeMarks).toBe(1);
+    expect(rovingOf(result.after.levels.sub)).toEqual([
+      ['Глубже', '0', true, true],
+      ['Обычный пункт подменю', '-1', false, false],
+    ]);
   });
 
   test('подменю: [] не делает пункт владельцем: Enter активирует его', async ({ page }) => {
@@ -1582,9 +1722,10 @@ test.describe('активация', () => {
       set: 'tree',
       paths: { root: [], sub: [1] },
       steps: [
-        // Три шага вниз по доступным пунктам: «Открыть», «Экспорт», «Печать»,
+        // Четыре шага вниз по доступным пунктам: «Открыть», «Экспорт», «Печать»,
         // «Пустое подменю». Разделитель между ними и последний «Выход» в счёт не
-        // идут, поэтому шагов именно три.
+        // идут, и открытое меню выделения не имеет, поэтому шагов именно четыре.
+        { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowDown' },
@@ -1594,7 +1735,7 @@ test.describe('активация', () => {
     });
 
     expect(focusTrail(result.steps)).toEqual([
-      'Экспорт', 'Печать', 'Пустое подменю', 'Пустое подменю', 'Пустое подменю',
+      'Открыть', 'Экспорт', 'Печать', 'Пустое подменю', 'Пустое подменю', 'Пустое подменю',
     ]);
     // Пункт с пустым `submenu` не владелец: `ArrowRight` не открыл ничего, а
     // `Enter` активировал его.
@@ -1631,7 +1772,9 @@ test.describe('закрытие', () => {
       paths: { root: [], sub: [2], deep: [2, 0] },
       steps: [
         // «Печать» — третий доступный пункт корня, «Глубже» — первый доступный в
-        // его подменю.
+        // его подменю. Открытое меню выделения не имеет, поэтому до «Печать» три
+        // шага, а в подменю фокус переносит движок сразу после `ArrowRight`.
+        { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowRight' },
@@ -1641,7 +1784,7 @@ test.describe('закрытие', () => {
     });
 
     expect(focusTrail(result.steps)).toEqual([
-      'Экспорт', 'Печать', 'Глубже', 'Самый нижний', 'Глубже',
+      'Открыть', 'Экспорт', 'Печать', 'Глубже', 'Самый нижний', 'Глубже',
     ]);
     // Закрыт ровно один уровень — самый глубокий, где стоял фокус.
     expect(result.after.calls.closeCurrentLevel).toBe(1);
@@ -1669,6 +1812,7 @@ test.describe('закрытие', () => {
       set: 'tree',
       paths: { root: [], sub: [1] },
       steps: [
+        { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowRight' },
         // Возврат в корень: `Escape` обязан увидеть уровень без родителя.
@@ -1701,6 +1845,7 @@ test.describe('закрытие', () => {
       steps: [
         // Фокус в подменю: `Tab` обязан закрыть всю цепочку, а не текущий уровень.
         { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowRight' },
         { command: 'press', key: 'Tab' },
       ],
@@ -1725,7 +1870,7 @@ test.describe('закрытие', () => {
     // закрытие отложено на `animationDuration`, узел с `tabindex="0"` ещё лежал бы
     // в документе, и браузер увёл бы фокус в гаснущее меню вместо
     // элемента-владельца.
-    expect(result.steps[2].prevented).toBe(true);
+    expect(result.steps[3].prevented).toBe(true);
   });
 });
 
@@ -1761,38 +1906,48 @@ test.describe('границы разбора', () => {
     // Роуминг-состояние меню не тронуто. Отметки, а не весь снимок: фокус ушёл на
     // элемент-владельца по условию шага, и его смена — не результат обработки.
     expect(marksOf(result.after.levels.root)).toEqual(marksOf(result.before.levels.root));
-    expect(result.after.levels.root.activeIndex).toBe(0);
-    expect(result.after.levels.root.tabStops).toBe(1);
+    // Свежее меню выделения не имеет, и у него не появилось его от клавиш вне
+    // контейнера: пустой уровень остался пустым.
+    expect(result.after.levels.root.activeIndex).toBe(-1);
+    expect(result.after.levels.root.tabStops).toBe(0);
     // Фокус остался на элементе-владельце и вне меню.
     expect(result.after.focus.onInvoker).toBe(true);
     expect(result.after.focus.inMenu).toBe(false);
     expect(result.after.actions).toEqual([]);
   });
 
-  test('клавиша в прокручиваемый список, а не в пункт, роуминг не двигает', async ({ page }) => {
+  test('клавиша в прокручиваемый список обрабатывается уровнем', async ({ page }) => {
     const result = await runScenario(page, {
       set: 'tree',
       paths: { root: [], sub: [1] },
       steps: [
-        { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'ArrowDown', at: { path: [], index: 0 } },
         { command: 'press-list', key: 'ArrowDown' },
         { command: 'press-list', key: 'End' },
         { command: 'press-list', key: 'Escape' },
       ],
     });
 
-    expect(result.steps[0].focus.label).toBe('Экспорт');
-    // Цель внутри меню, но не под пунктом. Обработчик имеет право искать уровень по
-    // `.vc-menu` — но двигать роуминг по цели без пункта под ней нельзя: у прокрутки
-    // списка своя логика, и стрелка вверх там значит «прокрутить», а не «встать на
-    // предыдущий пункт».
+    expect(result.steps[0].focus.label).toBe('Открыть');
+    // Цель внутри меню, но не под пунктом — прокручиваемый список. Уровень
+    // принадлежит меню целиком, и список не исключение: клавиши на нём разбирает тот
+    // же движок, что и на пункте, иначе фокус в списке был бы слепым пятном, где
+    // стрелки не работают ни при каком состоянии выделения.
     expect(result.steps.map((step) => step.target)).toEqual([
       'Открыть', 'vc-list', 'vc-list', 'vc-list',
     ]);
-    expect(result.steps.map((step) => step.prevented)).toEqual([true, false, false, false]);
-    expect(result.after.levels.root.activeIndex).toBe(1);
-    expect(result.after.levels.root.focusLabel).toBe('Экспорт');
-    expect(result.after.calls.order).toEqual([]);
+    // Разбор состоялся, поэтому и `ArrowDown`, и `End` помечают пункты, а `Escape` не
+    // гасится: у корня нет пункта-владельца, и уйти с него некуда — вместо этого всё
+    // меню закрывается.
+    expect(result.steps.map((step) => step.prevented)).toEqual([true, true, true, true]);
+    expect(result.steps[1].levels.root.activeIndex, 'ArrowDown даёт второй').toBe(1);
+    expect(result.steps[2].levels.root.activeIndex, 'End даёт последний').toBe(5);
+    expect(result.after.levels.root.activeIndex).toBe(5);
+    // `Escape` на корне уводит фокус элементу-владельцу, поэтому отметка последнего
+    // пункта остаётся стоять, а фокуса в меню уже нет.
+    expect(result.after.focus.onInvoker).toBe(true);
+    expect(result.after.focus.inMenu).toBe(false);
+    expect(result.after.calls.order).toEqual(['closeAll', 'focusOwner']);
   });
 
   test('клавиши без ветви не гасятся и состояние не трогают', async ({ page }) => {
@@ -1800,21 +1955,32 @@ test.describe('границы разбора', () => {
       set: 'tree',
       paths: { root: [], sub: [1] },
       steps: [
-        { command: 'press', key: 'PageDown' },
-        { command: 'press', key: 'F1' },
+        { command: 'press', key: 'PageDown', at: { path: [], index: 0 } },
+        { command: 'press', key: 'F1', at: { path: [], index: 0 } },
         // Буква: typeahead не реализуется по спецификации, и буква обязана остаться
         // буквой, а не превратиться в переход по первому совпавшему пункту.
-        { command: 'press', key: 'a' },
-        { command: 'press', key: 'ArrowDown' },
-        { command: 'press', key: 'PageUp' },
+        { command: 'press', key: 'a', at: { path: [], index: 0 } },
+        { command: 'press', key: 'ArrowDown', at: { path: [], index: 0 } },
+        { command: 'press', key: 'PageUp', at: { path: [], index: 0 } },
       ],
     });
 
     expect(result.steps.map((step) => step.prevented)).toEqual([false, false, false, true, false]);
     // Три незнакомые клавиши не сдвинули активный пункт, а `ArrowDown` между ними
     // сдвинул: иначе «не сдвинули» было бы свойством уровня из одного пункта.
-    expect(focusTrail(result.steps)).toEqual(['Открыть', 'Открыть', 'Открыть', 'Экспорт', 'Экспорт']);
-    expect(result.after.levels.root.activeIndex).toBe(1);
+    // Сверяется индекс, а не фокус: клавиши адресованы пункту под выделением, а
+    // фокус открытого меню стоит на элементе уровня и от прихода события в пункт не
+    // меняется.
+    expect(result.steps.map((step) => step.levels.root.activeIndex)).toEqual([
+      -1, -1, -1, 0, 0,
+    ]);
+    // Цель у всех шагов одна и та же — первый доступный пункт, — иначе след сравнивал
+    // бы неразные цели, а не сами клавиши. Последние два шага отличаются только
+    // клавишей, и именно этим объясняется разница индексов.
+    expect(result.steps.map((step) => step.target)).toEqual([
+      'Открыть', 'Открыть', 'Открыть', 'Открыть', 'Открыть',
+    ]);
+    expect(result.after.levels.root.activeIndex).toBe(0);
     expect(result.after.calls.order).toEqual([]);
   });
 

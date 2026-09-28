@@ -61,7 +61,8 @@ import { CURSOR_OFFSET, SAFETY_PADDING } from '../../src/constants.js';
  * @property {number} openCount сколько из них в Top Layer.
  * @property {string | null} focusOwnerId `id` элемента с фокусом либо имя тега.
  * @property {string | null} focusLabel подпись пункта с фокусом.
- * @property {boolean} focusInMenu стоит ли фокус внутри меню.
+ * @property {boolean} focusInMenu стоит ли фокус в дереве уровней меню. Не то же
+ *   самое, что фокус на пункте: у открытого меню он стоит на элементе уровня.
  * @property {string[]} log метки сработавших действий, по порядку.
  * @property {string[]} errors сообщения необработанных ошибок страницы.
  * @property {ProbeContextMenu[]} contextmenu события `contextmenu`, дойденные до
@@ -545,6 +546,9 @@ test.beforeEach(async ({ page }) => {
       const active = document.activeElement;
       const focused = active instanceof Element ? active.closest('.vc-item') : null;
       const focusedLabel = focused === null ? null : focused.querySelector('.vc-label');
+      // Внутри меню — значит в дереве уровней, а не «на пункте»: фокус открытого
+      // меню стоит на самом элементе уровня, и уровень без единого доступного пункта
+      // держит фокус так же.
       return {
         levels,
         openCount: levels.filter((level) => {
@@ -554,7 +558,7 @@ test.beforeEach(async ({ page }) => {
           ? null
           : active.id === '' ? String(active.tagName).toLowerCase() : active.id,
         focusLabel: focusedLabel === null ? null : String(focusedLabel.textContent),
-        focusInMenu: focused !== null,
+        focusInMenu: active instanceof Element && active.closest('.vc-menu') !== null,
         log: log.slice(),
         errors: errors.slice(),
         contextmenu: contextmenu.slice(),
@@ -704,12 +708,20 @@ test.describe('жизненный цикл MyContext', () => {
     await makeMenu(page, 'disabled', 'workspace');
     await rightClick(page, WORKSPACE_POINT);
 
-    // Фокус встал на второй пункт, а не на первый: цикл роуминга пропустил
-    // отключённого владельца. Пока фокус не может встать на отключённого,
-    // `ArrowRight` и не сможет открыть его подменю.
+    // Показ меню выделения не оставляет: фокус стоит на элементе уровня, и отметок
+    // нет ни на ком пункте. Раньше показ сразу отмечал первый доступный, и состояние
+    // «ещё не тронуто» было недостижимо.
     const before = await readMenu(page);
-    expect(before.focusLabel, 'фокус прошёл мимо отключённого').toBe('Пустой');
-    expect(activeLabels(before)).toEqual([`${before.levels[0].id}:Пустой`]);
+    expect(before.focusLabel, 'выделения после показа нет').toBe(null);
+    expect(activeLabels(before), 'отметок роуминга нет').toEqual([]);
+
+    // Цикл роуминга пропускает отключённого владельца: первый шаг вниз встаёт на
+    // второй пункт, а не на первый. Пока фокус не может встать на отключённого,
+    // `ArrowRight` и не сможет открыть его подменю.
+    await page.keyboard.press('ArrowDown');
+    const atEmpty = await readMenu(page);
+    expect(atEmpty.focusLabel, 'фокус прошёл мимо отключённого').toBe('Пустой');
+    expect(activeLabels(atEmpty)).toEqual([`${atEmpty.levels[0].id}:Пустой`]);
 
     // Доступный владелец с непустым подменю — последний в наборе, и до него доходят
     // клавишей: `End` доводит активный пункт до последнего доступного.
@@ -722,6 +734,8 @@ test.describe('жизненный цикл MyContext', () => {
     // Контроль: у доступного владельца подменю открывается, значит механизм
     // исправен и «не открылось» у отключённого — не пустое совпадение.
     expect(afterRight.openCount, 'подменю живого владельца открыто').toBe(2);
+    // Фокус перенёс движок, а не показ: показ подменю фокус не трогает, и перенос
+    // делает `moveTo` сразу после `openSubmenu`.
     expect(afterRight.focusLabel, 'фокус перешёл в подменю').toBe('Под живым');
     expect(afterRight.levels, 'заведены корень и одно подменю').toHaveLength(2);
     expect(openIds(afterRight), 'открыто подменю доступного владельца').toEqual([
@@ -788,12 +802,18 @@ test.describe('жизненный цикл MyContext', () => {
     await rightClick(page, WORKSPACE_POINT);
 
     // Контроль живости клавиатурного пути: тихое действие выполняется, ошибок нет.
+    // Открытое меню выделения не имеет, и `Enter` без активного пункта молчит, — до
+    // «Тихий» доходится шагом вниз.
+    await page.keyboard.press('ArrowDown');
     await page.keyboard.press('Enter');
     const afterQuiet = await readMenu(page);
     expect(afterQuiet.log, 'тихое действие выполнено').toEqual(['тихий']);
     expect(afterQuiet.errors, 'тихое действие не сообщило об ошибке').toEqual([]);
 
     await rightClick(page, WORKSPACE_POINT);
+    // Два шага вниз, а не один: показ не отмечает пунктов, и до «Ломает» от свежего
+    // открытия нужно дойти через «Тихий».
+    await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowDown');
     await page.keyboard.press('Enter');
 
@@ -823,8 +843,13 @@ test.describe('жизненный цикл MyContext', () => {
     expect(after.levels[0].rect.top + after.levels[0].rect.height)
       .toBeLessThanOrEqual(VIEWPORT.height - SAFETY_PADDING);
     // Программное открытие не привязано ни к чему, но фокус всё равно уходит в меню:
-    // иначе `ArrowDown` не работал бы на показанном меню.
-    expect(after.focusLabel).toBe('Первый');
+    // иначе `ArrowDown` не работал бы на показанном меню. Стоит он на элементе
+    // уровня, а не на пункте: выделения у только что открытого меню нет.
+    expect(after.focusInMenu, 'фокус в меню').toBe(true);
+    expect(after.focusLabel, 'выделения после открытия нет').toBe(null);
+    await page.keyboard.press('ArrowDown');
+    const withActive = await readMenu(page);
+    expect(withActive.focusLabel, 'первая стрелка даёт первый пункт').toBe('Первый');
   });
 
   test('open() идемпотентен: повторный вызов не создаёт второе меню в DOM', async ({ page }) => {
@@ -851,7 +876,14 @@ test.describe('жизненный цикл MyContext', () => {
   test('close() скрывает меню и возвращает фокус на элемент-владелец', async ({ page }) => {
     await makeMenu(page, 'flat', 'workspace');
     await rightClick(page, WORKSPACE_POINT);
-    expect((await readMenu(page)).focusLabel, 'фокус в меню после показа').toBe('Первый');
+    // Фокус после показа в меню, но не на пункте: выделения у свежего меню нет, и
+    // стоит он на элементе уровня, пока не нажата первая клавиша навигации.
+    const shown = await readMenu(page);
+    expect(shown.focusInMenu, 'фокус в меню после показа').toBe(true);
+    expect(shown.focusLabel, 'выделения после показа нет').toBe(null);
+    await page.keyboard.press('ArrowDown');
+    const atFirst = await readMenu(page);
+    expect(atFirst.focusLabel, 'фокус на первом пункте').toBe('Первый');
 
     const after = await closeMenu(page);
 
@@ -886,6 +918,9 @@ test.describe('жизненный цикл MyContext', () => {
   test('destroy() удаляет все элементы меню из DOM', async ({ page }) => {
     await makeMenu(page, 'nested', 'workspace');
     await rightClick(page, WORKSPACE_POINT);
+    // Показ не отмечает пункты, и `ArrowRight` без активного пункта молчит: до
+    // владельца «Ветка» доходится шагом вниз.
+    await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowRight');
 
     // Два уровня: снос только корневого оставил бы подменю висеть, и кейс на
@@ -904,6 +939,7 @@ test.describe('жизненный цикл MyContext', () => {
   test('destroy() идемпотентен: повторный вызов не бросает', async ({ page }) => {
     await makeMenu(page, 'nested', 'workspace');
     await rightClick(page, WORKSPACE_POINT);
+    await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowRight');
     const first = await destroyMenu(page);
     expect(first.levels).toHaveLength(0);
@@ -931,12 +967,13 @@ test.describe('жизненный цикл MyContext', () => {
     // Правило владельца: его собственное действие не вызывается. Журнал пуст не
     // потому, что обработчика нет, — вторая половина кейса это доказывает.
     expect(afterOwner.log, 'action владельца не вызван').toEqual([]);
-    // Фокус ушёл в подменю: показанный уровень обязан быть отдан движку, а
-    // `focusFirst` — единственная его регистрация, и она же переносит фокус.
-    expect(afterOwner.focusLabel, 'фокус в подменю').toBe('Под владельцем');
+    // Фокус остался в родительском уровне, на самом владельце: показ подменю мышью
+    // фокус не переносит (спека 6.2), и переносом занимается только движок.
+    expect(afterOwner.focusLabel, 'фокус на владельце в родительском уровне').toBe('Владелец');
     expect(afterOwner.focusInMenu, 'фокус не покинул меню').toBe(true);
 
-    await page.keyboard.press('Escape');
+    // `Escape` между шагами больше не нужен и был бы неверным: фокус в корневом
+    // уровне, и `Escape` закрыл бы всё меню, а не подменю.
     await itemByLabel(page, 'Лист').click();
     const afterLeaf = await readMenu(page);
     // Пункт без подменю активируется как прежде и закрывает меню.
@@ -1066,7 +1103,9 @@ test.describe('жизненный цикл MyContext', () => {
     const after = await openMenu(page, WORKSPACE_POINT.x, WORKSPACE_POINT.y);
 
     expect(after.openCount, 'меню открыто').toBe(1);
-    expect(after.focusLabel, 'фокус в меню').toBe('Первый');
+    // Фокус в меню, но на элементе уровня: выделения у только что открытого меню нет.
+    expect(after.focusInMenu, 'фокус в меню').toBe(true);
+    expect(after.focusLabel, 'выделения после открытия нет').toBe(null);
   });
 
   test('attach: повторный attach переносит привязку на новый контейнер', async ({ page }) => {
@@ -1140,14 +1179,21 @@ test.describe('жизненный цикл MyContext', () => {
     await rightClick(page, WORKSPACE_POINT);
     const reopened = await readMenu(page);
     // `close()` сбросил реестр движка, и второй `open()` обязан отдать уровень
-    // заново: без `focusFirst` меню было бы открытым, но мёртвым для клавиатуры.
+    // заново: без `registerLevel` меню было бы открытым, но мёртвым для клавиатуры.
+    // Фокус после показа стоит на элементе уровня, а не на пункте: выделения у
+    // только что открытого меню нет.
     expect(reopened.openCount, 'меню снова открыто').toBe(1);
-    expect(reopened.focusLabel, 'фокус снова на первом пункте').toBe('Первый');
+    expect(reopened.focusInMenu, 'фокус снова в меню').toBe(true);
+    expect(reopened.focusLabel, 'выделения после открытия нет').toBe(null);
 
     await page.keyboard.press('ArrowDown');
     const afterDown = await readMenu(page);
-    expect(afterDown.focusLabel, 'стрелка двигает активный пункт').toBe('Второй');
-    expect(activeLabels(afterDown)).toEqual([`${afterDown.levels[0].id}:Второй`]);
+    expect(afterDown.focusLabel, 'стрелка даёт первый пункт').toBe('Первый');
+    expect(activeLabels(afterDown)).toEqual([`${afterDown.levels[0].id}:Первый`]);
+    await page.keyboard.press('ArrowDown');
+    const afterSecond = await readMenu(page);
+    expect(afterSecond.focusLabel, 'стрелка двигает активный пункт').toBe('Второй');
+    expect(activeLabels(afterSecond)).toEqual([`${afterSecond.levels[0].id}:Второй`]);
   });
 
   test('attach: пункт с submenu: [] не владелец: ни шеврона, ни aria-owns, Enter активирует его', async ({ page }) => {

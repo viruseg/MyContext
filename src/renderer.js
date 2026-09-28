@@ -207,10 +207,10 @@ function renderSeparator() {
 /**
  * Строит `menuitem` с тремя колонками сетки: слот иконки, лейбл и шеврон.
  *
- * `tabindex="-1"` у всех пунктов: ровно один элемент уровня получает `0`, и
- * делает это движок роуминга после показа меню. `data-active` не ставится
- * здесь по той же причине — активным становится тот пункт, на который повели
- * мышью или который получил фокус.
+ * `tabindex="-1"` у всех пунктов: ровно один пункт уровня получает `0`, и делает
+ * это движок роуминга после показа меню. `data-active` не ставится здесь по той
+ * же причине — активным становится тот пункт, на который повели мышью или который
+ * получил фокус.
  *
  * @param {MenuItem} item
  * @param {RenderContext} context
@@ -308,6 +308,10 @@ export function renderLevel(items, context) {
   element.setAttribute('popover', 'manual');
   element.setAttribute('role', 'menu');
   element.id = context.menuId;
+  // Элемент уровня держит фокус, когда активного пункта нет, а без `tabindex`
+  // сфокусировать его нельзя: без этого состояние «уровень отвечает на клавиши,
+  // а выделения нет» было бы недостижимо.
+  element.tabIndex = -1;
   if (context.label !== undefined) {
     element.setAttribute('aria-label', context.label);
   }
