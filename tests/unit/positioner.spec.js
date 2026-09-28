@@ -245,9 +245,7 @@ test.describe('calculateSubmenuPosition', () => {
           });
           expectContainedAxis(left, menuWidth, VIEWPORT_WIDTH, label);
           expectContainedAxis(top, menuHeight, VIEWPORT_HEIGHT, label);
-          // Ожидание выведено из правила спецификации, а не из реализации:
-          // flippedX означает, что правый кандидат не поместился. Проверка
-          // вписывания здесь продублирована намеренно — иначе ожидание,
+          // Проверка вписывания продублирована намеренно: без неё ожидание,
           // посчитанное тем же предикатом, было бы тождественным.
           const preferred = anchorRect.right + SUBMENU_OFFSET;
           const rightSideFits = preferred >= PADDING && preferred + menuWidth + PADDING <= VIEWPORT_WIDTH;
