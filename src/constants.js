@@ -80,6 +80,14 @@ export const DEFAULT_ITEM_HEIGHT = 28;
 export const SCROLL_ZONE_HEIGHT = 16;
 
 /**
+ * Скорость автопрокрутки под наведением на зону, px в секунду.
+ *
+ * Публичной опции нет: скорость обязана быть одинаковой у всех меню библиотеки,
+ * иначе два рядом стоящих меню прокручивались бы разными темпами.
+ */
+export const SCROLL_SPEED_PX_PER_SEC = 240;
+
+/**
  * Значение CSS-переменной `--vc-icon-size` по умолчанию, px.
  */
 export const DEFAULT_ICON_SIZE = 16;
