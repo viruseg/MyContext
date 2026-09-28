@@ -153,18 +153,13 @@ const REOPEN_POINT = { x: 520, y: 460 };
  */
 const CLOSINGS = [
   {
-    title: 'Escape вне меню',
+    title: 'Escape с фокусом на гаснущем уровне',
     apply: async (page) => {
-      // Фокус уводится с гаснущего уровня на элемент страницы: `Escape` внутри
-      // дерева разбирает движок по своему реестру, а в окне закрытия реестр пуст, и
-      // глобальный обработчик цель внутри меню пропускает. Проверяется путь
-      // `Escape` снаружи меню — тот же, что и в кейсе про возврат фокуса.
-      await page.evaluate(() => {
-        const outside = document.getElementById('outside');
-        if (outside instanceof HTMLElement) {
-          outside.focus();
-        }
-      });
+      // Фокус на уровне — так и оставлен: после первого `open()` он стоит на
+      // элементе корневого уровня, и второй вызов фокус не трогает. В окне закрытия
+      // реестр движка пуст, разбирать клавишу на уровне некому, и `Escape` обязан
+      // дойти до глобального обработчика с этой целью — иначе висящий показ
+      // воскресит меню, и кейс проверял бы не отмену, а её отсутствие.
       await page.keyboard.press('Escape');
     },
   },
@@ -1088,8 +1083,12 @@ test.describe('жизненный цикл MyContext', () => {
   test('выходная анимация отиграна до показа в новой точке', async ({ page }) => {
     // `reduce` снят: под ним отложенность пропускается целиком, состояния «меню
     // гаснет в Top Layer» не существует, и кейс прошёл бы на показе без всякого
-    // выхода — то есть проверял бы не анимацию, а её отсутствие.
+    // выхода — то есть проверял бы не анимацию, а её отсутствие. Часы заморожены по
+    // второй причине: окно `data-vc-closing` живёт `animationDuration`, а на живой
+    // машине два круговых похода CDP между `open()` и чтением снимка способны его
+    // пережить, и кейс мигал бы между прогонами.
     await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.clock.install();
     await makeMenu(page, 'flat', null);
     const first = await openMenu(page, WORKSPACE_POINT.x, WORKSPACE_POINT.y);
     expect(first.levels[0].closing, 'только что открытое меню не гаснет').toBe(false);
@@ -1106,12 +1105,12 @@ test.describe('жизненный цикл MyContext', () => {
     // Выход идёт на месте, в Top Layer: `hidePopover` ещё не зван, но отметка
     // закрытия уже стоит, и `pointer-events` сняты. Показ отложен ровно на
     // `animationDuration` — столько же, сколько идёт выход, поэтому кадра без меню
-    // не бывает.
+    // не бывает. Часы стоят, значит окно не кончится само между строками кейса.
     const fading = await readMenu(page);
     expect(fading.levels[0].closing, 'уровень гаснет на месте').toBe(true);
     expect(fading.openCount, 'уровень ещё в Top Layer').toBe(1);
 
-    await page.waitForTimeout(DEFAULT_ANIMATION_DURATION * 2);
+    await page.clock.fastForward(DEFAULT_ANIMATION_DURATION * 2);
 
     const after = await readMenu(page);
     // Показ снял отметку закрытия последним шагом, иначе вход не оыграл бы.
@@ -1706,17 +1705,40 @@ test.describe('жизненный цикл MyContext', () => {
 
   test('второй правый клик в окне закрытия начинает цикл заново', async ({ page }) => {
     // Настоящие часы и снятый `reduce` — по той же причине, что и в кейсе про
-    // способы закрытия.
+    // способы закрытия. Замороженные часы поверх: кейс проверяет, когда именно
+    // гашение и показ встанут в очередь, и живые 130 мс мигали бы между
+    // прогонами.
     await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.clock.install();
     await makeMenu(page, 'flat', 'workspace');
     await openMenu(page, 200, 150);
     const inWindow = await openMenu(page, 400, 300);
     // «Открытое» меню в окне — это и висящий показ, а не только непустая цепочка:
     // без этого третье нажатие сочло бы меню закрытым и прошло бы мимо цикла.
     expect(inWindow.levels[0].closing, 'второй вызов оставил меню гаснущим').toBe(true);
-    await openMenu(page, 600, 450);
 
-    await page.waitForTimeout(DEFAULT_ANIMATION_DURATION * 3);
+    // Третий вызов приходит, когда выход от второго ещё не доигран: до сокрытия
+    // осталось меньше, чем длительность анимации.
+    await page.clock.fastForward(DEFAULT_ANIMATION_DURATION - 10);
+    const restarted = await openMenu(page, 600, 450);
+
+    // Третий вызов пустил цикл заново, а не показал меню немедленно поверх
+    // гаснущего. Без этой проверки кейс прошёл бы и на том порядке, который спека
+    // запрещает: итоговое состояние у обоих вариантов одно и то же — меню в третьей
+    // точке, — и отличаются они только тем, было ли меню в промежутке.
+    expect(restarted.levels[0].closing, 'третий вызов снова пустил цикл').toBe(true);
+    expect(restarted.openCount, 'уровень гаснет, а не показан').toBe(1);
+
+    // Гашение началось заново, то есть оба отложенных действия отсчитывают одно и
+    // то же `animationDuration` от третьего вызова. Без перезапуска задача сокрытия
+    // осталась бы от второго вызова и ушла раньше задачи показа, а между ними был бы
+    // кадр без меню — тот самый, ради которого порядок постановки и выбран.
+    await page.clock.fastForward(DEFAULT_ANIMATION_DURATION - 20);
+    const during = await readMenu(page);
+    expect(during.openCount, 'между гашением и показом меню остаётся в Top Layer').toBe(1);
+    expect(during.levels[0].closing, 'меню ещё гаснет').toBe(true);
+
+    await page.clock.fastForward(DEFAULT_ANIMATION_DURATION * 3);
 
     const after = await readMenu(page);
     // Показан ровно один уровень и стоит он в третьей точке: третий вызов отменил
