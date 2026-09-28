@@ -92,13 +92,12 @@ const FRAME_STEP_PX = STAND_SPEED_PX_PER_SEC * FRAME_STEP_MS / 1000;
 /**
  * Сверяет прочитанный `scrollTop` числом с допуском, а не ровно.
  *
- * Значение приходит из движка, и то, как именно он представляет результат
- * записи, — его дело, а не поведение контроллера: под `scale(0.96)` firefox
- * округляет `scrollTop` до своей сетки и отдаёт `5.2166…` вместо `5` (замерено
- * пробой). Допуск виден только тем величинам, которые на порядок больше него,
- * поэтому ошибку расчёта он по-прежнему ловит, а округление представления
- * перестаёт быть ошибкой расчёта. Собой стенда без трансформа читается целым
- * числом во всех трёх движках, так что на практике допуск ничего не ослабляет.
+ * Допуск терпит ошибку чтения и ничего кроме неё: `toBeCloseTo(expected, 2)`
+ * прощает 0.005 px, круглые числа стенда он не трогает, а ошибку расчёта шага
+ * по-прежнему ловит. Масштаб сюда не входит: под `scale(0.96)` firefox округляет
+ * `scrollTop` до своей сетки и отдаёт `5.2166…` вместо `5` (замерено пробой), и
+ * такой величине 0.005 недоступны. Поэтому масштабированный стенд меряется целыми
+ * метриками раскладки и признаками, а сдвиг под ним `expectPx` не сверяет вовсе.
  *
  * @param {number} actual прочитанная величина, px.
  * @param {number} expected ожидаемая величина, px.
@@ -801,9 +800,9 @@ test('цикл встаёт у упора', async ({ page }) => {
   expect(result.down).toBe(true);
 });
 
-test('цикл встаёт, когда список не двигается', async ({ page }) => {
+test('цикл не заводится, когда списку некуда двигаться', async ({ page }) => {
   await mountStand(page, { viewportHeight: 100, contentHeight: 100, speed: STAND_SPEED_PX_PER_SEC });
-  const withoutOverflow = await page.evaluate(() => {
+  const result = await page.evaluate(() => {
     const scope = /** @type {{ __stand: ScrollStand }} */ (/** @type {unknown} */ (globalThis));
     const stand = scope.__stand;
     stand.zones.refresh();
@@ -816,39 +815,11 @@ test('цикл встаёт, когда список не двигается', a
   });
 
   // Контроль: прокручивать некуда, иначе отсутствие цикла было бы дефектом.
-  expect(withoutOverflow.overflow).toBe(false);
+  expect(result.overflow).toBe(false);
   // Список некуда вести, поэтому цикл не заводится вовсе, а не встаёт на первом же
   // кадре: пустой цикл ещё и мигал бы зоной.
-  expect(withoutOverflow.pending).toBe(false);
-  expect(withoutOverflow.scrollTop).toBe(0);
-
-  // Второй стенд с настоящим перебором: цикл, дошедший до упора, следующего
-  // кадра не ставит. Стенд нужен второй, а не перестроенный: высота
-  // наполнителя задаётся при сборке, и на стенде без перебора её не отрастить.
-  await mountStand(page, STAND);
-  const atStop = await page.evaluate((frames) => {
-    const scope = /** @type {{ __stand: ScrollStand }} */ (/** @type {unknown} */ (globalThis));
-    const stand = scope.__stand;
-    stand.zones.refresh();
-    stand.down.dispatchEvent(new PointerEvent('pointerenter'));
-    let time = frames.first;
-    let played = 0;
-    while (stand.pending() && played < frames.limit) {
-      time += frames.step;
-      stand.flush(time);
-      played += 1;
-    }
-    return {
-      played,
-      limit: frames.limit,
-      atBottom: stand.list.scrollTop === stand.list.scrollHeight - stand.list.clientHeight,
-      pending: stand.pending(),
-    };
-  }, { first: FIRST_FRAME_MS, step: 500, limit: 40 });
-
-  expect(atStop.played).toBeLessThan(atStop.limit);
-  expect(atStop.atBottom).toBe(true);
-  expect(atStop.pending).toBe(false);
+  expect(result.pending).toBe(false);
+  expect(result.scrollTop).toBe(0);
 });
 
 test('уход курсора останавливает цикл', async ({ page }) => {

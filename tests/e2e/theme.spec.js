@@ -862,23 +862,24 @@ async function readScrollZones(page) {
 }
 
 /**
- * Ставит или снимает `data-vc-scrollable` на показанном уровне руками.
+ * Снимает `data-vc-scrollable` с показанного уровня руками.
  *
- * Атрибут — решение слоя, и кейс подменяет его только потому, что слоя с этим
- * решением ещё нет: проверяется таблица стилей, а не слой.
+ * Проверяется таблица стилей, а не слой. Признак на показе ставит слой, и наличие
+ * его читается без посторонней помощи, а вот состояние без признака иначе не
+ * наступило бы: снять его некому, и зоны на коротком списке не показать было бы
+ * нечем.
  *
  * @param {import('@playwright/test').Page} page
- * @param {boolean} on
  * @returns {Promise<void>}
  */
-async function setLevelScrollable(page, on) {
-  await page.evaluate((value) => {
+async function clearLevelScrollable(page) {
+  await page.evaluate(() => {
     const level = document.querySelector('.vc-menu:popover-open');
     if (level === null) {
       throw new Error('живое меню не показано');
     }
-    level.toggleAttribute('data-vc-scrollable', value);
-  }, on);
+    level.removeAttribute('data-vc-scrollable');
+  });
 }
 
 test.beforeEach(async ({ page }) => {
@@ -1142,19 +1143,11 @@ test.describe('прокручиваемый список', () => {
     }));
     await openLiveMenu(page, { x: 200, y: 200 });
 
-    await setLevelScrollable(page, false);
-    const hidden = await readScrollZones(page);
-    // Нулевая высота — это ещё и «меню не выросло»: зона в `display: none` не
-    // занимает места в колонке уровня.
-    expect(hidden.up.display, 'верхняя зона скрыта без атрибута').toBe('none');
-    expect(hidden.up.box, 'верхняя зона не занимает место').toBe(0);
-    expect(hidden.down.display, 'нижняя зона скрыта без атрибута').toBe('none');
-    expect(hidden.down.box, 'нижняя зона не занимает место').toBe(0);
-
+    // Показ — состояние слоя, а не рук кейса: признак поставил слой на живом
+    // уровне, и решение о прокручиваемости проверяется в его собственном кейсе.
+    const shown = await readScrollZones(page);
     // Обе зоны, а не одна: показ задаёт одно правило, и список с упором только
     // вниз не должен терять верхнюю зону.
-    await setLevelScrollable(page, true);
-    const shown = await readScrollZones(page);
     expect(shown.up.display, 'верхняя зона показана по атрибуту').toBe('flex');
     expect(shown.down.display, 'нижняя зона показана по атрибуту').toBe('flex');
     // Рамка меряется отдельно от вычисленной высоты: токен мог бы разрешиться, а
@@ -1167,6 +1160,17 @@ test.describe('прокручиваемый список', () => {
       .toBe(SCROLL_ZONE_HEIGHT);
     expect(shown.down.box, `нижняя зона занимает ${SCROLL_ZONE_HEIGHT}px`)
       .toBe(SCROLL_ZONE_HEIGHT);
+
+    // Единственное, что кейс делает руками, — снятие признака: показать его иначе
+    // нечего, слой уже показал.
+    await clearLevelScrollable(page);
+    const hidden = await readScrollZones(page);
+    // Нулевая высота — это ещё и «меню не выросло»: зона в `display: none` не
+    // занимает места в колонке уровня.
+    expect(hidden.up.display, 'верхняя зона скрыта без атрибута').toBe('none');
+    expect(hidden.up.box, 'верхняя зона не занимает место').toBe(0);
+    expect(hidden.down.display, 'нижняя зона скрыта без атрибута').toBe('none');
+    expect(hidden.down.box, 'нижняя зона не занимает место').toBe(0);
   });
 });
 
