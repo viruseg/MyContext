@@ -1594,6 +1594,48 @@ test.describe('переходы между уровнями', () => {
 });
 
 test.describe('активация', () => {
+  test('клавиша активации без активного пункта не делает ничего', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'tree',
+      paths: { root: [], sub: [1] },
+      // Свежее меню — и есть то состояние без активного пункта, о котором контракт:
+      // браузерным правилом оно достигается само, стоит только что открытым меню.
+      steps: [
+        { command: 'press', key: 'Enter' },
+        { command: 'press', key: ' ' },
+      ],
+    });
+
+    // Клавиша разобрана и потому погашена, но работать ей не над чем: она берёт
+    // активный пункт, а активного пункта нет. Погашение и пустота — разные вещи, и
+    // обе проверяются: неразобранная клавиша дошла бы до браузера и прокрутила бы
+    // страницу под меню.
+    expect(result.steps.map((step) => step.prevented)).toEqual([true, true]);
+    // Ни действия, ни клика: активация по сфокусированному узлу означала бы, что
+    // действие доступно там, где выделения нет, — ровно в том состоянии, которое
+    // новое открытие и уход курсора создают намеренно.
+    expect(result.after.actions).toEqual([]);
+    expect(result.after.clicks).toEqual([]);
+    // И состояние уровня не изменилось ни на одну долю: не отмечен новый пункт, не
+    // появился `tabindex="0"`, не сдвинулся `activeIndex`. Сравнение всего снимка, а
+    // не отдельных полей: любое изменение состояния роняет кейс.
+    expect(result.after.levels.root.activeIndex).toBe(-1);
+    expect(result.after.levels.root.activeMarks).toBe(0);
+    expect(result.after.levels.root.tabStops).toBe(0);
+    expect(result.after.levels.root).toEqual(result.before.levels.root);
+    // Подменю не открыто: у первого пункта корня владельца нет, а активного пункта,
+    // чьим подменю можно было бы пойти дальше, нет вовсе.
+    expect(result.after.levels.sub.open).toBe(false);
+    expect(result.after.calls).toEqual({
+      closeAll: 0,
+      closeCurrentLevel: 0,
+      openSubmenu: 0,
+      openSubmenuIds: [],
+      focusOwner: 0,
+      order: [],
+    });
+  });
+
   test('Enter вызывает action активного пункта и закрывает меню', async ({ page }) => {
     const result = await runScenario(page, {
       set: 'tree',
