@@ -87,6 +87,9 @@ import { CLOSE_GRACE_MS, OPEN_GRACE_MS, SAFETY_PADDING, SUBMENU_OFFSET } from '.
  * @property {() => void} close
  * @property {() => Snapshot} read
  * @property {(label: string) => MenuRect | null} rectOf
+ * @property {(selector: string) => MenuRect | null} rectOfNode рамка первого узла,
+ *   подходящего под селектор. Нужна для строк без подписи: разделителя, у которого
+ *   её нет вовсе, и наводить приходится по прямоугольнику, а не по имени.
  * @property {(ownerLabel: string) => string | null} submenuIdOf
  * @property {(disabled: boolean) => OwnerProbe} ownersOf
  */
@@ -232,6 +235,27 @@ async function centreOf(page, label) {
  */
 async function hoverItem(page, label) {
   await moveTo(page, await centreOf(page, label));
+}
+
+/**
+ * Наводит курсор на узел по селектору, а не по подписи. Для строк, у которых
+ * подписи нет: разделителя, например, — и потому, что сам пункт может быть
+ * непригоден для `locator`-наведения, как отключённый.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {string} selector
+ * @returns {Promise<void>}
+ */
+async function hoverNode(page, selector) {
+  const rect = await page.evaluate((name) => {
+    const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+    return scope.__mc.rectOfNode(name);
+  }, selector);
+  expect(rect, `узел ${selector} есть в разметке`).not.toBeNull();
+  const found = /** @type {MenuRect} */ (rect);
+  // Середина по вертикали у разделителя в один пиксель: промах на полпикселя ушёл бы
+  // мимо него на соседний пункт, и кейс проверял бы не то.
+  await page.mouse.move(found.left + found.width / 2, found.top + found.height / 2);
 }
 
 /**
@@ -419,6 +443,15 @@ test.beforeEach(async ({ page }) => {
           ],
         },
       ],
+      // Обе невыбираемые строки на одном уровне: разделитель и отключённый пункт.
+      // В `tree` отключённый пункт есть, а разделителя нет, и наоборот; кейс о
+      // невыбираемых строках ловит обе границы разом, поэтому набор свой.
+      unselectable: [
+        { label: 'Живой' },
+        { label: 'Глухой', disabled: true },
+        { type: 'separator' },
+        { label: 'Второй' },
+      ],
     };
 
     /** @type {string[]} */
@@ -537,6 +570,21 @@ test.beforeEach(async ({ page }) => {
         }
         return null;
       },
+      rectOfNode(selector) {
+        const element = document.querySelector(selector);
+        if (element === null) {
+          return null;
+        }
+        const rect = element.getBoundingClientRect();
+        return {
+          left: rect.left,
+          top: rect.top,
+          width: rect.width,
+          height: rect.height,
+          right: rect.right,
+          bottom: rect.bottom,
+        };
+      },
       submenuIdOf(ownerLabel) {
         for (const element of document.querySelectorAll('.vc-item')) {
           const label = element.querySelector('.vc-label');
@@ -608,7 +656,7 @@ test.describe('показ подменю', () => {
     expect(isOpen(after, ownerId), 'подменю показано').toBe(true);
     expect(after.openCount, 'открыты корень и подменю').toBe(2);
     expect(expandedLabels(after), 'владелец отмечен развёрнутым').toEqual(['Экспорт']);
-    // Показ подменю мышью фокус в подменю не уводит (спека 6.2), и фокус стоит на
+    // Показ подменю мышью фокус в подменю не уводит (спека 3.2), и фокус стоит на
     // владельце — том самом пункте, по которому пришёл курсор: наведение выделяет
     // пункт, и отметка с фокусом неразлучны. Реестр движка при этом пополнен, иначе
     // открытое мышью подменю было бы мёртво с клавиатуры — это проверяет кейс про
@@ -644,6 +692,38 @@ test.describe('показ подменю', () => {
     const afterKey = await readMenu(page);
     expect(activeLabels(afterKey), 'стрелка увела выделение с пункта под курсором').toEqual(['Заметки']);
     expect(afterKey.focusLabel).toBe('Заметки');
+  });
+
+  test('курсор над невыбираемой строкой выделение не меняет и не сбрасывает', async ({ page }) => {
+    await makeMenu(page, 'unselectable', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+
+    // Живой пункт под курсором: выделение есть, и дальше проверяется, что две
+    // невыбираемые строки его не сдвигают.
+    await hoverItem(page, 'Второй');
+    const marked = await readMenu(page);
+    expect(activeLabels(marked), 'отмечен пункт под курсором').toEqual(['Второй']);
+    expect(marked.focusLabel, 'фокус на пункте под курсором').toBe('Второй');
+
+    // Отключённый пункт: вне цикла роуминга, отметки на нём быть не может. Сбрасывать
+    // тоже нечего, а выделение по требованию полного сброса снимается уходом курсора
+    // с дерева меню, а не наведением внутри него.
+    await hoverItem(page, 'Глухой');
+    const overDisabled = await readMenu(page);
+    expect(activeLabels(overDisabled), 'отключённый пункт выделение не сменил').toEqual(['Второй']);
+    expect(overDisabled.focusLabel, 'фокус остался на живом пункте').toBe('Второй');
+
+    // Разделитель: высота в один пиксель, и курсор пересекает его на каждом
+    // проходе мимо. Мигание здесь было бы постоянным, поэтому выделение и фокус
+    // обязаны остаться там же.
+    await hoverNode(page, '.vc-separator');
+    const overSeparator = await readMenu(page);
+    expect(activeLabels(overSeparator), 'разделитель выделение не сменил').toEqual(['Второй']);
+    expect(overSeparator.focusLabel, 'фокус остался на живом пункте').toBe('Второй');
+    // Контроль: живой пункт после невыбираемых строк выделение всё-таки сдвигает.
+    // Без него тест проходил бы и на уровне, где выделение не двигает ничто.
+    await hoverItem(page, 'Живой');
+    expect(activeLabels(await readMenu(page)), 'живой пункт выделение сдвинул').toEqual(['Живой']);
   });
 
   test('уход курсора до истечения задержки не открывает подменю', async ({ page }) => {
@@ -1214,7 +1294,7 @@ test.describe('показ подменю', () => {
 
     const after = await readMenu(page);
     expect(after.openCount, 'открыты корень и три подменю').toBe(4);
-    // Показ по наведению фокус в подменю не переносит ни на один уровень (спека 6.2):
+    // Показ по наведению фокус в подменю не переносит ни на один уровень (спека 3.2):
     // фокус стоит на владельце последнего показанного подменю, то есть в самой
     // глубокой точке, до которой дошёл курсор. Подписью пункта под фокусом кейс не
     // обзаведён, а геометрия ниже проверяется по каждому уровню отдельно.

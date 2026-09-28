@@ -607,6 +607,33 @@ test.describe('глобальные слушатели', () => {
     expect(after.openCount, 'подменю закрылось, корень остался').toBe(1);
   });
 
+  test('уход курсора не отбирает фокус, оставленный на странице', async ({ page }) => {
+    await makeMenu(page, 'first', 'chain', 'surface');
+    await openAt(page, 'first', SURFACE_POINT);
+    await hoverItem(page, 'Заметки');
+    const marked = await readMenu(page);
+    expect(marked.activeLabels, 'выделение в меню есть').toEqual(['Заметки']);
+
+    // Клик по контейнеру не закрывает меню, а браузер ставит фокус на сам контейнер:
+    // пользователь ушёл от меню, оставив фокус на том, что нажал. Пункт помечен, и
+    // меню открыто — состояние, в котором увод курсора обязан сбросить выделение и не
+    // должен трогать фокус.
+    await page.mouse.click(30, 70);
+    const onSurface = await readMenu(page);
+    expect(onSurface.openCount, 'меню осталось открытым').toBe(1);
+    expect(onSurface.focusOwnerId, 'фокус на контейнере').toBe('surface');
+
+    // Курсор двигается по контейнеру, то есть уходит с дерева меню. Выделение
+    // сбрасывается — оно принадлежит меню, — а фокус остаётся на контейнере: увод
+    // курсора не отменяет того, куда фокус поставил пользователь, и на каждом
+    // движении мыши фокус не должен выдёргиваться обратно в меню.
+    await page.mouse.move(300, 240);
+    const after = await readMenu(page);
+    expect(after.activeLabels, 'выделение сброшено').toEqual([]);
+    expect(after.focusOwnerId, 'фокус остался на контейнере').toBe('surface');
+    expect(after.errors, 'страница без ошибок').toEqual([]);
+  });
+
   test('уход курсора с дерева меню сбрасывает выделение', async ({ page }) => {
     await makeMenu(page, 'first', 'chain', 'surface');
     await openAt(page, 'first', SURFACE_POINT);

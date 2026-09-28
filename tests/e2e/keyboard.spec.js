@@ -1323,17 +1323,25 @@ test.describe('роуминг-фокус', () => {
       steps: [
         { command: 'hover', at: { path: [], index: 1 } },
         { command: 'press', key: 'ArrowRight' },
-        { command: 'hover', at: { path: [1], index: 0 } },
+        // Второй пункт подменю, а не первый: первый помечает `ArrowRight`, и
+        // наведение на него вышло бы no-op, а отметку в подменю поставил бы шаг
+        // клавиатуры, а не мышь.
+        { command: 'hover', at: { path: [1], index: 1 } },
         { command: 'leave-tree' },
       ],
     });
 
-    // Показ подменю отметку владельца не снимает, а наведение в подменю ставит свою:
-    // перед уходом курсора отмечены оба уровня, и сброс обязан снять обе отметки.
-    // Снимок `steps[2]` снят после наведения, то есть до ухода: у шага своя отметка
-    // снимается уже после того, как он отработал.
+    // Показ подменю отметку владельца не снимает, а наведение в подменю ставит свою
+    // поверх отметки, оставшейся от `ArrowRight`: перед уходом курсора отмечены оба
+    // уровня, и сброс обязан снять обе отметки. Снимок `steps[2]` снят после
+    // наведения, то есть до ухода: у шага своя отметка снимается уже после того,
+    // как он отработал.
     expect(result.steps[2].levels.root.activeMarks, 'до сброса корень отмечен').toBe(1);
+    expect(result.steps[2].levels.root.activeIndex, 'корень отмечен на владельце').toBe(1);
     expect(result.steps[2].levels.sub.activeMarks, 'до сброса подменю отмечено').toBe(1);
+    // `focusLabel` у корня тут `null`, и это верно: фокус в подменю, и подписью пункта
+    // корень не обзаведён. Отметку корня показывает `activeIndex`.
+    expect(result.steps[2].levels.sub.focusLabel, 'подменю отмечено наведением').toBe('PNG');
     expect(result.after.levels.root.activeMarks).toBe(0);
     expect(result.after.levels.root.activeIndex).toBe(-1);
     expect(result.after.levels.sub.activeMarks).toBe(0);
@@ -1343,6 +1351,39 @@ test.describe('роуминг-фокус', () => {
     // подменю фокус не переносит, и возвращать его туда незачем.
     expect(result.after.focus.label, 'фокус не на пункте').toBe(null);
     expect(result.after.focus.inMenu).toBe(true);
+  });
+
+  test('наведение на уже отмеченного владельца возвращает ему фокус', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'tree',
+      paths: { root: [], sub: [1] },
+      steps: [
+        { command: 'hover', at: { path: [], index: 1 } },
+        { command: 'press', key: 'ArrowRight' },
+        // Наведение на уже отмеченный пункт подменю: атрибут заново не пишется, но и
+        // фокус никуда не уходит — он и так на пункте.
+        { command: 'hover', at: { path: [1], index: 0 } },
+        // Возврат курсора к владельцу. Отметка владельца всё это время стояла:
+        // снимается она только внутри своего уровня, а подменю — другой уровень.
+        { command: 'hover', at: { path: [], index: 1 } },
+        { command: 'press', key: 'ArrowDown' },
+      ],
+    });
+
+    // Отметки после возврата на владельца: своя у корня и своя у подменю. Если бы
+    // возврат снимал отметку подменю, сбросу было бы нечего проверять.
+    expect(result.steps[3].levels.root.activeIndex, 'корень отмечен на владельце').toBe(1);
+    expect(result.steps[3].levels.sub.activeIndex, 'отметка подменю не тронута').toBe(0);
+    // Фокус ушёл владельцу, а не остался в покинутом подменю. Строка таблицы 3.2
+    // «подменю открыто наведением, курсор на владельце — отметка и фокус на владельце»
+    // иначе была бы недостижимой: наведение помечает владельца и оставляло бы фокус
+    // в подменю.
+    expect(result.steps[3].focus.label, 'фокус на владельце').toBe('Экспорт');
+    // И клавиша после этого едет в корневой уровень, а не в подменю: уровень берётся
+    // из цели события, и целью стал владелец.
+    expect(result.after.levels.root.activeIndex, 'стрелка увела отметку корня').toBe(2);
+    expect(result.after.levels.sub.activeIndex, 'подменю не тронуто').toBe(0);
+    expect(result.after.focus.label).toBe('Печать');
   });
 
   test('клавиатура перебивает мышь', async ({ page }) => {
