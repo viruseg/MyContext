@@ -17,6 +17,7 @@ import { CURSOR_OFFSET, DEFAULT_ANIMATION_DURATION, SAFETY_PADDING } from '../..
 /**
  * @typedef {import('../../src/MyContext.js').MenuItem} MenuItem
  * @typedef {import('../../src/MyContext.js').SeparatorItem} SeparatorItem
+ * @typedef {import('../../src/layer.js').Point} Point
  */
 
 /**
@@ -89,7 +90,7 @@ import { CURSOR_OFFSET, DEFAULT_ANIMATION_DURATION, SAFETY_PADDING } from '../..
 
 /**
  * @typedef {object} McProbe
- * @property {(set: string, containerId: string | null) => void} make
+ * @property {(set: string, containerId: string | null, reopenPoint?: Point | null) => void} make
  * @property {(containerId: string) => void} attach
  * @property {() => void} detach
  * @property {(x: number, y: number) => void} open
@@ -129,23 +130,26 @@ const VIEWPORT = { width: 1000, height: 700 };
 const WORKSPACE_POINT = { x: 300, y: 200 };
 const SECOND_POINT = { x: 300, y: 470 };
 
-// Точка, в которой действие пункта набора `reopening` открывает меню заново.
-// Продублирована внутри пробы: колбэк `page.evaluate` сериализуется и видит
-// только своё, а расхождение двух чисел уронило бы кейс на ровном месте.
+// Точка, в которой действие пункта набора `reopening` открывает меню заново. Идёт
+// аргументом `make` в пробу, а не объявляется там второй раз: колбэк
+// `page.evaluate` сериализует аргументы, и число, объявленное в двух местах файла,
+// разъехалось бы молча.
 const REOPEN_POINT = { x: 520, y: 460 };
 
 /**
  * @param {import('@playwright/test').Page} page
  * @param {string} set имя набора пунктов пробы.
  * @param {string | null} containerId контейнер привязки; `null` — без привязки.
+ * @param {Point | null} [reopenPoint] точка, в которую действия набора `reopening` зовут
+ *   `open()`; без неё такие действия падают с ошибкой, и это проверяется само по себе.
  * @returns {Promise<Snapshot>}
  */
-function makeMenu(page, set, containerId) {
+function makeMenu(page, set, containerId, reopenPoint = null) {
   return page.evaluate((input) => {
     const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
-    scope.__mc.make(input.set, input.container);
+    scope.__mc.make(input.set, input.container, input.reopenPoint);
     return scope.__mc.read();
-  }, { set, container: containerId });
+  }, { set, container: containerId, reopenPoint });
 }
 
 /**
@@ -439,6 +443,20 @@ test.beforeEach(async ({ page }) => {
     });
 
     /**
+     * Владелец непустого подменю с собственным действием. Объявлен один раз на
+     * два набора: `mixed` проверяет, что клик по владельцу открывает подменю и не
+     * зовёт действие, `nonclosing` — что он же меню не закрывает. Копии этой строки
+     * в двух наборах разъехались бы одинаковым текстом, а расхождение никто бы не
+     * увидел.
+     * @type {MenuItem}
+     */
+    const ownerItem = {
+      label: 'Владелец',
+      submenu: [{ label: 'Под владельцем' }],
+      action: () => log.push('владелец'),
+    };
+
+    /**
      * Наборы пунктов объявлены здесь, а не приходят аргументом: у пунктов есть
      * `action`-функции, а `page.evaluate` сериализует аргументы как JSON и функции
      * бы выбросил. Поэтому кейс зовёт `make('имя')`.
@@ -476,14 +494,7 @@ test.beforeEach(async ({ page }) => {
       // владельцу открывает подменю и не зовёт его действие, клик по листу зовёт.
       // Оба пункта в одном уровне — иначе «клик по владельцу ничего не зовёт» можно
       // было бы объяснить тем, что обработчика активации нет вовсе.
-      mixed: [
-        {
-          label: 'Владелец',
-          submenu: [{ label: 'Под владельцем' }],
-          action: () => log.push('владелец'),
-        },
-        { label: 'Лист', action: () => log.push('лист') },
-      ],
+      mixed: [ownerItem, { label: 'Лист', action: () => log.push('лист') }],
       // Первый пункт тихий, второй ломается: нажатие на обоих подряд отделяет
       // «исключение пробрасывается» от «меню закрывается».
       throwing: [
@@ -499,25 +510,38 @@ test.beforeEach(async ({ page }) => {
       // закрывающей рядом: разделитель, отключённый пункт и владелец непустого
       // подменю. Отдельного пункта с действием здесь нет намеренно — «меню не
       // закрылось» должно означать «закрывать было нечем», иначе кейс прошёл бы на
-      // действии, которое закрывает само.
+      // действии, которое закрывает само. Владелец взят из `mixed`: строка одна и та
+      // же, и раздельные определения разъехались бы одинаковым текстом в двух
+      // местах.
       nonclosing: [
         { type: 'separator' },
         { label: 'Отключённый', disabled: true, action: () => log.push('отключённый') },
-        { label: 'Владелец', submenu: [{ label: 'Под владельцем' }], action: () => log.push('владелец') },
+        ownerItem,
       ],
-      // Пункт, чьё действие открывает меню в другом месте страницы. Закрытие,
+      // Пункты, чьи действия открывают меню в другом месте страницы: закрытие,
       // начатое обработчиком активации после действия, убило бы то, что только что
-      // открыто, и такой обработчик был бы попросту бесполезен. Точка переоткрытия
-      // продублирована в файле как `REOPEN_POINT`: действие зовёт `open()` само и
-      // аргументом пробы получить не может — аргументы `page.evaluate`
-      // сериализуются, а функцию туда не положить.
+      // открыто, и такой обработчик был бы попросту бесполезен. Второй пункт вдобавок
+      // бросает — проверяется, что это исключение доходит до страницы, а не тонет
+      // вместе с пропущенным закрытием.
+      //
+      // Точка переоткрытия приходит в `make` аргументом: колбэк `page.evaluate`
+      // сериализует аргументы, а объявить её второй раз внутри пробы значило бы
+      // держать одно и то же число в двух местах файла.
       reopening: [
         { label: 'Тихий', action: () => log.push('тихий') },
         {
           label: 'Переоткрыть',
           action: () => {
             log.push('переоткрыть');
-            menu?.open({ x: 520, y: 460 });
+            reopenAt();
+          },
+        },
+        {
+          label: 'Сломать после переоткрытия',
+          action: () => {
+            log.push('сломать после переоткрытия');
+            reopenAt();
+            throw new Error('переоткрытие сломано');
           },
         },
       ],
@@ -525,6 +549,26 @@ test.beforeEach(async ({ page }) => {
 
     /** @type {InstanceType<typeof MyContext> | null} */
     let menu = null;
+
+    /**
+     * Точка, в которой действия набора `reopening` открывают меню заново. Приходит
+     * аргументом `make` вместе с именем набора, потому что объявить её в пробе
+     * второй раз значило бы держать одно и то же число в двух местах файла.
+     * @type {Point | null}
+     */
+    let reopenPoint = null;
+
+    /**
+     * Открывает меню в точке `reopening` — по тому же пути, что и автор обработчика:
+     * напрямую из действия пункта, мимо пробы и мимо браузера.
+     * @returns {void}
+     */
+    function reopenAt() {
+      if (menu === null || reopenPoint === null) {
+        throw new Error('нечего переоткрывать: точка не передана в make');
+      }
+      menu.open({ x: reopenPoint.x, y: reopenPoint.y });
+    }
 
     /**
      * @param {string} setName
@@ -613,7 +657,7 @@ test.beforeEach(async ({ page }) => {
     }
 
     const probe = /** @type {McProbe} */ ({
-      make(setName, containerId) {
+      make(setName, containerId, point) {
         if (menu !== null) {
           menu.destroy();
         }
@@ -621,6 +665,7 @@ test.beforeEach(async ({ page }) => {
         errors.length = 0;
         contextmenu.length = 0;
         removed.length = 0;
+        reopenPoint = point ?? null;
         menu = new MyContext(itemsOf(setName), { label: 'Меню файла' });
         const container = containerOf(containerId);
         if (container !== null) {
@@ -1049,6 +1094,18 @@ test.describe('жизненный цикл MyContext', () => {
     // контроль живости — кейс про `ids`, где действие есть и срабатывает.
     expect(after.log, 'обработчиков не вызывалось').toEqual([]);
     expect(after.errors, 'страница без ошибок').toEqual([]);
+
+    // Тот же пункт с клавиатуры. Закрывает его не движок, а тот же единственный
+    // обработчик активации, до которого доходит синтетический `click`, — и без
+    // клетки «`Enter`/`Space` по пункту без `action`» этот путь остался бы не
+    // покрытым вовсе.
+    await rightClick(page, WORKSPACE_POINT);
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Enter');
+    const afterKey = await readMenu(page);
+    expect(afterKey.openCount, 'Enter по пункту без action закрыл меню').toBe(0);
+    expect(afterKey.log, 'обработчиков не вызывалось и с клавиатуры').toEqual([]);
+    expect(afterKey.errors, 'клавиатурный путь не бросил').toEqual([]);
   });
 
   test('клик по разделителю, отключённому пункту и владельцу подменю не закрывает меню', async ({ page }) => {
@@ -1096,7 +1153,7 @@ test.describe('жизненный цикл MyContext', () => {
     // клика поставлена затем, чтобы кейс не прошёл на закрытии, отложенном на
     // `animationDuration`: снимок снял бы ещё живое меню и ничего бы не сказал.
     await page.clock.install();
-    await makeMenu(page, 'reopening', 'workspace');
+    await makeMenu(page, 'reopening', 'workspace', REOPEN_POINT);
     const opened = await rightClickAndRead(page);
     expect(opened.openCount, 'меню открыто').toBe(1);
     expect(opened.levels[0].rect.left, 'меню открыто в точке клика').toBeCloseTo(
@@ -1124,6 +1181,30 @@ test.describe('жизненный цикл MyContext', () => {
       2,
     );
     expect(after.errors, 'страница без ошибок').toEqual([]);
+
+    // Тот же пункт, но действие после переоткрытия бросает. Пропуск закрытия не
+    // имеет права проглотить ошибку: `return` из `finally` заменил бы её своим
+    // значением, и страница узнала бы об ошибке обработчика только по тому, что
+    // меню куда-то делось. Ошибка обязана дойти до страницы целиком, а меню —
+    // остаться там, куда его переоткрыло действие.
+    await rightClick(page, WORKSPACE_POINT);
+    expect((await readMenu(page)).openCount, 'меню снова открыто').toBe(1);
+    await itemByLabel(page, 'Сломать после переоткрытия').click();
+
+    const afterThrow = await readMenu(page);
+    // Журнал содержит обе половины кейса: он общий для экземпляра, а `make` сбрасывает
+    // его один раз, до первой половины.
+    expect(afterThrow.log, 'действие сработало и упало').toEqual([
+      'переоткрыть',
+      'сломать после переоткрытия',
+    ]);
+    expect(afterThrow.errors, 'ошибка не проглочена').toHaveLength(1);
+    expect(afterThrow.errors[0]).toContain('переоткрытие сломано');
+    expect(afterThrow.openCount, 'меню осталось в точке переоткрытия').toBe(1);
+    expect(afterThrow.levels[0].rect.left, 'меню уехало по горизонтали').toBeCloseTo(
+      REOPEN_POINT.x + CURSOR_OFFSET,
+      2,
+    );
   });
 
   test('attach() бросает Error с названием требования, если браузер не умеет Popover API', async ({ page }) => {
