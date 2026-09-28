@@ -1,5 +1,9 @@
 import { expect, test } from '@playwright/test';
-import { SCROLL_SPEED_PX_PER_SEC } from '../../src/constants.js';
+import {
+  DEFAULT_ANIMATION_DURATION,
+  SCROLL_SPEED_PX_PER_SEC,
+  SCROLL_ZONE_HEIGHT,
+} from '../../src/constants.js';
 
 // Модуль подгружается динамическим импортом прямо в странице, и спецификатор
 // `../../src/scrollZones.js` обслуживает обе среды: в браузере от
@@ -953,4 +957,691 @@ test('прокрутка списка сама обновляет зоны', asy
   // роуминг, и зоны обязаны узнать об этом сами.
   expect(result.before).toEqual({ up: true, down: false });
   expect(result.after).toEqual({ up: false, down: true });
+});
+
+/* ── Живое меню ──────────────────────────────────────────────────────────────
+ *
+ * Кейсы ниже водят настоящий `MyContext` настоящей мышью: курсор двигают
+ * `locator.hover` и `page.mouse.wheel`, а список крутит `requestAnimationFrame`
+ * страницы. Стенд выше для этого не годится и не переиспользуется: подмена
+ * планировщика кадров и подмена геометрии нужны там, где проверяется решение
+ * контроллера, а здесь проверяется меню целиком — с настоящей раскладкой,
+ * настоящими отметками роуминга и настоящей подпиской слоя.
+ */
+
+/**
+ * Вьюпорт живых кейсов. Задан фикстурой `describe`, а не вызовом в `beforeEach`, и
+ * почему — там же.
+ */
+const LIVE_VIEWPORT = { width: 1000, height: 700 };
+
+/**
+ * Имена слотов живых экземпляров: их два, и второй нужен ровно одному кейсу.
+ *
+ * @typedef {'first' | 'second'} LiveSlot
+ */
+
+/**
+ * Живой экземпляр меню, поставленный в страницу кейса.
+ *
+ * @typedef {object} LiveMenu
+ * @property {import('../../src/MyContext.js').MyContext} menu
+ * @property {HTMLElement} trigger кнопка, привязанная к меню.
+ */
+
+/**
+ * @typedef {object} LiveMenus
+ * @property {LiveMenu} [first]
+ * @property {LiveMenu} [second]
+ */
+
+/**
+ * Доступные имена живых уровней. Имя задаёт конструктор, и по нему же уровень
+ * узнаётся на странице: `data-vc-scrollable` общий для всех `.vc-menu` и берётся
+ * селектором, поэтому «у первого уровня признак есть» говорит о конкретном
+ * поповере, а не о первом найденном меню.
+ *
+ * @type {Record<LiveSlot, string>}
+ */
+const LIVE_LABELS = {
+  first: 'Меню пробы: первое',
+  second: 'Меню пробы: второе',
+};
+
+/**
+ * Площадки слотов на странице: своя у каждого, в стороне от второго.
+ *
+ * Фиксированные и у самой кромки — по двум причинам. Первая: два экземпляра на
+ * одной кнопке не отличились бы друг от друга ни при показе, ни при наведении.
+ * Вторая: `focus()` на кнопке вне кадра прокрутил бы страницу, а прокрутка
+ * страницы закрывает открытое меню, и кейс про зоны падал бы не по существу.
+ *
+ * @type {Record<LiveSlot, string>}
+ */
+const LIVE_HOSTS = {
+  first: 'position: fixed; left: 16px; top: 8px;',
+  second: 'position: fixed; left: 560px; top: 8px;',
+};
+
+/**
+ * Точки вызова живых меню: у каждого слота своя, в стороне от второго, — иначе
+ * верхнее меню в Top Layer перехватывало бы наведение нижнего.
+ *
+ * @type {Record<LiveSlot, import('../../src/layer.js').Point>}
+ */
+const LIVE_POINTS = {
+  first: { x: 120, y: 200 },
+  second: { x: 700, y: 200 },
+};
+
+const LIST = '.vc-list';
+const ZONE_UP = '.vc-scroll-zone-up';
+const ZONE_DOWN = '.vc-scroll-zone-down';
+const ITEM = '.vc-item';
+
+/**
+ * Пауза, которой ждут, когда проверяют не движение, а его отсутствие. Тройная
+ * длительность анимации — срок, за который меню успело бы сменить состояние и
+ * вернуть его обратно: короче пауза прошла бы на быстрой машине и упала на
+ * медленной.
+ */
+const SETTLE_MS = DEFAULT_ANIMATION_DURATION * 3;
+
+/**
+ * Предел ожидания живой прокрутки, мс. Скорость 240 px в секунду, длина прокрутки
+ * у сорока пунктов около 480 px, то есть путь занимает две секунды; десять секунд
+ * — запас на подтормаживание машины, после которого кейс честно падает, а не
+ * молча висит.
+ */
+const SCROLL_WAIT_MS = 10000;
+
+/**
+ * Длинный набор пунктов: сорок штук, то есть заведомо больше любой рамки меню.
+ * Префикс различает экземпляры — им помечены подписи, а имя уровня берётся из
+ * конструктора, так что страница различает меню самостоятельно.
+ *
+ * @param {string} prefix начало подписи пункта.
+ * @returns {import('../../src/renderer.js').MenuItem[]}
+ */
+function longItems(prefix) {
+  return Array.from({ length: 40 }, (unused, index) => {
+    return { label: `${prefix} ${index + 1}` };
+  });
+}
+
+/** Длинный набор первого слота. */
+const LONG_ITEMS = longItems('Пункт');
+
+/** Короткий набор: три пункта, и список в обрез. */
+const SHORT_ITEMS = [{ label: 'Раз' }, { label: 'Два' }, { label: 'Три' }];
+
+/**
+ * Ставит в страницу живой экземпляр `MyContext` под указанным слотом, оставляя
+ * ручку в `globalThis`.
+ *
+ * `reduce` убирает и входной переход `scale`, и отложенное закрытие: под ним
+ * показ синхронен, то есть рамки зон, снятые сразу после `open()`, суть рамки
+ * показанного меню. Тем же режимом снимается `transform: scale(0.96)` у самого
+ * меню, и геометрия зон остаётся неискажённой масштабом.
+ *
+ * Экземпляр намеренно не открывается: показом занимается кейс, и каждый открывает
+ * его в своей точке сам, а второй слот и вовсе остаётся закрытым до своего кейса.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {LiveSlot} slot
+ * @param {import('../../src/renderer.js').MenuItem[]} items
+ * @returns {Promise<void>}
+ */
+async function mountLiveMenu(page, slot, items) {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.evaluate(async (input) => {
+    const { MyContext } = await import('../../src/MyContext.js');
+    const host = document.createElement('div');
+    host.id = `live-host-${input.slot}`;
+    host.style.cssText = input.host;
+    const trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.id = `live-trigger-${input.slot}`;
+    host.appendChild(trigger);
+    document.body.appendChild(host);
+    const menu = new MyContext(input.items, { label: input.label });
+    menu.attach(trigger);
+    trigger.focus();
+    const scope = /** @type {{ __live?: LiveMenus }} */ (/** @type {unknown} */ (globalThis));
+    const menus = scope.__live ?? {};
+    menus[input.slot] = { menu, trigger };
+    scope.__live = menus;
+  }, { slot, items, host: LIVE_HOSTS[slot], label: LIVE_LABELS[slot] });
+}
+
+/**
+ * Открывает поставленное живое меню в точке вызова.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {LiveSlot} slot
+ * @param {import('../../src/layer.js').Point} point
+ * @returns {Promise<void>}
+ */
+async function openLiveMenu(page, slot, point) {
+  await page.evaluate((input) => {
+    const scope = /** @type {{ __live?: LiveMenus }} */ (/** @type {unknown} */ (globalThis));
+    const live = scope.__live?.[input.slot];
+    if (live === undefined) {
+      throw new Error(`живое меню слота «${input.slot}» не поставлено`);
+    }
+    live.menu.open(input.point);
+  }, { slot, point });
+}
+
+/**
+ * Идентификатор показанного уровня слота.
+ *
+ * По доступному имени, а не по порядку показа в документе: уровень переносится в
+ * конец `<body>` на каждом показе, и порядок DOM у двух открытых меню говорил бы
+ * о последнем показе, а не о слоте.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {LiveSlot} slot
+ * @returns {Promise<string>}
+ */
+function liveLevelIdOf(page, slot) {
+  return page.evaluate((name) => {
+    // По поповеру, а не по `document.querySelector('.vc-menu')`: закрытый уровень
+    // остаётся в документе, и селектор без `:popover-open` взял бы его наравле с
+    // показанным.
+    for (const candidate of document.querySelectorAll('.vc-menu:popover-open')) {
+      if (candidate.getAttribute('aria-label') === name) {
+        return candidate.id;
+      }
+    }
+    throw new Error(`на странице нет показанного уровня «${name}»`);
+  }, LIVE_LABELS[slot]);
+}
+
+/**
+ * Снимок уровня: всё, о чём судит живой кейс, одним проходом по странице.
+ *
+ * `scrollTop` читается, но не сверяется с ожидаемой величиной: список поедет на
+ * столько, сколько успеет за время наведения, и под `scale(0.96)` firefox
+ * округляет запись в `scrollTop` примерно на 4 % быстрее скорости контроллера —
+ * точное число мерило бы округление движка, а не поведение. Поэтому «поехал» и
+ * «доехал» читаются как знак и как положение упора, а не как пиксели.
+ *
+ * @typedef {object} LiveSnapshot
+ * @property {boolean} open показан ли уровень сейчас.
+ * @property {string} opacity вычисленная прозрачность уровня: у закрытого меню она
+ *   ноль, и это единственное, чем закрытое меню спрятано — авторское
+ *   `display: flex` перебивает UA-правило `[popover]:not(:popover-open)`, и рамка у
+ *   закрытого уровня остаётся.
+ * @property {string | null} scrollable значение `data-vc-scrollable` на уровне:
+ *   пустая строка у прокручиваемого уровня, `null` у короткого.
+ * @property {boolean} overflow переполняется ли список. Контрольное поле: у
+ *   списка, который не прокручивается, и зоны, и прокрутка молчат.
+ * @property {number} scrollTop сдвиг списка, px.
+ * @property {number} travel сколько список способен прокрутиться, px.
+ * @property {boolean} atBottom доехал ли список до низа по порогу самого
+ *   контроллера: `scrollTop + clientHeight` не меньше `scrollHeight` минус его
+ *   допуск в 1 px.
+ * @property {{ up: string, down: string }} displays вычисленный `display` зон.
+ * @property {{ up: number, down: number }} zoneHeights высота зон по рамке, px: у
+ *   скрытой зоны ноль, потому что в `display: none` она не занимает места.
+ * @property {{ up: boolean, down: boolean }} blocked признак `data-vc-blocked` на
+ *   зонах. Единственный его писатель — `sync()` внутри `src/scrollZones.js`.
+ * @property {string[]} activeLabels подписи пунктов, помеченных `data-active`, по
+ *   всему документу, а не по уровню: сброс выделения обещает снять отметки со всех
+ *   уровней, и уцелевшая отметка в соседнем меню была бы тем же дефектом.
+ */
+
+/**
+ * @param {import('@playwright/test').Page} page
+ * @param {string} levelId
+ * @returns {Promise<LiveSnapshot>}
+ */
+function readLive(page, levelId) {
+  return page.evaluate((id) => {
+    const level = document.getElementById(id);
+    if (level === null) {
+      throw new Error(`на странице нет уровня ${id}`);
+    }
+    const list = level.querySelector('.vc-list');
+    if (list === null) {
+      throw new Error(`у уровня ${id} нет списка`);
+    }
+    /**
+     * @param {string} selector класс зоны.
+     * @returns {{ display: string, height: number, blocked: boolean }}
+     */
+    const zone = (selector) => {
+      const element = level.querySelector(selector);
+      if (element === null) {
+        throw new Error(`у уровня ${id} нет зоны ${selector}`);
+      }
+      return {
+        display: getComputedStyle(element).display,
+        height: element.getBoundingClientRect().height,
+        blocked: element.hasAttribute('data-vc-blocked'),
+      };
+    };
+    const up = zone('.vc-scroll-zone-up');
+    const down = zone('.vc-scroll-zone-down');
+    return {
+      open: level.matches(':popover-open'),
+      opacity: getComputedStyle(level).opacity,
+      scrollable: level.getAttribute('data-vc-scrollable'),
+      overflow: list.scrollHeight > list.clientHeight,
+      scrollTop: list.scrollTop,
+      travel: list.scrollHeight - list.clientHeight,
+      atBottom: list.scrollTop + list.clientHeight >= list.scrollHeight - 1,
+      displays: { up: up.display, down: down.display },
+      zoneHeights: { up: up.height, down: down.height },
+      blocked: { up: up.blocked, down: down.blocked },
+      activeLabels: Array.from(document.querySelectorAll('.vc-item[data-active]'), (item) => {
+        const label = item.querySelector('.vc-label');
+        return label === null ? '' : label.textContent ?? '';
+      }),
+    };
+  }, levelId);
+}
+
+/**
+ * Ставит список живого уровня в указанное место и дожидается его `scroll`.
+ *
+ * Слушатель кейса ставится после записи и потому приходит после слушателя
+ * модуля: ответ «зоны пересчитались» относится к состоянию после события. Если
+ * список уже в нужном месте, `scroll` не придёт вовсе, и ждать его нельзя.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {string} levelId
+ * @param {'start' | 'middle' | 'end'} where
+ * @returns {Promise<void>}
+ */
+async function placeLiveList(page, levelId, where) {
+  await page.evaluate((input) => {
+    const level = document.getElementById(input.levelId);
+    const list = level === null ? null : level.querySelector('.vc-list');
+    if (list === null) {
+      throw new Error(`у уровня ${input.levelId} нет списка`);
+    }
+    const travel = list.scrollHeight - list.clientHeight;
+    const target = input.where === 'start' ? 0 : input.where === 'end' ? travel : Math.floor(travel / 2);
+    if (list.scrollTop === target) {
+      return;
+    }
+    const settled = new Promise((resolve) => {
+      list.addEventListener('scroll', () => {
+        resolve(undefined);
+      }, { once: true });
+    });
+    list.scrollTop = target;
+    return settled;
+  }, { levelId, where });
+}
+
+/**
+ * Ждёт состояния списка живого уровня.
+ *
+ * Ожидание состояния, а не пауза: прокрутка идёт по кадрам страницы, и пауза
+ * после входа в зону проверяла бы скорость прогона, а не то, доехал ли список.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {string} levelId
+ * @param {'moved' | 'start' | 'end'} what
+ * @returns {Promise<void>}
+ */
+async function waitForLiveList(page, levelId, what) {
+  await page.waitForFunction((input) => {
+    const level = document.getElementById(input.levelId);
+    const list = level === null ? null : level.querySelector('.vc-list');
+    if (list === null) {
+      return false;
+    }
+    if (input.what === 'start') {
+      return list.scrollTop <= 0;
+    }
+    if (input.what === 'end') {
+      return list.scrollTop + list.clientHeight >= list.scrollHeight - 1;
+    }
+    return list.scrollTop > 0;
+  }, { levelId, what }, { timeout: SCROLL_WAIT_MS });
+}
+
+test.describe('живое меню', () => {
+  // Вьюпорт задан фикстурой, а не `setViewportSize` в `beforeEach`: высота вьюпорта
+  // — это высота рамки списка, а по ней длина прокрутки, и плавающий размер сделал
+  // бы ожидания нечитаемыми. Смена размера после создания контекста не годится:
+  // `setViewportSize` возвращается, когда размер применён, а событие `resize`
+  // приходит позже — на несколько миллисекунд, но уже после `open()`, и
+  // `#onGlobalResize` закрывает показанное меню. Замер на живой странице: с
+  // `setViewportSize` восемь открытий из двенадцати оставались закрытыми.
+  // Вьюпорт ниже окна демо, и страница остаётся прокручиваемой — этого требует
+  // кейс про колесо над зоной.
+  test.use({ viewport: LIVE_VIEWPORT });
+
+  test('у длинного уровня обе зоны на месте, у короткого скрыты', async ({ page }) => {
+    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await openLiveMenu(page, 'first', LIVE_POINTS.first);
+    const longId = await liveLevelIdOf(page, 'first');
+    const long = await readLive(page, longId);
+
+    // Короткий уровень ставится вторым слотом, а не переустановкой первого:
+    // закрытый уровень остаётся в документе, и после переустановки в тот же слот
+    // поповеров нашлось бы два, а разбирать, чей это уровень, пришлось бы по
+    // порядку показа. Заодно видно, что решение о прокрутке — per уровень, а не
+    // per меню.
+    await mountLiveMenu(page, 'second', SHORT_ITEMS);
+    await openLiveMenu(page, 'second', LIVE_POINTS.second);
+    const shortId = await liveLevelIdOf(page, 'second');
+    const short = await readLive(page, shortId);
+
+    // Контроль переполнения обязателен у обоих уровней: у списка в обрез зоны не
+    // показываются вовсе, и показ проверялся бы на уровне, которому он не нужен.
+    expect(long.overflow, 'список длинного уровня переполняется').toBe(true);
+    expect(long.scrollable, 'у длинного уровня признак есть').toBe('');
+    // Обе зоны разом, а не одна: показывает их один атрибут на уровне, и
+    // per-зонального решения у слоя нет.
+    expect(long.displays).toEqual({ up: 'flex', down: 'flex' });
+    // Высота по рамке, а не вычисленная: токен мог бы разрешиться, а места в
+    // колонке уровня зона при этом не заняла бы.
+    expect(long.zoneHeights).toEqual({ up: SCROLL_ZONE_HEIGHT, down: SCROLL_ZONE_HEIGHT });
+
+    expect(short.overflow, 'список короткого уровня не переполняется').toBe(false);
+    expect(short.scrollable, 'у короткого уровня признака нет').toBe(null);
+    expect(short.displays).toEqual({ up: 'none', down: 'none' });
+    // Нулевая зона — это ещё и «меню не выросло»: скрытая зона места не занимает.
+    expect(short.zoneHeights).toEqual({ up: 0, down: 0 });
+  });
+
+  test('зоны гаснут по мере прокрутки в обоих направлениях', async ({ page }) => {
+    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await openLiveMenu(page, 'first', LIVE_POINTS.first);
+    const levelId = await liveLevelIdOf(page, 'first');
+
+    const atStart = await readLive(page, levelId);
+    // Контроль переполнения: у списка, который не прокручивается, состояния зон
+    // не менялось бы вовсе, и весь кейс прошёл бы вхолостую.
+    expect(atStart.overflow, 'список переполняется').toBe(true);
+    expect(atStart.scrollTop).toBe(0);
+    expect(atStart.blocked, 'в начале гаснет только верхняя зона').toEqual({ up: true, down: false });
+
+    await placeLiveList(page, levelId, 'middle');
+    const atMiddle = await readLive(page, levelId);
+    // Середина — единственное состояние, где свободны обе зоны, и ради него
+    // кейс и затевался: на краях свободна ровно одна.
+    expect(atMiddle.blocked, 'в середине свободны обе зоны').toEqual({ up: false, down: false });
+
+    await placeLiveList(page, levelId, 'end');
+    const atEnd = await readLive(page, levelId);
+    expect(atEnd.scrollTop, 'список встал в конец').toBeGreaterThan(0);
+    expect(atEnd.blocked, 'в конце гаснет только нижняя зона').toEqual({ up: false, down: true });
+  });
+
+  test('наведение на нижнюю зону прокручивает список вниз до упора', async ({ page }) => {
+    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await openLiveMenu(page, 'first', LIVE_POINTS.first);
+    const levelId = await liveLevelIdOf(page, 'first');
+    const before = await readLive(page, levelId);
+    // Контроль: прокручивать есть куда, и до низа далеко — иначе «до упора» было бы
+    // «на пиксель».
+    expect(before.travel, 'список прокручиваем').toBeGreaterThan(1);
+    expect(before.blocked.down, 'нижняя зона свободна').toBe(false);
+
+    await page.locator(`#${levelId} ${ZONE_DOWN}`).hover();
+    await waitForLiveList(page, levelId, 'end');
+    const after = await readLive(page, levelId);
+
+    // Список поехал вниз — направление, а не величина: сколько именно он успел
+    // пройти, решает время наведения.
+    expect(after.scrollTop, 'список поехал вниз').toBeGreaterThan(0);
+    expect(after.atBottom, 'список доехал до упора').toBe(true);
+    // Упор дошёл до зон: цикл встал по заблокированной зоне, и обе зоны встали по
+    // своим краям.
+    expect(after.blocked).toEqual({ up: false, down: true });
+    // Меню всё ещё показано: прокрутка его собственного списка закрывать его не
+    // должна, иначе автоскролл невозможен в принципе.
+    expect(after.open, 'меню не закрылось').toBe(true);
+  });
+
+  test('наведение на верхнюю зону прокручивает список вверх до упора', async ({ page }) => {
+    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await openLiveMenu(page, 'first', LIVE_POINTS.first);
+    const levelId = await liveLevelIdOf(page, 'first');
+    await placeLiveList(page, levelId, 'end');
+    const before = await readLive(page, levelId);
+    // Контроль исходного места: в начале списка верхняя зона заблокирована и
+    // цикл вниз не завёлся бы — кейс проверял бы отказ запуска.
+    expect(before.atBottom, 'список стоит в конце').toBe(true);
+    expect(before.blocked.up, 'верхняя зона свободна').toBe(false);
+
+    await page.locator(`#${levelId} ${ZONE_UP}`).hover();
+    await waitForLiveList(page, levelId, 'start');
+    const after = await readLive(page, levelId);
+
+    // Ноль — единственное точное число здесь: ниже начала список не уезжает, и
+    // округлять тут нечего.
+    expect(after.scrollTop, 'список доехал до начала').toBe(0);
+    expect(after.blocked).toEqual({ up: true, down: false });
+    expect(after.open, 'меню не закрылось').toBe(true);
+  });
+
+  test('наведение на заблокированную зону список не двигает', async ({ page }) => {
+    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await openLiveMenu(page, 'first', LIVE_POINTS.first);
+    const levelId = await liveLevelIdOf(page, 'first');
+    const before = await readLive(page, levelId);
+    // Контроль исходного места обязателен: у списка в обрез и у списка, у которого
+    // некуда идти вверх, цикл не завёлся бы по одной и той же причине, и кейс
+    // проверял бы не блокировку зоны.
+    expect(before.overflow, 'список прокручиваем').toBe(true);
+    expect(before.travel, 'список прокручиваем и вверх').toBeGreaterThan(1);
+    expect(before.blocked, 'в начале гаснет только верхняя зона').toEqual({ up: true, down: false });
+
+    await page.locator(`#${levelId} ${ZONE_UP}`).hover();
+    await page.waitForTimeout(SETTLE_MS);
+    const after = await readLive(page, levelId);
+
+    // Ноль здесь точное число, и пауза после наведения длиннее трёх анимаций:
+    // за это время цикл, каким бы он ни был, сдвинул бы список на пиксели.
+    expect(after.scrollTop, 'список остался в начале').toBe(0);
+    // Зона не исчезла и не переехала: упор гасит её, а не убирает, иначе список
+    // уехал бы из-под курсора ровно тогда, когда зона перестала им его вести.
+    expect(after.displays, 'зоны остались на месте').toEqual({ up: 'flex', down: 'flex' });
+  });
+
+  test('колесо над списком прокручивает список и переносит состояние зон', async ({ page }) => {
+    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await openLiveMenu(page, 'first', LIVE_POINTS.first);
+    const levelId = await liveLevelIdOf(page, 'first');
+
+    await page.locator(`#${levelId} ${LIST}`).hover();
+    await page.mouse.wheel(0, 120);
+    await waitForLiveList(page, levelId, 'moved');
+    const after = await readLive(page, levelId);
+
+    // Прокрутился именно список, а не страница: колесо над списком — это колесо
+    // над прокручиваемым потомком, и ушло оно ему, а не документу.
+    expect(after.scrollTop, 'список поехал вниз').toBeGreaterThan(0);
+    // Контроль: до низа далеко, и «обе зоны свободны» — не следствие упора.
+    expect(after.scrollTop, 'список не доехал до низа').toBeLessThan(after.travel);
+    // Состояние зон перенёс `scroll` на самом списке: вверх список уехал от
+    // начала, и верхняя зона освободилась.
+    expect(after.blocked, 'обе зоны свободны').toEqual({ up: false, down: false });
+    // Меню не закрылось: `#onGlobalScroll` пропускает прокрутку внутри дерева
+    // меню, иначе длинный список был бы нелистаем вовсе.
+    expect(after.open, 'меню не закрылось').toBe(true);
+  });
+
+  test('колесо над зоной прокручивает страницу и закрывает меню', async ({ page }) => {
+    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await openLiveMenu(page, 'first', LIVE_POINTS.first);
+    const levelId = await liveLevelIdOf(page, 'first');
+    const before = await page.evaluate(() => globalThis.scrollY);
+    // Контроль исходного места: у страницы, которая не прокручивается, колесо
+    // не дало бы события `scroll`, и закрытие проверялось бы на отсутствии
+    // события вместо его обработки.
+    expect(before, 'страница в начале').toBe(0);
+
+    await page.locator(`#${levelId} ${ZONE_DOWN}`).hover();
+    await page.mouse.wheel(0, 120);
+    // Закрытие проверяется после паузы, а не мгновенно: под `reduce` слой зовёт
+    // `hidePopover` сразу, но проверять «закрылось» на следующем же кадре — значит
+    // проверять уход курсора из-под зоны, а не закрытие по прокрутке страницы.
+    await page.waitForTimeout(SETTLE_MS);
+
+    // Контроль: колесо ушло странице. У зоны нет `overflow`, поэтому она не
+    // прокручивается и отдаёт колесо документу — как любой фон под меню.
+    const scrolled = await page.evaluate(() => globalThis.scrollY);
+    expect(scrolled, 'страница прокрутилась').toBeGreaterThan(0);
+    // Закрыт уровень, а не «не виден»: `isVisible()` у закрытого меню врёт во всех
+    // трёх движках (замерено), потому что авторское `display: flex` у `.vc-menu`
+    // перебивает UA-правило `[popover]:not(:popover-open)`, и закрытый уровень
+    // остаётся с раскладкой и рамкой. Гасит его `opacity: 0`, а её видимость
+    // Playwright не смотрит. Поэтому закрытие читается двумя признаками: поповер
+    // ушёл из Top Layer, и уровень ничего не рисует.
+    const after = await readLive(page, levelId);
+    expect(after.open, 'меню закрылось').toBe(false);
+    expect(after.opacity, 'закрытое меню не нарисовано').toBe('0');
+  });
+
+  test('вход в зону снимает выделение пункта', async ({ page }) => {
+    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await openLiveMenu(page, 'first', LIVE_POINTS.first);
+    const levelId = await liveLevelIdOf(page, 'first');
+
+    await page.locator(`#${levelId} ${ITEM}`).first().hover();
+    const onItem = await readLive(page, levelId);
+    // Контроль: пункт под курсором отмечен, иначе «в зоне выделения нет» прошло бы
+    // на меню, в котором его и не было.
+    expect(onItem.activeLabels, 'пункт под курсором отмечен').toEqual(['Пункт 1']);
+
+    await page.locator(`#${levelId} ${ZONE_DOWN}`).hover();
+    const inZone = await readLive(page, levelId);
+
+    // Пока на пункте держится `data-active`, зона выглядит как выбор пункта,
+    // который список сейчас крутит: подсвечен тот, кого никто не выбирал.
+    expect(inZone.activeLabels, 'в зоне выделения нет').toEqual([]);
+  });
+
+  test('стрелка вниз из зоны выбирает первый пункт, стрелка вверх — последний', async ({ page }) => {
+    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await openLiveMenu(page, 'first', LIVE_POINTS.first);
+    const levelId = await liveLevelIdOf(page, 'first');
+    // Верхняя зона у начала списка: она заблокирована, и наведение на неё не
+    // запускает цикл — иначе список полз бы под стрелками и `scrollTop` в
+    // ожидании «равен нулю» был бы недетерминированным.
+    await page.locator(`#${levelId} ${ZONE_UP}`).hover();
+    const inZone = await readLive(page, levelId);
+    // Контроль исходного места: у уровня без отметки первая стрелка обязана дать
+    // крайний пункт, а не следующий за отмеченным.
+    expect(inZone.activeLabels, 'в зоне выделения нет').toEqual([]);
+    expect(inZone.blocked.up, 'верхняя зона заблокирована, цикл не шёл').toBe(true);
+
+    await page.keyboard.press('ArrowDown');
+    const down = await readLive(page, levelId);
+    expect(down.activeLabels, 'стрелка вниз выбрала первый пункт').toEqual(['Пункт 1']);
+    // Первый пункт виден и без долистывания, и список от этого не трогается.
+    expect(down.scrollTop, 'список остался в начале').toBe(0);
+
+    await page.keyboard.press('ArrowUp');
+    // Долистывание клавиатурой приходит тем же `scroll` на списке, что и автоскролл
+    // зоны, и он асинхронен: снимок без ожидания снял бы состояние зон от упора
+    // списка, а не от их собственного пересчёта.
+    await waitForLiveList(page, levelId, 'end');
+    const up = await readLive(page, levelId);
+    expect(up.activeLabels, 'стрелка вверх выбрала последний пункт').toEqual(['Пункт 40']);
+    // Последний пункт за нижним краем, и долистывание уводит список в упор.
+    expect(up.atBottom, 'список долистался до низа').toBe(true);
+    expect(up.blocked.down, 'нижняя зона погасла').toBe(true);
+  });
+
+  test('End долистывает список и гасит нижнюю зону', async ({ page }) => {
+    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await openLiveMenu(page, 'first', LIVE_POINTS.first);
+    const levelId = await liveLevelIdOf(page, 'first');
+    const before = await readLive(page, levelId);
+    // Контроль исходного места: у списка в начале гаснет верхняя зона, а
+    // «нижняя погасла» прошло бы на упоре, который и так был бы достигнут.
+    expect(before.travel, 'список прокручиваем').toBeGreaterThan(1);
+    expect(before.activeLabels, 'выделения до End нет').toEqual([]);
+    expect(before.blocked.down, 'нижняя зона свободна').toBe(false);
+
+    await page.keyboard.press('End');
+    await waitForLiveList(page, levelId, 'end');
+    const after = await readLive(page, levelId);
+
+    expect(after.activeLabels, 'End выбрал последний пункт').toEqual(['Пункт 40']);
+    // Долистывание клавиатурой пришло тем же `scroll` на самом списке, что и
+    // автоскролл зоны: подписка зон висит на списке, а не на колесе.
+    expect(after.blocked).toEqual({ up: false, down: true });
+    expect(after.open, 'меню не закрылось').toBe(true);
+  });
+
+  test('Escape посреди автоскролла останавливает цикл', async ({ page }) => {
+    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await openLiveMenu(page, 'first', LIVE_POINTS.first);
+    const levelId = await liveLevelIdOf(page, 'first');
+
+    await page.locator(`#${levelId} ${ZONE_DOWN}`).hover();
+    await waitForLiveList(page, levelId, 'moved');
+    const running = await readLive(page, levelId);
+    // Контроль: цикл действительно шёл, иначе «остановить» было бы нечего.
+    expect(running.scrollTop, 'список поехал вниз').toBeGreaterThan(0);
+
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(SETTLE_MS);
+    const closed = await readLive(page, levelId);
+    expect(closed.open, 'меню закрылось').toBe(false);
+
+    // Два замера списка после закрытия: цикл мог бы гонять список и на
+    // скрытом уровне, и заметен это был бы только между ними.
+    await page.waitForTimeout(SETTLE_MS * 2);
+    const later = await readLive(page, levelId);
+    expect(later.scrollTop, 'список после закрытия не движется').toBe(closed.scrollTop);
+  });
+
+  test('наведение на зону одного меню не двигает список другого', async ({ page }) => {
+    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await openLiveMenu(page, 'first', LIVE_POINTS.first);
+    await mountLiveMenu(page, 'second', longItems('Второй'));
+    await openLiveMenu(page, 'second', LIVE_POINTS.second);
+    const firstId = await liveLevelIdOf(page, 'first');
+    const secondId = await liveLevelIdOf(page, 'second');
+
+    const before = {
+      first: await readLive(page, firstId),
+      second: await readLive(page, secondId),
+    };
+    // Контроль: оба уровня прокручиваемы и оба стоят в начале. Признак берётся
+    // селектором и общий для всех `.vc-menu`, поэтому «у первого уровня признак
+    // есть» читается по его поповеру.
+    expect(before.first.scrollable, 'у первого уровня признак есть').toBe('');
+    expect(before.second.scrollable, 'у второго уровня признак есть').toBe('');
+    expect(before.first.scrollTop, 'первый список в начале').toBe(0);
+    expect(before.second.scrollTop, 'второй список в начале').toBe(0);
+
+    await page.locator(`#${firstId} ${ZONE_DOWN}`).hover();
+    await waitForLiveList(page, firstId, 'end');
+    const after = {
+      first: await readLive(page, firstId),
+      second: await readLive(page, secondId),
+    };
+
+    // Контроллер зон на каждый уровень, и наведение на зону одного меню ничего не
+    // говорит контроллеру другого: без этой проверки кейс прошёл бы на одном
+    // экземпляре, у которого и список не с чем сравнивать.
+    expect(after.first.atBottom, 'первый список доехал до упора').toBe(true);
+    expect(after.second.scrollTop, 'второй список не двинулся').toBe(0);
+    // Второе меню всё ещё показано: наведение на чужую зону не закрывает соседа.
+    // Проверка не перестраховка, а условие живости сравнения — закрытое меню даёт
+    // тот же ноль `scrollTop`, и без неё кейс прошёл бы на меню, которое нечего
+    // было бы двигать.
+    //
+    // Падает на текущем коде, одинаково во всех трёх движках. `scroll` ловится на
+    // `window` с capture, а `#onGlobalScroll` решает «это прокрутка внутри меню» по
+    // своему реестру уровней: прокрутка списка чужого экземпляра выглядит для него
+    // прокруткой страницы, и второй экземпляр закрывается. Замер: два открытых
+    // меню, наведение на пункт и на заблокированную зону первого — второй жив,
+    // список первого тронулся — второй закрылся. Чинить здесь нечего: место
+    // починки — `#onGlobalScroll`.
+    expect(after.second.open, 'второе меню не закрылось').toBe(true);
+  });
 });

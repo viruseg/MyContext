@@ -36,6 +36,7 @@ import { createLayer } from './layer.js';
 
 const ITEM_SELECTOR = '.vc-item';
 const MENU_SELECTOR = '.vc-menu';
+const SCROLL_ZONE_SELECTOR = '.vc-scroll-zone';
 const SEPARATOR_TYPE = 'separator';
 const RASTER_TYPE = 'raster';
 const ICON_TYPES = new Set([RASTER_TYPE, 'emoji', 'svg']);
@@ -526,6 +527,16 @@ export class MyContext {
     }
     if (item !== null && this.#showTargets.has(item)) {
       return;
+    }
+    // Курсор в зоне, а не на пункте: пока на пункте держится `data-active`, зона
+    // выглядит как выбор пункта, который список сейчас крутит. `closest` по
+    // пункту уже вернул `null`, поэтому вторым поиском отсекается всё, что не
+    // зона, — разделитель, поля каркаса, само подменю мимо.
+    if (item === null && target.closest(SCROLL_ZONE_SELECTOR) !== null) {
+      const root = this.#root;
+      if (root !== null && root.open) {
+        this.#keyboard.clearActive(root);
+      }
     }
     this.#feedPointerMove({ x: event.clientX, y: event.clientY });
   };
