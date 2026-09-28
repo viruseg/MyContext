@@ -6,7 +6,15 @@ const ROOT = resolve(import.meta.dirname, '..');
 const DEFAULT_PORT = 4173;
 const HOST = '127.0.0.1';
 
-/** @type {Record<string, string>} */
+/**
+ * Тип с `undefined` в значении, а не просто `Record<string, string>`: без него
+ * поиск по таблице типизирован как `string`, и guard ниже читается как проверка
+ * невозможного условия — то есть как мёртвый код, который следующий читатель
+ * снесёт. `noUncheckedIndexedAccess` дал бы тот же смысл, но это флаг строгости
+ * для всей программы, а здесь достаточно одного типа.
+ *
+ * @type {Record<string, string | undefined>}
+ */
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -100,6 +108,14 @@ function handleRequest(req, res) {
 const server = createServer(handleRequest);
 
 server.on('error', (error) => {
+  // `error` приходит и после `listen`: система может отказать в сокете на приёме
+  // соединения, и это не сбой запуска — сервер в этот момент работает. Различать
+  // надо по состоянию сервера, а не по формулировке: убивать работающий сервер
+  // из-за отказа на одном соединении нельзя.
+  if (server.listening) {
+    process.stderr.write(`Сервер на ${HOST}:${PORT} — ошибка соединения: ${error.message}\n`);
+    return;
+  }
   process.stderr.write(`Не удалось запустить сервер на ${HOST}:${PORT} — ${error.message}\n`);
   process.exit(1);
 });
