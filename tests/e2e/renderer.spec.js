@@ -583,6 +583,10 @@ test.describe('сетка пункта', () => {
       const chevron = /** @type {HTMLElement} */ (
         level.items[0].element.querySelector('.vc-chevron')
       );
+      // Активную строку помечает движок роуминга, а не рендерер, поэтому здесь
+      // состояние задаётся руками — как в фикстуре `theme.spec.js`.
+      const item = level.items[0].element;
+      item.dataset.active = '';
       // Псевдоэлемент читается только через `getComputedStyle` со вторым
       // аргументом: в разметке его нет, и `querySelector` его не увидит.
       const glyph = getComputedStyle(chevron, '::before');
@@ -604,10 +608,22 @@ test.describe('сетка пункта', () => {
           .map((part) => Number(part.trim()));
         return Math.atan2(numbers[1] ?? 0, numbers[0] ?? 1);
       };
-      // Активную строку помечает движок роуминга, а не рендерер, поэтому здесь
-      // состояние задаётся руками — как в фикстуре `theme.spec.js`.
-      const item = level.items[0].element;
-      item.dataset.active = '';
+      /**
+       * Токен приводится к вычисленному цвету подстановкой в `color` пустого
+       * элемента: сравнивать пришлось бы с вычисленным цветом глифа, а с записью
+       * токена сравнение было бы тождеством.
+       *
+       * @param {string} name имя токена.
+       * @returns {string} разрешённый цвет.
+       */
+      const resolveToken = (name) => {
+        const probe = document.createElement('span');
+        probe.style.color = getComputedStyle(item).getPropertyValue(name);
+        document.body.appendChild(probe);
+        const resolved = getComputedStyle(probe).color;
+        probe.remove();
+        return resolved;
+      };
       return {
         // Псевдоэлемент обязан быть порождён, иначе все остальные значения были
         // бы начальными, а не вычисленными.
@@ -623,16 +639,15 @@ test.describe('сетка пункта', () => {
         // при `+45°` — вниз, при `−90°` — вверх. Одна только величина угла эти
         // три варианта не различила бы.
         angle: angleOf(glyph.transform),
-        // Глиф обязан переехать на цвет строки: на активной строке шеврон
-        // наследует `--vc-accent-text`, и серая стрелка на заливке акцентом
-        // дала бы 1.05:1. Цвет рамки берётся уже на активной строке — в базовом
-        // состоянии обе стороны равны `--vc-muted`, и проверка была бы тождеством.
+        // Глиф обязан быть цвета шеврона: `currentColor` переносит на него любой
+        // цвет, который тема задаст `.vc-chevron`. Цвет рамки берётся уже на
+        // активной строке — в базовом состоянии обе стороны равны `--vc-muted`, и
+        // проверка была бы тождеством.
         color: glyph.borderRightColor,
-        chevronColor: getComputedStyle(chevron).color,
-        rowColor: getComputedStyle(item).color,
         // Токен приглушённого цвета, чтобы равенство «цвет глифа равен цвету
-        // шеврона» не прошло бы и тогда, когда оба стали бы приглушёнными.
-        muted: getComputedStyle(item).getPropertyValue('--vc-muted').trim(),
+        // шеврона» прошло бы по-настоящему, а не потому что оба стали
+        // приглушёнными.
+        muted: resolveToken('--vc-muted'),
       };
     });
 
@@ -656,12 +671,11 @@ test.describe('сетка пункта', () => {
     // Знак поворота и есть направление стрелки; величина в 45° получена
     // поворотом срезанного угла квадрата, а не его формой.
     expect(result.angle).toBeCloseTo(-Math.PI / 4, 5);
-    expect(result.color).toBe(result.chevronColor);
-    // Контракт 4.5:1 на активной строке живёт здесь: глиф обязан быть цвета
-    // текста строки, а не приглушённого. `theme.spec.js` проверяет контраст
-    // цвета самого шеврона, но не псевдоэлемента.
-    expect(result.chevronColor).toBe(result.rowColor);
-    expect(result.chevronColor).not.toBe(result.muted);
+    // Приглушённый цвет и на активной строке: заливка тонированная, шеврон внутри
+    // неё остаётся тем же, что и в любом другом пункте, и контраст строки задаёт
+    // её текст, а не стрелка. Контракт 4.5:1 на активной строке живёт в
+    // `theme.spec.js`.
+    expect(result.color).toBe(result.muted);
   });
 
   test('шеврон реально разворачивается: transform в состояниях left и right различаются', async ({ page }) => {

@@ -124,9 +124,6 @@ body {
   --vc-bg-solid: #ffffff;
   --vc-text: #241f2e;
   --vc-muted: #6d6780;
-  --vc-accent: #7c3aed;
-  --vc-accent-text: #ffffff;
-  --vc-active-bg: var(--vc-accent);
   --vc-separator: color-mix(in srgb, var(--vc-text) 14%, transparent);
   --vc-shadow: 0 10px 30px rgba(30, 20, 60, 0.18);
 }
@@ -135,9 +132,6 @@ body {
   --vc-bg-solid: #22242b;
   --vc-text: #eceaf5;
   --vc-muted: #a49fb8;
-  --vc-accent: #c4b5fd;
-  --vc-accent-text: #17131f;
-  --vc-active-bg: var(--vc-accent);
   --vc-separator: color-mix(in srgb, var(--vc-text) 18%, transparent);
   --vc-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
 }

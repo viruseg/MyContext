@@ -55,7 +55,7 @@ import { OPEN_GRACE_MS, SAFETY_PADDING } from '../../src/constants.js';
  * @property {string} id
  * @property {boolean} open `:popover-open` — уровень в Top Layer.
  * @property {boolean} parentIsBody
- * @property {string} accent вычисленный `--vc-accent` уровня.
+ * @property {string} text вычисленный `--vc-text` уровня.
  * @property {string} vcTheme `data-vc-theme` — им библиотека помечает тему меню.
  * @property {string[]} labels подписи пунктов уровня по порядку, без разделителей.
  * @property {{ top: number; left: number; width: number; height: number }} rect
@@ -136,15 +136,17 @@ const SCENARIO_SHAPE = {
 const STYLESHEET_ORDER = ['./styles/mycontext.css', './Demo/demo.css'];
 
 /**
- * Токены меню, которые демо перекрывает. `LIBRARY_ACCENT` — значение из
- * `styles/mycontext.css`, `DEMO_LIGHT_ACCENT` и `DEMO_DARK_ACCENT` — из
+ * Токены меню, которые демо перекрывает. `LIBRARY_TEXT` — значение из
+ * `styles/mycontext.css`, `DEMO_LIGHT_TEXT` и `DEMO_DARK_TEXT` — из
  * `Demo/demo.css`. Все три присутствуют в кейсах по одной причине: без них
  * утверждение «меню перекрашено страницей» прошло бы и на библиотечной палитре,
- * и на странице без единого правила для `.vc-menu`.
+ * и на странице без единого правила для `.vc-menu`. Различаются обе темы, а не
+ * только тёмная: у `--vc-bg-solid` значения демо и библиотеки в светлой теме
+ * совпадают, и на нём различие не читалось бы вовсе.
  */
-const LIBRARY_ACCENT = '#2563eb';
-const DEMO_LIGHT_ACCENT = '#7c3aed';
-const DEMO_DARK_ACCENT = '#c4b5fd';
+const LIBRARY_TEXT = '#1f2023';
+const DEMO_LIGHT_TEXT = '#241f2e';
+const DEMO_DARK_TEXT = '#eceaf5';
 
 /** Подпись, которой страница сообщает, что блок открывает меню правым кликом. */
 const HINT = 'Правый клик по блоку открывает его меню.';
@@ -338,7 +340,7 @@ function readMenu(page) {
         id: element.id,
         open: element.matches(':popover-open'),
         parentIsBody: element.parentElement === document.body,
-        accent: style.getPropertyValue('--vc-accent').trim(),
+        text: style.getPropertyValue('--vc-text').trim(),
         vcTheme: element.getAttribute('data-vc-theme') ?? '',
         labels: Array.from(element.querySelectorAll('.vc-item')).map((item) => {
           const label = item.querySelector('.vc-label');
@@ -576,8 +578,8 @@ test('демо: токены меню перекрываются стилями 
 
   const rootId = await openScenario(page, 'basic');
   const level = levelOf(await readMenu(page), rootId);
-  expect(level.accent.toLowerCase(), 'меню покрашено токеном демо').toBe(DEMO_LIGHT_ACCENT);
-  expect(level.accent.toLowerCase(), 'это не токен библиотеки').not.toBe(LIBRARY_ACCENT);
+  expect(level.text.toLowerCase(), 'меню покрашено токеном демо').toBe(DEMO_LIGHT_TEXT);
+  expect(level.text.toLowerCase(), 'это не токен библиотеки').not.toBe(LIBRARY_TEXT);
   // Тема принадлежит библиотеке: демо её не переписывает, а подменяет палитру.
   expect(level.vcTheme, 'data-vc-theme остался за экземпляром').toBe('auto');
 });
@@ -1067,7 +1069,7 @@ test('демо: сценарий длинного списка прокручи�
 test('демо: переключение темы страницы не ломает меню', async ({ page }) => {
   const rootId = await openScenario(page, 'basic');
   const before = levelOf(await readMenu(page), rootId);
-  expect(before.accent.toLowerCase(), 'до переключения тема светлая').toBe(DEMO_LIGHT_ACCENT);
+  expect(before.text.toLowerCase(), 'до переключения тема светлая').toBe(DEMO_LIGHT_TEXT);
 
   // Переключатель активируется с клавиатуры. Клик мышью мимо меню сначала снял бы
   // его глобальным слушателем `pointerdown`, и кейс проверял бы не «тема не ломает
@@ -1101,8 +1103,8 @@ test('демо: переключение темы страницы не лома
   // Ключевое утверждение кейса: палитра у открытого уровня пересчитана каскадом
   // по новой теме страницы. Без него «меню не сломалось» прошло бы и на странице,
   // где правила для `.vc-menu` нет вовсе.
-  expect(after.accent.toLowerCase(), 'открытое меню перекрашено новой темой').toBe(DEMO_DARK_ACCENT);
-  expect(after.accent.toLowerCase(), 'это не токен библиотеки').not.toBe(LIBRARY_ACCENT);
+  expect(after.text.toLowerCase(), 'открытое меню перекрашено новой темой').toBe(DEMO_DARK_TEXT);
+  expect(after.text.toLowerCase(), 'это не токен библиотеки').not.toBe(LIBRARY_TEXT);
   expect(after.vcTheme, 'data-vc-theme по-прежнему за экземпляром').toBe('auto');
 
   // Мышиный путь — то, что видит человек с мышью: кнопка в шапке, до неё
@@ -1125,9 +1127,9 @@ test('демо: переключение темы страницы не лома
   const byMouse = levelOf(await readMenu(page), mouseId);
   expect(byMouse.open, 'после мышиного переключения меню снова открылось').toBe(true);
   expect(
-    byMouse.accent.toLowerCase(),
+    byMouse.text.toLowerCase(),
     'мышиный путь: тема доехала до меню в обратную сторону',
-  ).toBe(DEMO_LIGHT_ACCENT);
+  ).toBe(DEMO_LIGHT_TEXT);
 });
 
 test('демо: у каждого сценария свой независимый экземпляр MyContext', async ({ page }) => {

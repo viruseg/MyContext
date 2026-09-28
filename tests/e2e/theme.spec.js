@@ -55,8 +55,6 @@ const THEME_CASES = [
  * @property {string} backgroundColor вычисленный цвет фона меню.
  * @property {string} solidBackground цвет из токена `--vc-bg-solid`: то, что
  *   подставляет запасной вариант без `backdrop-filter`.
- * @property {string} accent цвет из токена `--vc-accent`.
- * @property {string} accentText цвет из токена `--vc-accent-text`.
  * @property {string} text цвет из токена `--vc-text`.
  * @property {string} paddingToken значение `--vc-padding`.
  * @property {string} itemHeightToken значение `--vc-item-height`.
@@ -110,6 +108,11 @@ const MENU_CONTENT_HTML = `<div class="vc-list" role="group">
           <span class="vc-label" id="${PLAIN_ITEM}">Без иконки</span>
           <span class="vc-chevron" id="chevron-plain"></span>
         </div>
+        <div class="vc-item" role="menuitem" tabindex="-1" aria-disabled="true">
+          <span class="vc-icon-slot"></span>
+          <span class="vc-label">Отключено</span>
+          <span class="vc-chevron"></span>
+        </div>
         <div class="vc-separator" role="separator" aria-orientation="horizontal"></div>
         <div class="vc-item" role="menuitem" tabindex="-1" data-chevron="left" id="item-left">
           <span class="vc-icon-slot" id="slot-long"></span>
@@ -126,10 +129,17 @@ const MENU_HTML = `<!doctype html>
   </head>
   <!-- Фон страницы задан явно: по умолчанию фон body прозрачный, и композит
        поверх прозрачного чёрного занижал бы результат для полупрозрачной
-       подложки. Пока строка активного пункта непрозрачна, это безразлично, и
-       это утверждается. -->
+       подложки. Дальше он входит ровно в одно измерение, ratio из
+       readActiveRow, — потому что заливка активного пункта полупрозрачна и
+       страница под стеклом её дочитывает. Остальные отношения контраста
+       считаются поверх стекла меню: под меню глаз видит меню, а страницу под
+       ним — сквозь два слоя прозрачности. -->
   <body style="background: rgb(255, 255, 255)">
-    <div id="m" class="vc-menu" popover="manual">${MENU_CONTENT_HTML}</div>
+    <!-- tabindex="-1" и role="menu" — то, что ставит renderLevel: фокус на
+         элементе уровня держит состояние «выделения нет, а уровень отвечает на
+         клавиши», и без него кейсы про фокус мерили бы разметку, которой
+         рендерер не производит. -->
+    <div id="m" class="vc-menu" popover="manual" role="menu" tabindex="-1">${MENU_CONTENT_HTML}</div>
   </body>
 </html>`;
 
@@ -406,8 +416,6 @@ async function readSnapshot(page) {
     return {
       backgroundColor: style.backgroundColor,
       solidBackground: resolve(style.getPropertyValue('--vc-bg-solid')),
-      accent: resolve(style.getPropertyValue('--vc-accent')),
-      accentText: resolve(style.getPropertyValue('--vc-accent-text')),
       text: resolve(style.getPropertyValue('--vc-text')),
       paddingToken: style.getPropertyValue('--vc-padding'),
       itemHeightToken: style.getPropertyValue('--vc-item-height'),
@@ -538,13 +546,30 @@ async function settleMenu(page) {
 /**
  * Измерение активной строки в выбранной системной теме.
  *
+ * `tonedRatio` и `disabledRatio` считают композит только двух слоёв — заливки
+ * строки и стекла меню, — и страница в них не участвует. Это не огрубление, а
+ * предмет контракта: заливка активного пункта полупрозрачна by design, и глаз
+ * читает строку поверх стекла; страница под стеклом — третий слой, и в тёмной
+ * палитре поверх белой страницы фикстуры она занизила бы отношение до значения,
+ * которого под настоящим меню не бывает. `ratio` страницу учитывает: там
+ * измеряется весь столб подложки, и пропускать его нельзя.
+ *
  * @typedef {object} ActiveRow
- * @property {string} label цвет текста строки.
+ * @property {string} label цвет текста активной строки.
+ * @property {string} rowBg вычисленный фон активной строки.
+ * @property {string} menuBg вычисленный фон меню.
  * @property {string} activeBg разрешённый `--vc-active-bg`.
- * @property {string} accent разрешённый `--vc-accent`.
- * @property {number} ratio контраст текста к композиту подложки, 1..21.
- * @property {boolean} opaque непрозрачна ли заливка строки.
- * @property {boolean} chevronMatches совпадает ли цвет шеврона с цветом строки.
+ * @property {string} hoverBg разрешённый `--vc-hover-bg`.
+ * @property {string} muted разрешённый `--vc-muted`.
+ * @property {string} disabledLabel цвет текста отключённого пункта.
+ * @property {string} disabledBg вычисленный фон отключённого пункта. Заливки у
+ *   него не бывает: в цикл роуминга он не входит и отметку получить не может.
+ * @property {number} ratio контраст `label` к композиту `rowBg` → `menuBg` →
+ *   страница, 1..21.
+ * @property {number} tonedRatio контраст `label` к композиту `hoverBg` → `menuBg`.
+ * @property {number} disabledRatio контраст `disabledLabel` к композиту
+ *   `disabledBg` → `menuBg`: то же отношение, что и `tonedRatio`, для строки,
+ *   которой заливка не полагается.
  */
 
 /**
@@ -560,7 +585,8 @@ async function settleMenu(page) {
  * @param {import('@playwright/test').Page} page
  * @param {'auto'|'light'|'dark'} theme тема оформления.
  * @param {'light' | 'dark'} scheme системная схема.
- * @param {boolean} [disabled] поставить ли `aria-disabled` на активную строку.
+ * @param {boolean} [disabled] поставить ли `aria-disabled` на активную строку —
+ *   состояние, которого движок роуминга не производит.
  * @returns {Promise<ActiveRow>}
  */
 async function readActiveRow(page, theme, scheme, disabled = false) {
@@ -574,12 +600,19 @@ async function readActiveRow(page, theme, scheme, disabled = false) {
     if (isDisabled) {
       active.setAttribute('aria-disabled', 'true');
     }
-    const chevron = /** @type {HTMLElement} */ (active.querySelector('.vc-chevron'));
+    // Отключённый пункт фикстуры — отдельная строка, а не та же самая: её заливка
+    // обязана отсутствовать там, где у отмеченной строки заливка есть.
+    const disabledRow = document.querySelector(
+      '.vc-item[aria-disabled="true"]:not([data-active])',
+    );
+    if (!(disabledRow instanceof HTMLElement)) {
+      throw new Error('в фикстуре нет отключённого пункта');
+    }
     const menuStyle = getComputedStyle(menu);
 
     /**
      * Токен приводится к `rgb()` подстановкой в `color` пустого элемента: само
-     * значение `var(--vc-accent)` сравнивать не с чем.
+     * значение `color-mix(in srgb, …)` сравнивать не с чем.
      *
      * @param {string} name имя токена.
      * @returns {string} разрешённый цвет.
@@ -603,27 +636,35 @@ async function readActiveRow(page, theme, scheme, disabled = false) {
       // фон меню сам по себе полупрозрачный. В фикстуре он непрозрачный, иначе
       // модель считала бы композит поверх прозрачного чёрного.
       page: getComputedStyle(document.body).backgroundColor,
-      chevron: getComputedStyle(chevron).color,
       activeBg: resolve('--vc-active-bg'),
-      accent: resolve('--vc-accent'),
+      hoverBg: resolve('--vc-hover-bg'),
+      muted: resolve('--vc-muted'),
+      disabledLabel: getComputedStyle(disabledRow).color,
+      disabledBg: getComputedStyle(disabledRow).backgroundColor,
     };
   }, disabled);
-  // Композит, а не сырой токен: меню стеклянное, и глаз видит подложку.
-  const background = composite(
-    composite(parseColor(measured.row), parseColor(measured.menu)),
-    parseColor(measured.page),
-  );
+  // Стекло меню, дочитанное страницей под ним, — подложка для полного столба.
+  const glass = composite(parseColor(measured.menu), parseColor(measured.page));
   return {
     label: measured.label,
+    rowBg: measured.row,
+    menuBg: measured.menu,
     activeBg: measured.activeBg,
-    accent: measured.accent,
-    ratio: contrast(parseColor(measured.label), background),
-    // Непрозрачная заливка означает, что стекло под строкой на число не влияет.
-    // Утверждается явно, иначе непрозрачность выводилась бы из совпадения с
-    // результатом, а не проверялась.
-    opaque: alphaOf(measured.row) === 1,
-    // Шеврон на заливке акцентом обязан читаться, иначе он молча пропадает.
-    chevronMatches: measured.chevron === measured.label,
+    hoverBg: measured.hoverBg,
+    muted: measured.muted,
+    disabledLabel: measured.disabledLabel,
+    disabledBg: measured.disabledBg,
+    ratio: contrast(parseColor(measured.label), composite(parseColor(measured.row), glass)),
+    tonedRatio: contrast(
+      parseColor(measured.label),
+      composite(parseColor(measured.hoverBg), parseColor(measured.menu)),
+    ),
+    // Прозрачная заливка отключённого пункта в композит не вносит ничего, и
+    // `composite` отдаёт под ним стекло меню — ровно то, на чём строка стоит.
+    disabledRatio: contrast(
+      parseColor(measured.disabledLabel),
+      composite(parseColor(measured.disabledBg), parseColor(measured.menu)),
+    ),
   };
 }
 
@@ -647,6 +688,108 @@ async function readItemBoxes(page) {
       chevron: element('.vc-chevron').getBoundingClientRect().width,
       itemHeight: element('.vc-item').getBoundingClientRect().height,
     };
+  });
+}
+
+/**
+ * Живой экземпляр меню, поставленный в страницу кейса.
+ *
+ * @typedef {object} LiveMenu
+ * @property {import('../../src/MyContext.js').MyContext} menu
+ * @property {HTMLElement} trigger кнопка, привязанная к меню: по ней открывают
+ *   его с клавиатуры.
+ */
+
+/**
+ * Ставит в страницу живой экземпляр `MyContext`, оставляя ручку в `globalThis`.
+ *
+ * Фикстура `MENU_HTML` показывает оформление, но роуминга в ней нет: отметку
+ * `data-active` ставит движок, а писатель у него один — `src/keyboard.js`.
+ * Кейсы про наведение и про клавиатуру меряли бы на фикстуре разметку, которую
+ * никто не пишет, то есть проверяли бы сами себя.
+ *
+ * Экземпляр намеренно не открывается: один кейс открывает его программно, другой
+ * — с клавиатуры, и для второго модальность ввода должна задать настоящее
+ * нажатие до фокуса, иначе `:focus-visible` не сработает.
+ *
+ * Фикстура `#m` прячется, а не удаляется: её оформление проверяют остальные кейсы
+ * файла, и живое меню в том же Top Layer перекрыло бы её собой.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {import('../../src/renderer.js').MenuItem[]} items
+ * @returns {Promise<void>}
+ */
+async function mountLiveMenu(page, items) {
+  // `reduce` убирает и входной переход `scale`, и отложенное закрытие: под ним
+  // показ синхронен, то есть рамки пунктов, снятые сразу после `open()`, суть
+  // рамки показанного меню.
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.evaluate(async (entries) => {
+    const { MyContext } = await import('../../src/MyContext.js');
+    const fixture = document.getElementById('m');
+    if (fixture instanceof HTMLElement) {
+      fixture.hidePopover();
+    }
+    const trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.id = 'live-trigger';
+    document.body.appendChild(trigger);
+    const menu = new MyContext(entries, { label: 'Меню пробы' });
+    menu.attach(trigger);
+    trigger.focus();
+    const scope = /** @type {{ __live?: LiveMenu }} */ (/** @type {unknown} */ (globalThis));
+    scope.__live = { menu, trigger };
+  }, items);
+}
+
+/**
+ * Открывает поставленное живое меню в точке вызова.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {{ x: number, y: number }} point точка вызова в координатах вьюпорта.
+ * @returns {Promise<void>}
+ */
+async function openLiveMenu(page, point) {
+  await page.evaluate((anchor) => {
+    const scope = /** @type {{ __live?: LiveMenu }} */ (/** @type {unknown} */ (globalThis));
+    if (scope.__live === undefined) {
+      throw new Error('живое меню не поставлено');
+    }
+    scope.__live.menu.open(anchor);
+  }, point);
+}
+
+/**
+ * Открывает поставленное живое меню без мыши: нажатием клавиши и `contextmenu`
+ * на сфокусированном контейнере.
+ *
+ * Событие отправляется из страницы, а не клавишей контекстного меню, и это
+ * осознанно: `Shift+F10` и `ContextMenu` поднимают `contextmenu` только в
+ * Chromium, а Firefox и WebKit молчат, и кейс про кольцо ходил бы по разным
+ * дорогам в зависимости от движка. Настоящим остаётся то, что кольцо измеряет:
+ * клавиатурная модальность — от живого нажатия, обработчик привязки и фокус
+ * элемента уровня — от библиотеки.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<void>}
+ */
+async function openLiveMenuByKeyboard(page) {
+  // Клавиша, ничего не значащая для кнопки, но настоящая: именно её браузер
+  // считает вводом с клавиатуры, и по ней решает, видим ли фокус на уровне.
+  await page.keyboard.press('ArrowDown');
+  await page.evaluate(() => {
+    const scope = /** @type {{ __live?: LiveMenu }} */ (/** @type {unknown} */ (globalThis));
+    if (scope.__live === undefined) {
+      throw new Error('живое меню не поставлено');
+    }
+    const trigger = scope.__live.trigger;
+    const box = trigger.getBoundingClientRect();
+    trigger.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: box.left + 2,
+      clientY: box.top + 2,
+    }));
   });
 }
 
@@ -1219,7 +1362,7 @@ test.describe('пункты и состояния', () => {
     expect(result.activeBackground).not.toBe(result.focusedBackground);
   });
 
-  test('видимость фокуса не запрещена', async ({ page, request }) => {
+  test('признак фокуса — заливка активного пункта, а не кольцо', async ({ page, request }) => {
     const css = await readStylesheet(request);
 
     // Запрещено ровно одно: подсветка активного пункта не должна ключеваться на
@@ -1229,49 +1372,233 @@ test.describe('пункты и состояния', () => {
     // самого фокуса.
     expect(css, 'голый селектор :focus').not.toMatch(/(?<!-):focus(?!-)/);
 
-    // Кольцо обязано быть объявлено, а не только не запрещено: `data-active`
-    // совпадает с фокусом при клавиатурной навигации, но не обязан совпадать
-    // всегда, и без кольца клавиатурный пользователь теряет признак фокуса.
-    const ringRules = readRules(css).filter((rule) => rule.selector.includes(':focus-visible'));
-    expect(ringRules.length).toBeGreaterThan(0);
-    expect(ringRules.map((rule) => rule.selector)).toContain('.vc-item:focus-visible');
-    expect(readRule(css, '.vc-item:focus-visible')).toMatch(/outline:\s*2px solid/);
+    // Решение партнёра (спека 2026-09-28, раздел 2, решение 1): кольца нет ни
+    // одного. Проверка по всем правилам файла, а не по одному селектору, —
+    // вернуться кольцо может и под другим именем.
+    expect(
+      readRules(css).filter((rule) => rule.selector.includes(':focus-visible')),
+      'правила с :focus-visible',
+    ).toHaveLength(0);
 
-    // `outline: none` у меню и списка означал бы, что фокус на уровне не виден
-    // вовсе: браузерное кольцо погашено, а своего никто не рисует.
-    expect(readRule(css, '.vc-menu')).not.toContain('outline');
-    expect(readRule(css, '.vc-list')).not.toContain('outline');
+    // Второго носителя подсветки в файле нет вовсе: пока `.vc-item:hover` жив,
+    // «последнее взаимодействие выигрывает» невыполнимо by construction — при
+    // наведении мышью на соседний пункт горели бы оба. Проверка по тексту
+    // селектора, а не по фону: фон наведения и заливка активного пункта теперь
+    // один и тот же токен, и по цвету их не различить.
+    expect(readSelectors(css), 'правила с :hover').not.toContain('.vc-item:hover');
 
-    // И вживую: Tab по спецификации 9.1 ставит фокус на активный пункт, и кольцо
-    // у него есть.
-    await page.keyboard.press('Tab');
+    // `outline: none` у пункта и у уровня — обязательная часть решения, а не
+    // украшение: браузер рисует своё кольцо по умолчанию каждому узлу, чей фокус
+    // он считает видимым, и удаление авторского правила кольцо не отменяет, а
+    // возвращает UA-виду. Заливка активного пункта остаётся признаком фокуса
+    // единственной.
+    expect(readRule(css, '.vc-item'), 'кольцо снято с пункта').toContain('outline: none');
+    expect(readRule(css, '.vc-menu'), 'кольцо снято с уровня').toContain('outline: none');
+    // Список фокуса не получает, и кольцо на нём вернулось бы тем же UA-путём,
+    // если бы кто-то завёл его правило.
+    expect(readRule(css, '.vc-list'), 'кольцо не заведено на список').not.toContain('outline');
+
+    // Вживую: живое меню, клавиша навигации, и отметка обязана быть ровно одна —
+    // на сфокусированном пункте, с заливкой мышиной и без кольца.
+    await mountLiveMenu(page, [{ label: 'Первый' }, { label: 'Второй' }]);
+    await openLiveMenu(page, { x: 200, y: 200 });
+    await page.keyboard.press('ArrowDown');
     const focused = await page.evaluate(() => {
-      const active = /** @type {HTMLElement} */ (document.querySelector('.vc-item[data-active]'));
+      const active = /** @type {HTMLElement | null} */ (document.activeElement);
+      if (!(active instanceof HTMLElement)) {
+        throw new Error('после нажатия клавиши фокуса нет');
+      }
+      const menu = /** @type {HTMLElement} */ (active.closest('.vc-menu'));
+      const style = getComputedStyle(active);
+      /**
+       * @param {string} value значение токена.
+       * @returns {string} разрешённый цвет.
+       */
+      const resolve = (value) => {
+        const probe = document.createElement('span');
+        probe.style.color = value;
+        document.body.appendChild(probe);
+        const resolved = getComputedStyle(probe).color;
+        probe.remove();
+        return resolved;
+      };
       return {
-        isActive: document.activeElement === active,
-        width: getComputedStyle(active).outlineWidth,
-        style: getComputedStyle(active).outlineStyle,
+        isItem: active.matches('.vc-item'),
+        isMarked: active.hasAttribute('data-active'),
+        // Отметки считаются в показанном уровне, а не в документе: спрятанная
+        // фикстура несёт на первом пункте отметку, написанную разметкой.
+        marks: menu.querySelectorAll('.vc-item[data-active]').length,
+        fill: style.backgroundColor,
+        // Кольцо — это `outline-style`: ширина при `none` остаётся `medium` и
+        // ничем не рисуется, то есть судить по ней было бы неверно.
+        ringStyle: style.outlineStyle,
+        // Заливка, которую получит пункт под курсором: с ней и сравнивается
+        // выделение с клавиатуры.
+        hoverFill: resolve(getComputedStyle(menu).getPropertyValue('--vc-hover-bg')),
       };
     });
-    expect(focused.isActive).toBe(true);
-    expect(focused.width).toBe('2px');
-    expect(focused.style).toBe('solid');
+
+    // Клавиша навигации дала отметку тому же пункту, которому отдала фокус, и
+    // ровно одну: второй писатель подсветки означал бы, что «последнее
+    // взаимодействие выигрывает» невыполнимо, и оба пункта горели бы сразу.
+    expect(focused.isItem, 'фокус у пункта').toBe(true);
+    expect(focused.isMarked, 'фокус и отметка на одном пункте').toBe(true);
+    expect(focused.marks, 'отметка ровно одна').toBe(1);
+
+    // Признак фокуса — заливка, и она обязана совпадать с мышиной: требование
+    // «цвет выделения с клавиатуры полностью совпадает с цветом выделения мышью».
+    expect(focused.fill, 'заливка сфокусированного пункта').not.toBe('rgba(0, 0, 0, 0)');
+    expect(
+      parseColor(focused.fill),
+      'выделение с клавиатуры совпадает с мышиным',
+    ).toEqual(parseColor(focused.hoverFill));
+
+    // Кольца на пункте нет. Контрольной пробы здесь нет намеренно: кольцо на
+    // элементе уровня ловит соседний кейс, где проба обязана быть.
+    expect(focused.ringStyle, 'кольца на пункте нет').toBe('none');
+  });
+
+  test('меню, открытое с клавиатуры, не рисует кольцо UA вокруг уровня', async ({ page, request }) => {
+    // Кольцо снимается объявлением, а не надеждой на то, что UA его не рисует:
+    // элемент уровня получает фокус программно, и кольцо вокруг всего меню —
+    // рамка во всю ширину окна, а не признак фокуса пункта.
+    const css = await readStylesheet(request);
+    expect(readRule(css, '.vc-menu'), 'кольцо снято с уровня').toContain('outline: none');
+
+    // Открытие без мыши — то, из-за чего кейс и заведён: `contextmenu` на
+    // сфокусированном контейнере, `open()` и фокус элемента уровня. UA решает,
+    // видим ли этот фокус, по вводу, которым он был вызван, поэтому нажатие клавиши
+    // здесь настоящее, а событие отправлено из страницы.
+    await mountLiveMenu(page, [{ label: 'Первый' }]);
+    await openLiveMenuByKeyboard(page);
+    await page.waitForSelector('.vc-menu:popover-open');
+    const measured = await page.evaluate(() => {
+      /**
+       * @param {Element} element
+       * @returns {string} `outline-style` вычисленного кольца: `none` означает,
+       *   что не рисуется ничего, и ширина при этом остаётся `medium`.
+       */
+      const ringOf = (element) => {
+        return getComputedStyle(element).outlineStyle;
+      };
+      const level = /** @type {HTMLElement} */ (document.querySelector('.vc-menu:popover-open'));
+      const onLevel = ringOf(level);
+      const focusOnLevel = document.activeElement === level;
+
+      // Контроль: тот же программный фокус на голом узле сразу после нажатия
+      // клавиши. Без него утверждение ниже было бы тождественным — «кольца нет»
+      // прошло бы и на движке, который не рисует его вовсе.
+      const probe = document.createElement('span');
+      probe.tabIndex = -1;
+      document.body.appendChild(probe);
+      probe.focus();
+      const onProbe = ringOf(probe);
+      probe.remove();
+      return { onLevel, onProbe, focusOnLevel };
+    });
+
+    // Ход событий воспроизведён: фокус `open()` действительно оставил на
+    // элементе уровня, и снятие кольца измеряется там, где оно было бы видно.
+    expect(measured.focusOnLevel, 'фокус на элементе уровня').toBe(true);
+    expect(measured.onProbe, 'движок рисует кольцо UA на сфокусированном узле')
+      .not.toBe('none');
+    expect(measured.onLevel, 'кольцо UA вокруг уровня снято').toBe('none');
+  });
+
+  test('отключённый пункт не получает заливки при наведении', async ({ page }) => {
+    // Живое меню: отметку ставит движок роуминга, и без него наведение на
+    // отключённый пункт проверялось бы на разметке, в которой отметок нет.
+    await mountLiveMenu(page, [
+      { label: 'Доступно' },
+      { label: 'Глухой', disabled: true },
+    ]);
+    await openLiveMenu(page, { x: 200, y: 200 });
+
+    /**
+     * Фон и отметки обоих пунктов: подсветка обязана быть делом одного пункта,
+     * и отключённый не должен попадать в её число.
+     *
+     * @returns {Promise<{ available: string, disabled: string, marks: number, marked: boolean }>}
+     */
+    const readRows = () => {
+      return page.evaluate(() => {
+        // Показанный уровень, а не документ: спрятанная фикстура `#m` несёт на
+        // первом пункте отметку, написанную разметкой, и считать её в отметках
+        // живого меню нельзя.
+        const level = document.querySelector('.vc-menu:popover-open');
+        if (level === null) {
+          throw new Error('живое меню не показано');
+        }
+        const rows = Array.from(level.querySelectorAll('.vc-item'));
+        const disabled = rows.find((row) => {
+          return row.getAttribute('aria-disabled') === 'true';
+        });
+        if (disabled === undefined || rows.length < 2) {
+          throw new Error('в меню нет отключённого пункта рядом с доступным');
+        }
+        return {
+          available: getComputedStyle(rows[0]).backgroundColor,
+          disabled: getComputedStyle(disabled).backgroundColor,
+          marks: level.querySelectorAll('.vc-item[data-active]').length,
+          marked: disabled.hasAttribute('data-active'),
+        };
+      });
+    };
+
+    // Курсор водится координатами, а не `locator.hover()`: Playwright считает
+    // элемент с `aria-disabled` непригодным и на него не наводит, то есть ровно
+    // на предмете кейса остановился бы.
+    const centres = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('.vc-menu:popover-open .vc-item')).map((row) => {
+        const box = row.getBoundingClientRect();
+        return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+      });
+    });
+    expect(centres).toHaveLength(2);
+
+    const idle = await readRows();
+    // Подсветки нет ни на ком пункте, пока курсор не на дереве меню.
+    expect(idle.marks, 'до наведения отметок нет').toBe(0);
+
+    await page.mouse.move(centres[1].x, centres[1].y);
+    const onDisabled = await readRows();
+    // Курсор на отключённом пункте: заливки нет, и она совпадает с заливкой
+    // соседа, под которым курсора нет, — то есть оба пункта в одном состоянии.
+    expect(onDisabled.disabled, 'наведение на отключённый не заливает его').toBe(idle.disabled);
+    expect(onDisabled.available, 'сосед под курсором не залит').toBe(idle.available);
+    expect(alphaOf(onDisabled.disabled), 'фон отключённого прозрачен').toBe(0);
+    expect(onDisabled.marked, 'отключённый пункт не отмечен').toBe(false);
+    expect(onDisabled.marks, 'наведение на отключённый не ставит отметку').toBe(0);
+
+    await page.mouse.move(centres[0].x, centres[0].y);
+    const onAvailable = await readRows();
+    // Обратный порядок: подсветка уехала на доступный пункт, и отключённый вернулся
+    // в то же прозрачное состояние, в котором был до наведения.
+    expect(onAvailable.available, 'доступный пункт залит').not.toBe('rgba(0, 0, 0, 0)');
+    expect(onAvailable.marks, 'отметка ровно одна').toBe(1);
+    expect(onAvailable.disabled, 'отключённый пункт снова прозрачен')
+      .toBe(onDisabled.disabled);
+    expect(onAvailable.available, 'заливка совпадает с исходным состоянием соседа')
+      .not.toBe(onAvailable.disabled);
   });
 
   test('контраст активного пункта не ниже 4.5:1 в обеих темах', async ({ page }) => {
     for (const [theme, scheme] of THEME_CASES) {
       const result = await readActiveRow(page, theme, scheme);
-      // 1.29:1 на тонированной заливке — это не «слабо», это нечитаемо, поэтому
-      // порог берётся из AA для текста, а не «на глаз».
-      //
-      // Непрозрачность проверяется до расчёта: непрозрачная заливка означает, что
-      // подложка под строкой на число не влияет, и потому контраст, посчитанный
-      // по композитной модели, вообще применим. Полупрозрачная подложка сделала бы
-      // модель занижающей, и это надо сказать до результата, а не после.
-      expect(result.opaque, `непрозрачность заливки, ${theme}/${scheme}`).toBe(true);
-      expect(result.ratio, `контраст активного пункта, ${theme}/${scheme}`)
+      // Заливка тонированная, и предмет контракта — композит: строку читают
+      // поверх стекла меню, а не поверх заливки в вакууме. На 6 % текста
+      // светлой палитры `#1f2023` до 4.5:1 доходит 14.5:1 — запас есть, и порог
+      // берётся из AA для текста, а не «на глаз».
+      expect(result.tonedRatio, `контраст активного пункта, ${theme}/${scheme}`)
         .toBeGreaterThanOrEqual(4.5);
-      expect(result.chevronMatches, `цвет шеврона, ${theme}/${scheme}`).toBe(true);
+      // Тот же текст на том же фоне, но со всем столбом подложки, включая
+      // страницу под стеклом: расхождение двух чисел и есть вклад страницы.
+      expect(result.ratio, `контраст с поправкой на страницу, ${theme}/${scheme}`)
+        .toBeGreaterThanOrEqual(4.5);
+      // Заливка обязана быть именно мышиной, а не просто непрозрачной: иначе
+      // кейс прошёл бы на любой тонировке, читаемой или нет.
+      expect(parseColor(result.rowBg), `заливка равна мышиной, ${theme}/${scheme}`)
+        .toEqual(parseColor(result.hoverBg));
     }
   });
 
@@ -1281,17 +1608,34 @@ test.describe('пункты и состояния', () => {
       // фикстура продолжает изображать то, что выдаёт рендерер, и состояние
       // «отключённый и одновременно активный» в ней не штатное.
       const result = await readActiveRow(page, theme, scheme, true);
-      // Приглушённый `--vc-muted` на сплошной заливке акцентом даёт 1.07:1 в
-      // светлой теме и 1.02:1 в тёмной, то есть строка становится нечитаемой.
-      // По спецификации 9.1 состояние недостижимо — отключённые пункты не входят
-      // в цикл роуминга, — но CSS и тесты не должны оставлять его на волю случая.
-      expect(result.opaque, `непрозрачность заливки, ${theme}/${scheme}`).toBe(true);
-      expect(result.ratio, `контраст disabled на активной строке, ${theme}/${scheme}`)
+      const where = `${theme}/${scheme}`;
+
+      // Вынужденно отмеченная строка обязана разрешаться так же, как любая
+      // активная: та же тонированная заливка и приглушённый текст. Раньше здесь
+      // стояло исключение `:not([data-active])`, и состояние уходило от `muted`
+      // в `--vc-text` — то есть кейс мерил не состояние, а обход его.
+      expect(parseColor(result.label), `цвет текста, ${where}`)
+        .toEqual(parseColor(result.muted));
+      expect(parseColor(result.rowBg), `заливка не выдаёт отметку, ${where}`)
+        .toEqual(parseColor(result.hoverBg));
+
+      // 4.5:1 проверяется там, где оно достижимо: на заливке, которой у
+      // отключённого пункта не бывает. По спецификации 9.1 отключённый пункт не
+      // входит в цикл роуминга и отметку получить не может, то есть строка
+      // стоит на стекле меню, и контраст её текста — этот.
+      expect(result.disabledRatio, `контраст disabled на своей подложке, ${where}`)
         .toBeGreaterThanOrEqual(4.5);
+
+      // Недостижимое состояние проверяется на читаемость, а не на AA: приглушённый
+      // `#6b7280` на 6 % заливке даёт в светлой палитре около 4.3:1, и ни AA, ни
+      // «просто посмотрим» здесь не выполнимы — состояния нет. Пол 4:1 держит
+      // ровно одно: палитра не уехала до состояния, в котором строка нечитаема.
+      expect(result.tonedRatio, `читаемость disabled на активной строке, ${where}`)
+        .toBeGreaterThanOrEqual(4);
     }
   });
 
-  test('токен --vc-active-bg существует и по умолчанию равен акценту', async ({ page, request }) => {
+  test('токен --vc-active-bg существует и по умолчанию равен заливке наведения', async ({ page, request }) => {
     // Ручка настройки входит в публичную поверхность: спека 11 перечисляет токен,
     // и таблица токенов в README унаследует его. Объявлен он обязан быть во всех
     // трёх палитрах, иначе одна тема осталась бы без ручки, а кейс по умолчанию
@@ -1299,16 +1643,19 @@ test.describe('пункты и состояния', () => {
     const css = await readStylesheet(request);
     for (const selector of THEME_SELECTORS) {
       expect(readRule(css, selector), `токен в палитре ${selector}`)
-        .toContain('--vc-active-bg: var(--vc-accent)');
+        .toContain('--vc-active-bg: var(--vc-hover-bg)');
     }
 
-    // И вживую: ручка равна акценту по умолчанию, то есть ни одна тема не теряет
-    // контраст. Обход идёт по всем трём палитрам, а не по двум системным схемам:
-    // под `auto` тёмную палитру `[data-vc-theme="dark"]` вообще не достать.
+    // И вживую: ручка по умолчанию равна мышиной заливке, то есть выделение с
+    // клавиатуры и с мыши неразличимо. Обход идёт по всем трём палитрам, а не по
+    // двум системным схемам: под `auto` тёмную палитру
+    // `[data-vc-theme="dark"]` вообще не достать.
     for (const [theme, scheme] of THEME_CASES) {
       const result = await readActiveRow(page, theme, scheme);
-      expect(result.activeBg, `--vc-active-bg против --vc-accent, ${theme}/${scheme}`)
-        .toBe(result.accent);
+      expect(
+        parseColor(result.activeBg),
+        `--vc-active-bg против --vc-hover-bg, ${theme}/${scheme}`,
+      ).toEqual(parseColor(result.hoverBg));
       expect(result.ratio, `контраст с ручкой на месте, ${theme}/${scheme}`)
         .toBeGreaterThanOrEqual(4.5);
     }
