@@ -520,6 +520,11 @@ test.beforeEach(async ({ page }) => {
 
     // Активация пункта — единственный путь и для мыши, и для клавиатуры: обработчик
     // один, и он достаёт коллбэк по внутреннему ключу пункта из общей карты.
+    //
+    // Закрытие живёт здесь же, а не в движке: в `MyContext` его делает
+    // `#onLevelClick` в своём `finally`, и после активации движок `closeAll` не
+    // зовёт — второй вызов был бы двойным закрытием с двойным возвратом фокуса.
+    // Фикстура повторяет это разделение: обработчик активации один и закрывает сам.
     document.addEventListener('click', (event) => {
       const target = event.target;
       if (!(target instanceof Element)) {
@@ -543,6 +548,8 @@ test.beforeEach(async ({ page }) => {
           if (definition !== undefined && definition.action !== undefined) {
             definition.action(event);
           }
+          calls.order.push('close:activation');
+          openedLayer().hideAll();
           return;
         }
       }
@@ -1869,9 +1876,11 @@ test.describe('активация', () => {
     // целью, а не вызов по внутреннему ключу из обхода дерева.
     expect(result.after.clicks).toEqual(['Открыть']);
     // Закрытие после активации — отдельное требование: активация пункта гасит
-    // меню даже там, где его не гасит собственный обработчик.
-    expect(result.after.calls.closeAll).toBe(1);
-    expect(result.after.calls.order).toEqual(['action:Открыть', 'closeAll']);
+    // меню даже там, где его не гасит собственный обработчик. Гасит его обработчик
+    // активации, а не движок: `closeAll` здесь ноль, и «действие, потом закрытие»
+    // остаётся единственным порядком, который вообще возможен.
+    expect(result.after.calls.closeAll).toBe(0);
+    expect(result.after.calls.order).toEqual(['action:Открыть', 'close:activation']);
     expect(result.after.levels.root.open).toBe(false);
     expect(result.after.levels.root.popoverOpen).toBe(false);
     expect(result.steps[1].prevented).toBe(true);
@@ -1932,8 +1941,11 @@ test.describe('активация', () => {
     expect(result.steps[0].focus.label).toBe('Выход');
     expect(result.after.actions).toEqual(['Выход']);
     expect(result.after.clicks).toEqual(['Выход']);
-    expect(result.after.calls.closeAll).toBe(1);
-    expect(result.after.calls.order).toEqual(['action:Выход', 'closeAll']);
+    // `Space` ведёт себя как `Enter` во всём, включая место закрытия: его делает
+    // обработчик активации, а не движок, поэтому журнал тот же и `closeAll` ноль.
+    expect(result.after.calls.closeAll).toBe(0);
+    expect(result.after.calls.order).toEqual(['action:Выход', 'close:activation']);
+    expect(result.after.levels.root.open).toBe(false);
     // Пробел гасится: иначе страница прокрутилась бы под меню.
     expect(result.steps[1].prevented).toBe(true);
   });
@@ -1996,7 +2008,11 @@ test.describe('активация', () => {
     expect(result.after.actions).toEqual(['Пустое подменю']);
     expect(result.after.clicks).toEqual(['Пустое подменю']);
     expect(result.after.calls.openSubmenu).toBe(0);
-    expect(result.after.calls.closeAll).toBe(1);
+    // Пункт без подменю активируется, и закрывает его обработчик активации: журнал
+    // тот же, что у `Enter` на обычном пункте, а `closeAll` движка не зовётся.
+    expect(result.after.calls.closeAll).toBe(0);
+    expect(result.after.calls.order).toEqual(['action:Пустое подменю', 'close:activation']);
+    expect(result.after.levels.root.open).toBe(false);
     // Признаков владельца у пункта нет ни одного: ни `aria-haspopup`, ни
     // `aria-owns`, ни `aria-expanded`, ни `hasSubmenu`. Это решение рендерера, и
     // обязано совпадать с решением слоя и движка.

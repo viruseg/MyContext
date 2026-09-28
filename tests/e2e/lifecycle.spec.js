@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { CURSOR_OFFSET, SAFETY_PADDING } from '../../src/constants.js';
+import { CURSOR_OFFSET, DEFAULT_ANIMATION_DURATION, SAFETY_PADDING } from '../../src/constants.js';
 
 /**
  * Кейсы жизненного цикла `MyContext` против настоящей страницы: клики и клавиши
@@ -128,6 +128,11 @@ const VIEWPORT = { width: 1000, height: 700 };
 // от соседа, поэтому промах по контейнеру исключён.
 const WORKSPACE_POINT = { x: 300, y: 200 };
 const SECOND_POINT = { x: 300, y: 470 };
+
+// Точка, в которой действие пункта набора `reopening` открывает меню заново.
+// Продублирована внутри пробы: колбэк `page.evaluate` сериализуется и видит
+// только своё, а расхождение двух чисел уронило бы кейс на ровном месте.
+const REOPEN_POINT = { x: 520, y: 460 };
 
 /**
  * @param {import('@playwright/test').Page} page
@@ -261,6 +266,20 @@ function rightClickAndRead(page, point = WORKSPACE_POINT) {
  */
 function itemByLabel(page, label) {
   return page.locator('.vc-item').filter({ hasText: label });
+}
+
+/**
+ * Разделитель конкретного уровня. Искать его по подписи нечем — у него её нет, —
+ * а адрес уровня берётся из снимка, чтобы клик ушёл в показанный уровень, а не в
+ * заведённый, но не показанный: у того нет ни ширины, ни высоты, и Playwright
+ * отказался бы наводиться.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {string} levelId
+ * @returns {import('@playwright/test').Locator}
+ */
+function separatorItem(page, levelId) {
+  return page.locator(`#${levelId} .vc-separator`);
 }
 
 /**
@@ -473,6 +492,32 @@ test.beforeEach(async ({ page }) => {
           label: 'Ломает',
           action: () => {
             throw new Error('действие сломано');
+          },
+        },
+      ],
+      // Ровно те строки, клик по которым меню закрывать не должен, и ни одной
+      // закрывающей рядом: разделитель, отключённый пункт и владелец непустого
+      // подменю. Отдельного пункта с действием здесь нет намеренно — «меню не
+      // закрылось» должно означать «закрывать было нечем», иначе кейс прошёл бы на
+      // действии, которое закрывает само.
+      nonclosing: [
+        { type: 'separator' },
+        { label: 'Отключённый', disabled: true, action: () => log.push('отключённый') },
+        { label: 'Владелец', submenu: [{ label: 'Под владельцем' }], action: () => log.push('владелец') },
+      ],
+      // Пункт, чьё действие открывает меню в другом месте страницы. Закрытие,
+      // начатое обработчиком активации после действия, убило бы то, что только что
+      // открыто, и такой обработчик был бы попросту бесполезен. Точка переоткрытия
+      // продублирована в файле как `REOPEN_POINT`: действие зовёт `open()` само и
+      // аргументом пробы получить не может — аргументы `page.evaluate`
+      // сериализуются, а функцию туда не положить.
+      reopening: [
+        { label: 'Тихий', action: () => log.push('тихий') },
+        {
+          label: 'Переоткрыть',
+          action: () => {
+            log.push('переоткрыть');
+            menu?.open({ x: 520, y: 460 });
           },
         },
       ],
@@ -986,6 +1031,99 @@ test.describe('жизненный цикл MyContext', () => {
     // Пункт без подменю активируется как прежде и закрывает меню.
     expect(afterLeaf.log, 'action листа вызван').toEqual(['лист']);
     expect(afterLeaf.openCount, 'меню закрыто').toBe(0);
+  });
+
+  test('клик по пункту без action закрывает меню', async ({ page }) => {
+    await makeMenu(page, 'flat', 'workspace');
+    await rightClick(page, WORKSPACE_POINT);
+    expect((await readMenu(page)).openCount, 'меню открыто').toBe(1);
+
+    await itemByLabel(page, 'Первый').click();
+
+    const after = await readMenu(page);
+    // Отсутствие обработчика не причина оставить меню висеть. Без этого закрытия
+    // «меню не открылось» и «открытое меню пережило клик» различались бы только
+    // снимком до клика, а он и проверяет, что меню было открыто.
+    expect(after.openCount, 'меню закрылось и без обработчика').toBe(0);
+    // Журнал пуст по построению: у набора `flat` действий нет ни у одного пункта, и
+    // контроль живости — кейс про `ids`, где действие есть и срабатывает.
+    expect(after.log, 'обработчиков не вызывалось').toEqual([]);
+    expect(after.errors, 'страница без ошибок').toEqual([]);
+  });
+
+  test('клик по разделителю, отключённому пункту и владельцу подменю не закрывает меню', async ({ page }) => {
+    await makeMenu(page, 'nonclosing', 'workspace');
+    await rightClick(page, WORKSPACE_POINT);
+    const opened = await readMenu(page);
+    expect(opened.openCount, 'меню открыто').toBe(1);
+    const rootId = opened.levels[0].id;
+
+    // Порядок кликов — часть расчёта, а не оформления: подменю раскрывает только
+    // последний клик, и пока оно не раскрыто, ни одна точка уровня не занята
+    // вторым поповером. Обратный порядок проверял бы уже другое — клик по
+    // родительскому уровню при висящем подменю, — и «меню не закрылось» там
+    // означало бы совсем не то.
+    await separatorItem(page, rootId).click();
+    const afterSeparator = await readMenu(page);
+    expect(openIds(afterSeparator), 'разделитель меню не закрыл').toEqual([rootId]);
+
+    // `force` обязателен: проверка пригодности Playwright считает элемент с
+    // `aria-disabled` непригодным и отказывается на него кликать, а настоящий
+    // пользователь кликает по `div` без всяких проверок.
+    await itemByLabel(page, 'Отключённый').click({ force: true });
+    const afterDisabled = await readMenu(page);
+    expect(openIds(afterDisabled), 'отключённый пункт меню не закрыл').toEqual([rootId]);
+
+    await itemByLabel(page, 'Владелец').click();
+    const afterOwner = await readMenu(page);
+    // Клик по владельцу не закрывает, а раскрывает его подменю: закрывать нечего,
+    // потому что действие владельца не зовётся вовсе. Открытые уровни названы
+    // поимённо, а не посчитаны: «открыт и корень» и «открыт один корень» — разные
+    // утверждения, и счётчик их не различает.
+    const root = /** @type {LevelView} */ (afterOwner.levels.find((level) => level.id === rootId));
+    const submenuId = /** @type {string} */ (root.items[2].owns);
+    expect(openIds(afterOwner), 'подменю владельца раскрыто, корень на месте').toEqual([rootId, submenuId]);
+    // Ни один обработчик не зван: у всех трёх строк клик уходит на ветку, которая
+    // закрывать нечем, и журнал это подтверждает.
+    expect(afterOwner.log, 'ни одно действие не вызвано').toEqual([]);
+    expect(afterOwner.errors, 'страница без ошибок').toEqual([]);
+  });
+
+  test('action, вызвавший open(), не отменяется отложенным закрытием', async ({ page }) => {
+    // Часы замораживаются здесь, а не в `beforeEach`: файл держит настоящее время,
+    // и заморозка в общей фикстуре остановила бы таймеры hover intent у всех его
+    // кейсов. Этому кейцу нужна ровно одна вещь — пережить время, — и пауза после
+    // клика поставлена затем, чтобы кейс не прошёл на закрытии, отложенном на
+    // `animationDuration`: снимок снял бы ещё живое меню и ничего бы не сказал.
+    await page.clock.install();
+    await makeMenu(page, 'reopening', 'workspace');
+    const opened = await rightClickAndRead(page);
+    expect(opened.openCount, 'меню открыто').toBe(1);
+    expect(opened.levels[0].rect.left, 'меню открыто в точке клика').toBeCloseTo(
+      WORKSPACE_POINT.x + CURSOR_OFFSET,
+      2,
+    );
+
+    await itemByLabel(page, 'Переоткрыть').click();
+    await page.clock.fastForward(DEFAULT_ANIMATION_DURATION * 2);
+
+    const after = await readMenu(page);
+    // Журнал доказывает, что действие сработало: без него «меню открыто в новой
+    // точке» прошло бы на клике, который не сделал ничего.
+    expect(after.log, 'действие сработало').toEqual(['переоткрыть']);
+    // Меню не просто живо, а живо там, куда его переоткрыло действие: закрытие,
+    // начатое обработчиком активации после действия, убило бы то, что только что
+    // открыто.
+    expect(after.openCount, 'меню открыто в новой точке, а не закрыто').toBe(1);
+    expect(after.levels[0].rect.left, 'меню уехало по горизонтали').toBeCloseTo(
+      REOPEN_POINT.x + CURSOR_OFFSET,
+      2,
+    );
+    expect(after.levels[0].rect.top, 'меню уехало по вертикали').toBeCloseTo(
+      REOPEN_POINT.y + CURSOR_OFFSET,
+      2,
+    );
+    expect(after.errors, 'страница без ошибок').toEqual([]);
   });
 
   test('attach() бросает Error с названием требования, если браузер не умеет Popover API', async ({ page }) => {
