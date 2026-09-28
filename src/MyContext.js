@@ -22,13 +22,15 @@ import { createLayer } from './layer.js';
 /**
  * @typedef {object} MyContextOptions
  * @property {'auto' | 'light' | 'dark'} [theme] тема оформления всех уровней,
- *   `'auto'` по умолчанию.
+ *   `'auto'` по умолчанию. Иное значение отклоняется, а не проходит в разметку.
  * @property {number} [animationDuration] длительность входа, выхода и отложенного
  *   закрытия, мс, `DEFAULT_ANIMATION_DURATION` по умолчанию. Величина одна и та же
- *   у всех трёх, иначе выход не совпадёт с задержкой снятия.
+ *   у всех трёх, иначе выход не совпадёт с задержкой снятия. Требуется конечное
+ *   неотрицательное число: `NaN` дал бы недействительный токен `NaNms`, и переход
+ *   схлопнулся бы в ноль молча.
  * @property {string} [label] доступное имя меню, `DEFAULT_MENU_LABEL` по умолчанию:
  *   имя у уровня обязательно (`createLayer` требует строку), а пустое имя не читается
- *   и не проходит аудит.
+ *   и не проходит аудит — потому и проверяется, а не подставляется по умолчанию.
  */
 
 const ITEM_SELECTOR = '.vc-item';
@@ -181,6 +183,11 @@ function assertPopoverSupport() {
  * показа — наведение, нажатие, клик и клавиатура — не могут разойтись. Клавиатурный
  * путь потому и не переносит фокус сам: `ArrowRight` и `Enter` зовут
  * `host.openSubmenu` и всё, а перенос делает тот же `#openSubmenu`.
+ *
+ * Условие это достаточное только вместе с наличием доступного пункта: на уровне из
+ * одних отключённых пунктов и разделителей `focusFirst` не доходит до регистрации
+ * и меню оказывается показанным, но не отвечающим на клавиши. Выключают его
+ * глобальные обработчики, а не движок.
  *
 
  * **Уровень подменю заводится на шаг вперёд, но не глубже, и только для доступных
@@ -428,6 +435,11 @@ export class MyContext {
     if (this.#destroyed) {
       return;
     }
+    // `target`, а не `currentTarget`, вопреки правилу обработчиков уровня: сюда
+    // `pointerenter` подписан лично на сам пункт, и всплытия нет вовсе, так что
+    // `currentTarget` совпал бы с целью. Расходиться они могут только если этот
+    // обработчик поднять на уровень, а тогда `showTargets.get(target)` вернёт
+    // `undefined` и наведение молча перестанет работать.
     const target = event.target;
     if (!(target instanceof Element)) {
       return;
@@ -668,6 +680,7 @@ export class MyContext {
    */
   constructor(items, options = {}) {
     this.#validate(items);
+    this.#validateOptions(options);
     this.#items = items;
     this.#options = {
       theme: options.theme ?? 'auto',
@@ -862,8 +875,14 @@ export class MyContext {
    */
   #keyboardHost() {
     return {
+      // Проверка та же, что и на пути мыши в `#onLevelClick`: действие пункта вправе
+      // уничтожить экземпляр — «снять с экрана по выбору» обычная форма, — и
+      // `closeAll()` после этого бросил бы со стороны движка. Движок о жизненном
+      // цикле не знает и знать не должен, поэтому граница проходит здесь.
       closeAll: () => {
-        this.close();
+        if (!this.#destroyed) {
+          this.close();
+        }
       },
       openSubmenu: (entry) => {
         this.#openSubmenu(entry);
@@ -1238,6 +1257,47 @@ export class MyContext {
   #assertAlive() {
     if (this.#destroyed) {
       throw new Error(DESTROYED_MESSAGE);
+    }
+  }
+
+  /**
+   * Проверка `options` по той же причине и по тому же правилу, что и для пунктов:
+   * негодная опция иначе выдаёт себя за рабочую. Ошибочная `theme` попадает в
+   * `data-vc-theme` дословно, и меню в тёмном приложении тихо рисуется светлым;
+   * нечисловая длительность даёт недействительный токен `NaNms`, и переход
+   * схлопывается в ноль — анимация пропадает без единой ошибки. Обе поломки
+   * необратимы и не видны, поэтому проверяем здесь, а не «когда всплывёт».
+   *
+   * @param {unknown} options опции как их передал вызывающий.
+   * @returns {void}
+   * @throws {TypeError} на первом негодном поле; путь до поля — в сообщении.
+   */
+  #validateOptions(options) {
+    const path = 'options';
+    if (!isRecord(options)) {
+      throw new TypeError(`${path}: опции должны быть объектом`);
+    }
+    const { theme, animationDuration, label } = options;
+    if (theme !== undefined && theme !== 'auto' && theme !== 'light' && theme !== 'dark') {
+      throw new TypeError(
+        `${path}.theme: неизвестная тема «${String(theme)}», ожидается auto, light или dark`,
+      );
+    }
+    if (animationDuration !== undefined) {
+      if (typeof animationDuration !== 'number' || !Number.isFinite(animationDuration)) {
+        throw new TypeError(
+          `${path}.animationDuration: длительность должна быть конечным числом, мс`,
+        );
+      }
+      if (animationDuration < 0) {
+        throw new TypeError(`${path}.animationDuration: длительность не может быть отрицательной`);
+      }
+    }
+    // `label` — имя уровня, и оно обязано быть читаемым: пустое имя не читается
+    // скринридером и не проходит аудит, а нечисловое попадёт в `aria-label`
+    // строкой. Раньше и то и другое проходило молча.
+    if (label !== undefined && !isNonEmptyString(label)) {
+      throw new TypeError(`${path}.label: имя меню обязано быть непустой строкой`);
     }
   }
 

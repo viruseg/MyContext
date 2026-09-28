@@ -5,9 +5,14 @@
  * `SAFETY_PADDING` ↔ `--vc-padding`, `DEFAULT_ITEM_HEIGHT` ↔ `--vc-item-height`,
  * `DEFAULT_ICON_SIZE` ↔ `--vc-icon-size`, `DEFAULT_CHEVRON_SIZE` ↔
  * `--vc-chevron-size`, `DEFAULT_RADIUS` ↔ `--vc-radius`,
- * `DEFAULT_ANIMATION_DURATION` ↔ `--vc-animation-duration`. Расхождение ломает
- * геометрию: движок позиционирования измеряет элемент, уже ограниченный CSS, и
- * считает, что отступ до края равен `SAFETY_PADDING`.
+ * `DEFAULT_ANIMATION_DURATION` ↔ `--vc-animation-duration`.
+ *
+ * Расхождение с `--vc-padding` сдвигает расчёт: движок позиционирования измеряет
+ * элемент, уже ограниченный CSS, и считает отступ до края равным
+ * `SAFETY_PADDING`. Само по себе смещение рамки вьюпорт не покинет — предельные
+ * `max-width` и `max-height` выведены из `--vc-padding` же, — но решение о том,
+ * в какую сторону развернуть меню, примет неверный. Остальные пять констант
+ * читаются только тестами, как зеркала токенов, и на поведение не влияют.
  */
 
 /**
