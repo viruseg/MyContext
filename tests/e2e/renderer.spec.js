@@ -1091,7 +1091,9 @@ test.describe('каркас уровня', () => {
         tabIndex: level.element.getAttribute('tabindex'),
         listRole: list.getAttribute('role'),
         listClass: list.className,
-        // Внутри уровня — только список: всё остальное строится при открытии.
+        // Внутри уровня — зоны и список. Зоны строятся всегда, в том числе у короткого
+        // списка: показывает их слой, и место для этого решения — один атрибут,
+        // а не разная разметка.
         children: level.element.children.length,
         // Имя опционально, и без него атрибута нет, а не пустая строка.
         withoutLabel: withoutLabel.element.getAttribute('aria-label'),
@@ -1110,8 +1112,62 @@ test.describe('каркас уровня', () => {
       tabIndex: '-1',
       listRole: 'group',
       listClass: 'vc-list',
-      children: 1,
+      children: 3,
       withoutLabel: null,
+    });
+  });
+
+  test('зоны прокрутки: обе зоны — соседи списка и недоступны с клавиатуры', async ({ page }) => {
+    const result = await page.evaluate(async (levelItems) => {
+      const { renderLevel } = await import('../../src/renderer.js');
+      const level = renderLevel(levelItems, {
+        levelIndex: 0,
+        menuId: 'vc-level-0',
+        actions: new Map(),
+      });
+      /**
+       * @param {string} selector
+       * @returns {{ className: string, ariaHidden: string | null, tabIndex: string | null, position: number }}
+       */
+      const read = (selector) => {
+        const zone = level.element.querySelector(selector);
+        if (zone === null) {
+          throw new Error(`у уровня нет узла ${selector}`);
+        }
+        return {
+          className: zone.className,
+          ariaHidden: zone.getAttribute('aria-hidden'),
+          tabIndex: zone.getAttribute('tabindex'),
+          // Порядок детей — это контракт: зоны обязаны стоять по краям списка, и
+          // слой их потом кликает, полагаясь ровно на это расположение.
+          position: Array.from(level.element.children).indexOf(zone),
+        };
+      };
+      const list = /** @type {HTMLElement} */ (level.element.querySelector('.vc-list'));
+      return {
+        up: read('.vc-scroll-zone-up'),
+        down: read('.vc-scroll-zone-down'),
+        listPosition: Array.from(level.element.children).indexOf(list),
+        // Зоны не скроллятся и не перехватывают фокус: у них нет ни своей роли,
+        // ни вкладки, а курсор по ним всё равно проходит.
+        listTabIndex: list.getAttribute('tabindex'),
+        // `scroll` обязан отдавать те же узлы, что лежат в DOM: слой строит по
+        // ним контроллер, и другие узлы оставили бы зоны привязанными к
+        // отброшенной разметке — молча, без единой ошибки.
+        scrollUpIsZone: level.scroll.up === level.element.querySelector('.vc-scroll-zone-up'),
+        scrollDownIsZone: level.scroll.down === level.element.querySelector('.vc-scroll-zone-down'),
+        scrollListIsList: level.scroll.list === list,
+      };
+    }, FIXTURE_ITEMS);
+
+    expect(result).toEqual({
+      up: { className: 'vc-scroll-zone vc-scroll-zone-up', ariaHidden: 'true', tabIndex: null, position: 0 },
+      down: { className: 'vc-scroll-zone vc-scroll-zone-down', ariaHidden: 'true', tabIndex: null, position: 2 },
+      listPosition: 1,
+      listTabIndex: null,
+      scrollUpIsZone: true,
+      scrollDownIsZone: true,
+      scrollListIsList: true,
     });
   });
 

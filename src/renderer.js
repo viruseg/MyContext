@@ -2,12 +2,12 @@ import { renderIcon } from './icons.js';
 
 /**
  * Рендерер уровней меню: строит DOM одного уровня — сам элемент уровня,
- * прокручиваемый список внутри него и пункты.
+ * прокручиваемый список внутри него, зоны прокрутки по краям списка и пункты.
  *
  * Модуль ничего не знает про открытие, позиционирование, клавиатуру и закрытие.
- * Он отдаёт разметку и три контракта, на которые опираются остальные: внутренний
- * ключ пункта, список доступных фокусу пунктов и зарезервированные идентификаторы
- * подменю для `aria-owns`.
+ * Он отдаёт разметку и контракты, на которые опираются остальные: внутренний
+ * ключ пункта, список доступных фокусу пунктов, зарезервированные идентификаторы
+ * подменю для `aria-owns` и узлы прокрутки уровня.
  *
  * Четыре решения, которые нельзя вывести из разметки, зафиксированы здесь.
  *
@@ -111,11 +111,20 @@ import { renderIcon } from './icons.js';
  */
 
 /**
+ * @typedef {object} ScrollZoneNodes
+ * @property {HTMLElement} list прокручиваемый список уровня.
+ * @property {HTMLElement} up верхняя зона.
+ * @property {HTMLElement} down нижняя зона.
+ */
+
+/**
  * @typedef {object} RenderedLevel
  * @property {HTMLElement} element узел уровня. Не вставлен в документ: это дело
  *   вызывающего, потому что перед показом его надо измерить.
  * @property {RenderedItem[]} items все узлы уровня по порядку, включая
  *   разделители. Доступные фокусу пункты — те, у кого `focusable`.
+ * @property {ScrollZoneNodes} scroll узлы прокрутки уровня; слой создаёт по ним
+ *   контроллер, поэтому разметка отдаётся явно, а не ищется селектором.
  */
 
 const SEPARATOR_TYPE = 'separator';
@@ -291,8 +300,24 @@ export function renderItem(item, context, itemIndex, setSize) {
 }
 
 /**
+ * Зона прокрутки. `aria-hidden` и отсутствие `tabindex` — контракт доступности:
+ * курсор через зону проходит, а фокус и чтение с экрана — нет, иначе ровно на
+ * прокручиваемом уровне в кольцо роуминга попал бы элемент без содержимого.
+ *
+ * @param {'up' | 'down'} edge сторона списка, у которой зона стоит.
+ * @returns {HTMLElement}
+ */
+function renderScrollZone(edge) {
+  const zone = document.createElement('div');
+  zone.className = `vc-scroll-zone vc-scroll-zone-${edge}`;
+  zone.setAttribute('aria-hidden', 'true');
+  return zone;
+}
+
+/**
  * Строит уровень меню целиком: `div.vc-menu[popover=manual][role=menu]` с
- * `div.vc-list[role=group]` внутри и разметкой всех пунктов.
+ * `div.vc-list[role=group]` внутри, зонами прокрутки по краям списка и разметкой
+ * всех пунктов.
  *
  * Уровень остаётся невставленным в документ: перед показом его измеряют вслепую
  * (спека 7.3), и только после этого вставляют в `<body>`.
@@ -315,10 +340,20 @@ export function renderLevel(items, context) {
     element.setAttribute('aria-label', context.label);
   }
 
+  // Зоны строятся всегда, в том числе у короткого списка, где их не видно:
+  // показывает их слой, и место для этого решения — один атрибут, а не разная
+  // разметка. Порядок «зона — список — зона» и есть то, по чему зоны считаются
+  // краями списка: меню — колонка, и края у неё заданы порядком детей.
+  const up = renderScrollZone('up');
+  element.appendChild(up);
+
   const list = document.createElement('div');
   list.className = 'vc-list';
   list.setAttribute('role', 'group');
   element.appendChild(list);
+
+  const down = renderScrollZone('down');
+  element.appendChild(down);
 
   const setSize = countItems(items);
   /** @type {RenderedItem[]} */
@@ -339,5 +374,5 @@ export function renderLevel(items, context) {
     rendered.push(entry);
   }
 
-  return { element, items: rendered };
+  return { element, items: rendered, scroll: { list, up, down } };
 }
