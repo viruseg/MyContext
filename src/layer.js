@@ -1,6 +1,7 @@
 import { DEFAULT_ANIMATION_DURATION, SAFETY_PADDING } from './constants.js';
 import { calculateMenuPosition, calculateSubmenuPosition } from './positioner.js';
 import { renderLevel } from './renderer.js';
+import { createScrollZones } from './scrollZones.js';
 import { applyAnimationDuration, applyTheme } from './theme.js';
 
 /**
@@ -38,11 +39,13 @@ import { applyAnimationDuration, applyTheme } from './theme.js';
  * `prefers-reduced-motion: reduce` расхождения не видно — там `transform` обнулён, —
  * и ошибка проявилась бы только у пользователей с обычным движением.
  *
- * **Временный порядок внутри показа жёсткий.** Раскладка → расчёт → снятие маски →
- * запись координат → `showPopover()`. Маску снимают раньше записи координат, а не
- * после: `left` и `top` принадлежат и маске, и результату, поэтому обратный порядок
- * стёр бы написанное. Запись координат до показа обязательна: показ до расчёта
- * означал бы, что позиция выведена из габаритов `0×0`.
+ * **Временный порядок внутри показа жёсткий.** Раскладка → решение о прокрутке →
+ * расчёт → снятие маски → запись координат → `showPopover()`. Решение о прокрутке
+ * стоит между раскладкой и расчётом: показ зон меняет раскладку уровня, и замер до
+ * него считал бы меню не по той рамке, на которой оно встанет. Маску снимают раньше
+ * записи координат, а не после: `left` и `top` принадлежат и маске, и результату,
+ * поэтому обратный порядок стёр бы написанное. Запись координат до показа
+ * обязательна: показ до расчёта означал бы, что позиция выведена из габаритов `0×0`.
  *
  * **`hidePopover()` убирает элемент из Top Layer мгновенно**, и выходной анимации
  * не было бы. Закрытие отложено ровно на `animationDuration`, и закрывает его
@@ -92,6 +95,7 @@ import { applyAnimationDuration, applyTheme } from './theme.js';
  * @typedef {import('./renderer.js').RenderContext} RenderContext
  * @typedef {import('./renderer.js').RenderedItem} RenderedItem
  * @typedef {import('./renderer.js').RenderedLevel} RenderedLevel
+ * @typedef {import('./scrollZones.js').ScrollZones} ScrollZones
  */
 
 /**
@@ -331,7 +335,32 @@ export function createLayer(options) {
   const levels = [];
   /** @type {Map<LevelEntry, unknown>} */
   const pendingHides = new Map();
+  /**
+   * Контроллер прокрутки на каждый уровень. Живёт здесь, а не в `LevelEntry`,
+   * потому что `LevelEntry` описывает уровень как уровень, и прокрутка сделала
+   * бы его контрактом сразу о двух вещах.
+   *
+   * @type {Map<LevelEntry, ScrollZones>}
+   */
+  const zones = new Map();
   let destroyed = false;
+
+  /**
+   * Единственный способ получить `LevelEntry` — `createEntry`, а он обязан
+   * зарегистрировать контроллер. Проверка не паранойя: она повторяет приём с
+   * зарезервированным `aria-owns` и заменяет молчаливую потерю состояния при
+   * рассинхроне.
+   *
+   * @param {LevelEntry} entry
+   * @returns {ScrollZones}
+   */
+  function zonesOf(entry) {
+    const controller = zones.get(entry);
+    if (controller === undefined) {
+      throw new Error('MyContext: у уровня нет контроллера зон прокрутки');
+    }
+    return controller;
+  }
 
   /**
    * @param {Array<MenuItem | SeparatorItem>} items
@@ -359,6 +388,12 @@ export function createLayer(options) {
       activeIndex: -1,
     };
     levels.push(entry);
+    zones.set(entry, createScrollZones({
+      list: rendered.scroll.list,
+      level: entry.element,
+      up: rendered.scroll.up,
+      down: rendered.scroll.down,
+    }));
     return entry;
   }
 
@@ -403,9 +438,10 @@ export function createLayer(options) {
   }
 
   /**
-   * Показ уровня целиком: подключение, замер вслепую, расчёт положения, запись
-   * координат и только потом `showPopover`. Расчёт отдан на откуп `place`, потому
-   * что корень и подменю считаются по-разному, а порядок шагов у них один.
+   * Показ уровня целиком: подключение, решение о прокрутке, замер вслепую, расчёт
+   * положения, запись координат и только потом `showPopover`. Расчёт отдан на откуп
+   * `place`, потому что корень и подменю считаются по-разному, а порядок шагов у
+   * них один.
    *
    * @param {LevelEntry} entry
    * @param {(size: MenuSize) => Placement} place
@@ -420,6 +456,10 @@ export function createLayer(options) {
     // нули. Перенос при этом поднимает уровень в конец `<body>`, а порядок
     // отрисовки в Top Layer следует за порядком в DOM.
     document.body.appendChild(element);
+    // Решение о прокрутке — после раскладки и до замера: перебор читается по живому
+    // списку, а показ зон меняет раскладку уровня, и замер обязан видеть ту, на
+    // которой меню встанет.
+    zonesOf(entry).refresh();
     const rect = element.getBoundingClientRect();
     const placement = place({ width: rect.width, height: rect.height });
     // Маска снимается раньше записи координат: `left` и `top` есть и у маски, и у
@@ -531,6 +571,9 @@ export function createLayer(options) {
     const generation = entry.generation;
     clearPendingHide(entry);
     entry.open = false;
+    // Прокрутка встаёт вместе с уровнем: под `data-vc-closing` зоны не принимают
+    // событий, и оставшийся кадр гонял бы список, к которому никто не прикоснётся.
+    zonesOf(entry).stop();
     collapseOwner(entry);
     // Под `reduce` отложенность пропускается целиком. Причина не в кликах по
     // странице: под `reduce` в CSS стоит `transition: none`, и `display` меняется
@@ -624,8 +667,12 @@ export function createLayer(options) {
       entry.element.hidePopover();
       entry.element.remove();
       entry.open = false;
+      // Контроллер снимает и живой кадр, и слушателей: кадр на отцеплённом узле
+      // гонял бы список, которого больше нет, и держал бы его до конца страницы.
+      zonesOf(entry).destroy();
     }
     levels.length = 0;
+    zones.clear();
     root = null;
   }
 

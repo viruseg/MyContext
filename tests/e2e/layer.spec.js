@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { DEFAULT_ANIMATION_DURATION, SAFETY_PADDING } from '../../src/constants.js';
+import { DEFAULT_ANIMATION_DURATION, SAFETY_PADDING, SCROLL_ZONE_HEIGHT } from '../../src/constants.js';
 
 // Модуль подгружается динамическим импортом прямо в странице, и спецификатор
 // `../../src/layer.js` обслуживает обе среды: в браузере от
@@ -42,6 +42,17 @@ import { DEFAULT_ANIMATION_DURATION, SAFETY_PADDING } from '../../src/constants.
  * @property {string} transform инлайновый `transform` в момент показа.
  * @property {boolean} closing стоит ли на уровне `data-vc-closing` в момент
  *   показа. Пока атрибут стоит, `opacity` уже ноль и вход не отыграл бы.
+ */
+
+/**
+ * @typedef {object} ZoneReading
+ * @property {string | null} attribute значение `data-vc-scrollable` на уровне.
+ * @property {string[]} displays вычисленный `display` зон по порядку в разметке:
+ *   верхняя, нижняя.
+ * @property {number[]} heights высота зон по порядку в разметке, px.
+ * @property {boolean} overflows переполняется ли список уровня. Контрольное
+ *   поле: без него признак проверялся бы на уровне, который и не должен
+ *   прокручиваться, и решение слоя прошло бы вхолостую.
  */
 
 /**
@@ -166,6 +177,18 @@ const WIDE_ITEMS = [
   { label: 'Вторая длинная подпись пункта' },
   { label: 'Третья длинная подпись пункта меню' },
 ];
+
+/**
+ * Корневой уровень из сорока пунктов: по 28 px на строку это 1120 px содержимого
+ * при рамке 684 px, то есть заведомое переполнение. Только на таком уровне слой
+ * вообще принимает решение о прокрутке, а обратную сторону того же решения
+ * приходится проверять на коротком.
+ *
+ * @type {Array<MenuItem | SeparatorItem>}
+ */
+const LONG_ITEMS = Array.from({ length: 40 }, (unused, index) => {
+  return { label: `Пункт ${index + 1}` };
+});
 
 /**
  * Проба ставится в `beforeEach` на глобальный объект страницы и достаётся
@@ -633,6 +656,153 @@ test.describe('показ', () => {
     // Перепоказ первого поднял его снова: без переноса в конец `<body>` он
     // остался бы под соседним, и верхним осталось бы то, что показано раньше.
     expect(result.afterReshow).toBe(result.ids.first);
+  });
+
+  test('признак прокручиваемости ставится на показ и снимается на коротком', async ({ page }) => {
+    const result = await page.evaluate(({ longItems, shortItems }) => {
+      const host = /** @type { { __vcProbe: LayerProbe } } */ (/** @type { unknown } */ (globalThis));
+      const probe = host.__vcProbe;
+      /**
+       * @param {Array<MenuItem | SeparatorItem>} items
+       * @returns {ZoneReading}
+       */
+      const shown = (items) => {
+        // Отдельный слой на каждый уровень: `ensureLevel` у корня отдаёт тот же
+        // уровень по ссылке, и второй вызов с другими пунктами вернул бы первый.
+        const layer = probe.create();
+        const entry = layer.ensureLevel(items, null, 0, null);
+        layer.showRoot(entry, { x: 40, y: 40 });
+        const list = /** @type {HTMLElement} */ (entry.element.querySelector('.vc-list'));
+        const zones = Array.from(entry.element.querySelectorAll('.vc-scroll-zone'));
+        return {
+          attribute: entry.element.getAttribute('data-vc-scrollable'),
+          displays: zones.map((zone) => {
+            return globalThis.getComputedStyle(zone).display;
+          }),
+          heights: zones.map((zone) => {
+            return zone.getBoundingClientRect().height;
+          }),
+          overflows: list.scrollHeight > list.clientHeight,
+        };
+      };
+      return { long: shown(longItems), short: shown(shortItems) };
+    }, { longItems: LONG_ITEMS, shortItems: WIDE_ITEMS });
+
+    // Контроль переполнения обязателен у обоих уровней: признак, проверяемый
+    // ниже, читается осмысленно только тогда, когда переполнение у длинного
+    // есть, а у короткого — нет.
+    expect(result.long.overflows, 'длинный уровень переполняется').toBe(true);
+    expect(result.short.overflows, 'короткий уровень не переполняется').toBe(false);
+    // Признак стоит на длинном уровне, и стоит пустой строкой: его ставит
+    // `setAttribute` без значения, и любое другое значение означало бы другого
+    // писателя признака.
+    expect(result.long.attribute, 'признак на длинном уровне').toBe('');
+    // Обе зоны показаны разом, одной величиной: показ — это атрибут на уровне,
+    // и per-зонального решения у слоя нет.
+    expect(result.long.displays).toEqual(['flex', 'flex']);
+    expect(result.long.heights).toEqual([SCROLL_ZONE_HEIGHT, SCROLL_ZONE_HEIGHT]);
+    // На коротком признака нет, и зоны скрыты: иначе меню из трёх пунктов
+    // получало бы две пустые полосы по краям.
+    expect(result.short.attribute, 'признак на коротком уровне').toBe(null);
+    expect(result.short.displays).toEqual(['none', 'none']);
+  });
+
+  test('нижний край прижатого к низу длинного меню доходит до padding, а не перешагивает его', async ({ page }) => {
+    // Настоящее движение: рамка читается в первом кадре показа, то есть в начале
+    // входного перехода. Под `reduce` перехода нет вовсе, и кейс мерил бы у меню,
+    // которого в показанном состоянии не бывает.
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    const result = await page.evaluate(({ longItems, padding }) => {
+      const host = /** @type { { __vcProbe: LayerProbe } } */ (/** @type { unknown } */ (globalThis));
+      const layer = host.__vcProbe.real();
+      const entry = layer.ensureLevel(longItems, null, 0, null);
+      // Точка у самого низа вьюпорта: меню в неё не помещается, и позиционер
+      // прижимает его к нижнему отступу. Без этого кейс измерял бы меню там, где
+      // нижнему краю некуда перешагивать.
+      layer.showRoot(entry, { x: 40, y: window.innerHeight - 10 });
+
+      const element = entry.element;
+      const list = /** @type {HTMLElement} */ (element.querySelector('.vc-list'));
+      const down = /** @type {HTMLElement} */ (element.querySelector('.vc-scroll-zone-down'));
+      return {
+        // Раскладка, а не рамка: `offset*` трансформацию не знает, и кейс видит
+        // ту высоту, которой располагал позиционер.
+        top: element.offsetTop,
+        height: element.offsetHeight,
+        // Рамка сразу после показа, то есть входного перехода ещё не сделавшего
+        // ни шага: в этом состоянии она и есть то, что показано на экране.
+        bottom: element.getBoundingClientRect().bottom,
+        viewportHeight: window.innerHeight,
+        padding,
+        overflows: list.scrollHeight > list.clientHeight,
+        zoneDisplay: globalThis.getComputedStyle(down).display,
+      };
+    }, { longItems: LONG_ITEMS, padding: SAFETY_PADDING });
+
+    // Контроль: уровень действительно переполняется и зоны на нём показаны. Без
+    // показа зон кейс мерил бы меню, которому зоны не нужны, и решение слоя прошло
+    // бы вхолостую.
+    expect(result.overflows, 'уровень действительно прокручивается').toBe(true);
+    expect(result.zoneDisplay, 'нижняя зона показана').toBe('flex');
+    // Меню во всю доступную высоту и прижато к отступу: clamp исполнился, иначе
+    // нижнему краю некуда было бы перешагивать.
+    expect(result.height).toBe(result.viewportHeight - 2 * result.padding);
+    expect(result.top).toBe(result.padding);
+    // Гарантия спеки: нижний край меню не выходит за отступ до края вьюпорта.
+    expect(result.bottom).toBeLessThanOrEqual(result.viewportHeight - result.padding);
+  });
+
+  test('после смены вьюпорта признак пересчитывается, а не наследуется', async ({ page }) => {
+    const before = await page.evaluate((longItems) => {
+      const host = /** @type { { __vcProbe: LayerProbe } } */ (/** @type { unknown } */ (globalThis));
+      const layer = host.__vcProbe.keep();
+      const entry = layer.ensureLevel(longItems, null, 0, null);
+      layer.showRoot(entry, { x: 40, y: 40 });
+      const list = /** @type {HTMLElement} */ (entry.element.querySelector('.vc-list'));
+      return {
+        attribute: entry.element.getAttribute('data-vc-scrollable'),
+        overflows: list.scrollHeight > list.clientHeight,
+        viewportHeight: window.innerHeight,
+      };
+    }, LONG_ITEMS);
+    // Вдвое выше прежнего: 1120 px содержимого при рамке 1384 px переполнением
+    // больше не являются.
+    await page.setViewportSize({ width: 1280, height: 1400 });
+    const after = await page.evaluate((longItems) => {
+      const host = /** @type { { __vcProbe: LayerProbe } } */ (/** @type { unknown } */ (globalThis));
+      // Тот же слой и тот же уровень: `ensureLevel` с теми же аргументами
+      // возвращает прежний `LevelEntry`, и показ заново идёт по уже показанному
+      // уровню, а не по новому. Открытым при этом он остаётся — на живом меню
+      // смена вьюпорта закрывает его само, и кейс обязан пережить то же самое.
+      const layer = host.__vcProbe.keep();
+      const entry = layer.ensureLevel(longItems, null, 0, null);
+      layer.showRoot(entry, { x: 40, y: 40 });
+      const list = /** @type {HTMLElement} */ (entry.element.querySelector('.vc-list'));
+      const zones = Array.from(entry.element.querySelectorAll('.vc-scroll-zone'));
+      return {
+        attribute: entry.element.getAttribute('data-vc-scrollable'),
+        displays: zones.map((zone) => {
+          return globalThis.getComputedStyle(zone).display;
+        }),
+        overflows: list.scrollHeight > list.clientHeight,
+        viewportHeight: window.innerHeight,
+      };
+    }, LONG_ITEMS);
+
+    // Контроль премиссы: до смены вьюпорта уровень переполнялся и признак стоял,
+    // иначе второй показ ничего бы не наследовал.
+    expect(before.overflows, 'до смены вьюпорта уровень переполняется').toBe(true);
+    expect(before.attribute, 'до смены вьюпорта признак стоит').toBe('');
+    expect(before.viewportHeight, 'вьюпорт кейса').toBe(VIEWPORT.height);
+    expect(after.viewportHeight, 'вьюпорт после смены').toBe(1400);
+    // Контроль в обратную сторону: в новом вьюпорте переполнения нет, то есть
+    // признак обязан сняться по существу, а не из-за смены размера окна.
+    expect(after.overflows, 'после смены вьюпорта переполнения нет').toBe(false);
+    // Признак пересчитан, а не унаследован: без `refresh` в `present` атрибут от
+    // прошлого показа остался бы, и зоны заняли бы 32 px у меню, которому они
+    // не нужны.
+    expect(after.attribute, 'после смены вьюпорта признака нет').toBe(null);
+    expect(after.displays).toEqual(['none', 'none']);
   });
 });
 

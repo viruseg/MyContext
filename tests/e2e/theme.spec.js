@@ -1064,8 +1064,9 @@ test.describe('прокручиваемый список', () => {
       return {
         scrollable: list.scrollHeight > list.clientHeight,
         scrollbarWidth: getComputedStyle(list).scrollbarWidth,
-        // Показ зон решает слой, и слоя с этим решением ещё нет: атрибута на
-        // уровне нет ни в чьём коде, пока его туда не поставит `src/layer.js`.
+        // Признак ставит слой на показе, и на живом прокручиваемом меню он есть.
+        // Значение — пустая строка, а не `null`: его ставит `setAttribute` без
+        // значения, и любое другое значение означало бы другого писателя.
         scrollableAttribute: level.getAttribute('data-vc-scrollable'),
       };
     });
@@ -1073,7 +1074,7 @@ test.describe('прокручиваемый список', () => {
     // Контроль переполнения обязателен: у списка, который не скроллится, полосы
     // нет по определению, и живые утверждения ниже были бы пустыми.
     expect(measured.scrollable, 'список действительно прокручивается').toBe(true);
-    expect(measured.scrollableAttribute, 'решение слоя ещё не принято').toBeNull();
+    expect(measured.scrollableAttribute, 'признак прокручиваемости на уровне есть').toBe('');
     expect(measured.scrollbarWidth, 'полосы нет на живом списке').toBe('none');
   });
 
