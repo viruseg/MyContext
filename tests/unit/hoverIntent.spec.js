@@ -66,6 +66,9 @@ function createManualClock() {
    */
   function advance(ms) {
     currentTime += ms;
+    // Снимок дозревших задач делается до цикла, и это правило часов, а не деталь
+    // реализации: задача, запланированная из колбэка с нулевой задержкой, в этом
+    // проходе не выполнится и сработает на следующем `advance`.
     const due = tasks.filter((task) => task.time <= currentTime).sort((a, b) => a.time - b.time);
     for (const task of due) {
       cancel(task);
