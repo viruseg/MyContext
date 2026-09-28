@@ -1243,7 +1243,8 @@ export class MyContext {
       // `AddEventListenerOptions`, а не `EventListenerOptions`: у второго нет поля
       // `passive`, и подписка без `preventDefault` через него не выражается.
       const options = { capture: true, passive: entry.passive === true };
-      entry.target.addEventListener(entry.type, entry.handler, options);    }
+      entry.target.addEventListener(entry.type, entry.handler, options);
+    }
     this.#globalHandlers = handlers;
   }
 
