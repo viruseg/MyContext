@@ -41,6 +41,14 @@ const DARK_SELECTORS = THEME_SELECTORS.slice(1);
 const DARK_HOVER_BG = 'color-mix(in srgb, var(--vc-text) 10%, transparent)';
 
 /**
+ * Бегунок полосы прокрутки, ровно как он записан во всех трёх палитрах.
+ *
+ * Запись одна и та же, а цвета получаются разными: `color-mix` берёт
+ * `--vc-muted` своей палитры, и в этом весь смысл токена.
+ */
+const SCROLLBAR_THUMB = 'color-mix(in srgb, var(--vc-muted) 45%, transparent)';
+
+/**
  * Все сочетания темы и системной схемы, которые имеет смысл мерить. Явная тема
  * проверяется с обеими схемами: она обязана побеждать системную, и это отдельное
  * утверждение — здесь важно лишь, что палитра достаётся и не теряет контраст.
@@ -937,6 +945,128 @@ test.describe('ограничение габаритов', () => {
 
     const css = await readStylesheet(page.request);
     expect(readRule(css, '.vc-menu')).toContain('max-width: calc(100dvw - 2 * var(--vc-padding))');
+  });
+});
+
+test.describe('прокручиваемый список', () => {
+  test('у прокручиваемого списка узкий скролбар', async ({ page, request }) => {
+    const css = await readStylesheet(request);
+
+    // Полосу задаёт правило самого списка, а не уровня: прокручивается `.vc-list`,
+    // и объявление на `.vc-menu` досталось бы контейнеру, который не скроллится.
+    // Проверка по блоку, а не по файлу: те же два объявления в соседнем правиле
+    // прошли бы здесь молча.
+    const list = readBlock(css, '.vc-list');
+    expect(list, 'ширина полосы задана списку').toContain('scrollbar-width: thin');
+    expect(list, 'цвет полосы задан списку')
+      .toContain('scrollbar-color: var(--vc-scrollbar-thumb) transparent');
+
+    // Бегунок объявлен во всех трёх палитрах, а не только в светлой: у тёмных своя
+    // `--vc-muted`, и одна тема осталась бы с бегунком соседней, а тест по
+    // умолчанию остался бы зелёным. Берётся блок палитры, а не любое правило с
+    // селектором: у `.vc-menu` их в файле несколько, и объявление в соседнем
+    // прошло бы здесь молча.
+    for (const selector of THEME_SELECTORS) {
+      expect(readBlock(css, selector), `бегунок в палитре ${selector}`)
+        .toContain(`--vc-scrollbar-thumb: ${SCROLLBAR_THUMB}`);
+      // Ссылка обязана разрешаться: `color-mix` с необъявленным `--vc-muted` даёт
+      // невычисленное значение, и `scrollbar-color` молча откатился бы на `auto`.
+      expect(readBlock(css, selector), `приглушённый объявлен в палитре ${selector}`)
+        .toMatch(/--vc-muted:\s/);
+    }
+
+    // Решение спеки 7.2 закреплено утверждением, а не комментарием: вернувшиеся
+    // вебкитовские псевдоэлементы выглядели бы заботой о совместимости, а на
+    // деле были бы мёртвым кодом там, где `scrollbar-width` поддержан.
+    expect(css, 'вебкитовские псевдоэлементы полосы').not.toContain('::-webkit-scrollbar');
+
+    // Живая часть: показанный уровень длиннее рамки, и полоса у него именно та.
+    // Фикстура — то же живое меню, каким меряют наведение и клавиатуру: в `#m`
+    // переполнения нет вовсе, и полосу было бы негде мерить. Сорок пунктов —
+    // та же длина, что и в остальных кейсах файла.
+    await mountLiveMenu(page, Array.from({ length: 40 }, (unused, index) => {
+      return { label: `Пункт ${index + 1}` };
+    }));
+    await openLiveMenu(page, { x: 200, y: 200 });
+
+    const measured = await page.evaluate(() => {
+      // Отражение заданного значения проверяется на пустом узле, а не на нашем
+      // списке: движок отдаёт вычисленное значение не везде — там, где полоса
+      // системная, толщина может читаться как `none` при любом нашем правиле, а
+      // где свойство не знают вовсе, его нет и в вычисленном стиле. Проба ставит
+      // значение и читает его обратно, то есть спрашивает движок, а не наш CSS.
+      const probe = document.createElement('div');
+      document.body.appendChild(probe);
+      const probeStyle = getComputedStyle(probe);
+      probe.style.scrollbarWidth = 'thin';
+      const reflectsWidth = probeStyle.scrollbarWidth === 'thin';
+      probe.style.scrollbarWidth = '';
+      probe.style.scrollbarColor = 'rgb(1, 2, 3) transparent';
+      const reflectsColor = typeof probeStyle.scrollbarColor === 'string'
+        && probeStyle.scrollbarColor.startsWith('rgb(1, 2, 3)');
+      probe.remove();
+
+      // Показанный уровень, а не документ: спрятанная фикстура `#m` несёт свою
+      // разметку и переполнена не была бы так, как переполняется живой уровень.
+      const level = document.querySelector('.vc-menu:popover-open');
+      if (level === null) {
+        throw new Error('живое меню не показано');
+      }
+      const list = level.querySelector('.vc-list');
+      if (list === null) {
+        throw new Error('у живого уровня нет списка');
+      }
+      const style = getComputedStyle(list);
+      return {
+        reflectsWidth,
+        reflectsColor,
+        scrollbarWidth: style.scrollbarWidth,
+        scrollbarColor: style.scrollbarColor,
+        scrollable: list.scrollHeight > list.clientHeight,
+        // Токен снимается с уровня, а не со списка: он объявлен в палитре и
+        // достаётся потомку, но полоса красится им именно потому, что список
+        // лежит внутри уровня.
+        thumbToken: getComputedStyle(level).getPropertyValue('--vc-scrollbar-thumb'),
+      };
+    });
+
+    // Контроль переполнения обязателен: у списка, который не скроллится, полосы
+    // нет, и толщину нечего было бы проверять.
+    expect(measured.scrollable, 'список действительно прокручивается').toBe(true);
+    // Контроль самой пробы: если она не отработала, половина живых утверждений
+    // молча выпала бы, и кейс стал бы зелёным на любом CSS.
+    expect(
+      measured.reflectsWidth || measured.reflectsColor,
+      'движок отражает хотя бы одно из свойств полосы',
+    ).toBe(true);
+
+    if (measured.reflectsWidth) {
+      expect(measured.scrollbarWidth, 'толщина полосы на живом списке').toBe('thin');
+    }
+
+    // Цвет полосы — пара «бегунок, дорожка», и движок отдаёт её двумя нотациями:
+    // `color-mix` приходит как `color(srgb … / a)`, прозрачная дорожка — как
+    // `rgba(0, 0, 0, 0)`. На токен смотрим через `resolveColor`, тем же приёмом,
+    // что и весь остальной файл: сравнение записи токена с вычисленным цветом
+    // прошло бы на тождестве.
+    if (measured.reflectsColor) {
+      const [thumb, track] = await Promise.all([
+        resolveColor(page, measured.thumbToken),
+        resolveColor(page, 'transparent'),
+      ]);
+      // `String` не украшение: движок, который не отдаёт пару, отдаст `undefined`,
+      // и разбор молча дал бы пустой список вместо падения с внятным сообщением.
+      const pair = [...String(measured.scrollbarColor).matchAll(/(?:rgba?|color)\([^)]*\)/g)]
+        .map((match) => match[0]);
+      expect(pair, `цвет полосы разобран: ${measured.scrollbarColor}`).toHaveLength(2);
+      // Бегунок непрозрачен и равен токену палитры: при `auto` вместо пары, при
+      // необъявленном токене и при полностью прозрачном бегунке полосы нет.
+      expect(alphaOf(pair[0]), 'бегунок виден').toBeGreaterThan(0);
+      expect(parseColor(pair[0]), 'бегунок равен токену палитры').toEqual(parseColor(thumb));
+      // Дорожка прозрачная: за полосой стекло меню, и вторая непрозрачная краска
+      // поверх него читалась бы рамкой.
+      expect(parseColor(pair[1]), 'дорожка прозрачна').toEqual(parseColor(track));
+    }
   });
 });
 
