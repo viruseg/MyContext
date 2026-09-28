@@ -71,14 +71,21 @@ import { CLOSE_GRACE_MS, OPEN_GRACE_MS } from '../../src/constants.js';
  */
 
 /**
- * @typedef {object} PointerDownRecord
- * @property {number} button номер кнопки из `PointerEvent.button`.
+ * @typedef {object} DownEventRecord
+ * @property {string} type имя события: `pointerdown` либо совместимый `mousedown`.
+ * @property {number} button номер кнопки из `MouseEvent.button`.
  * @property {boolean} prevented `defaultPrevented` к моменту всплытия на документ.
+ * @property {boolean} cancelable `cancelable` события. На неснимаемом событии
+ *   `preventDefault()` не делает ничего, и без этого поля `false` в `prevented` не
+ *   отличался бы от «гашения не было».
+ * @property {string} level `id` ближайшего уровня меню, в чьём дереве оказалась
+ *   цель, `''` вне дерева. Разделяет нажатия по уровням: гасится всё дерево, и
+ *   запись без уровня не сказала бы, в каком именно уровне пришло нажатие.
  */
 
 /**
- * @typedef {object} PointerDownProbe
- * @property {PointerDownRecord[]} __pointerDown записи пробы на `globalThis`.
+ * @typedef {object} DownEventProbe
+ * @property {DownEventRecord[]} __downEvents записи пробы на `globalThis`.
  */
 
 const STYLESHEET_PATH = '/styles/mycontext.css';
@@ -125,6 +132,14 @@ const SHELL_POINT = { x: 180, y: 400 };
 
 /** Второй контейнер — тоже в стороне от первого и от меню. */
 const FAR_POINT = { x: 700, y: 520 };
+
+/**
+ * Номера кнопок из `MouseEvent.button`: те же значения, что у `PointerEvent.button`,
+ * потому что `PointerEvent` продолжает `MouseEvent`.
+ */
+const PRIMARY_BUTTON = 0;
+const MIDDLE_BUTTON = 1;
+const RIGHT_BUTTON = 2;
 
 // Момент заморозки часов. Фиксированная дата вместо `Date.now()`: от неё не
 // зависит ни порядок событий, ни результат, и прогон воспроизводим.
@@ -222,40 +237,63 @@ async function hoverItem(page, label) {
 }
 
 /**
- * Записи пробы `pointerdown`, отобранные по номеру кнопки: `button` у события —
- * не позиция в журнале, и порядок появления событий сам по себе ничего не
- * доказывает, пока записи не отобраны по кнопке.
+ * Заводит пробу нажатий на документе: `pointerdown` и совместимый `mousedown`.
  *
- * @param {import('@playwright/test').Page} page
- * @param {number} button номер кнопки из `PointerEvent.button`.
- * @returns {Promise<PointerDownRecord[]>}
- */
-function readPointerDownsOf(page, button) {
-  return page.evaluate((wanted) => {
-    const scope = /** @type {PointerDownProbe} */ (/** @type {unknown} */ (globalThis));
-    return scope.__pointerDown.filter((entry) => {
-      return entry.button === wanted;
-    });
-  }, button);
-}
-
-/**
- * Заводит пробу `pointerdown` на документе.
- *
- * Фаза всплытия, а не `capture`: гасит библиотека подпиской на самом элементе
- * уровня, а capture на документе прошла бы раньше неё и записала бы `false` даже
- * при исправном поведении — то есть проверяла бы не то событие.
+ * Оба события в фазе всплытия, а не в `capture`: гасит библиотека подпиской на
+ * самом элементе уровня, а capture на документе прошла бы раньше неё и записала
+ * бы `false` даже при исправном поведении — то есть проверяла бы не то событие.
  *
  * @param {import('@playwright/test').Page} page
  * @returns {Promise<void>}
  */
-function watchPointerDown(page) {
+function watchDownEvents(page) {
   return page.evaluate(() => {
-    const scope = /** @type {PointerDownProbe} */ (/** @type {unknown} */ (globalThis));
-    scope.__pointerDown = [];
-    document.addEventListener('pointerdown', (event) => {
-      scope.__pointerDown.push({ button: event.button, prevented: event.defaultPrevented });
-    });
+    const scope = /** @type {DownEventProbe} */ (/** @type {unknown} */ (globalThis));
+    scope.__downEvents = [];
+    /**
+     * @param {MouseEvent} event
+     * @returns {void}
+     */
+    const record = (event) => {
+      const menu = event.target instanceof Element ? event.target.closest('.vc-menu') : null;
+      scope.__downEvents.push({
+        type: event.type,
+        button: event.button,
+        prevented: event.defaultPrevented,
+        cancelable: event.cancelable,
+        level: menu === null ? '' : menu.id,
+      });
+    };
+    document.addEventListener('pointerdown', record);
+    document.addEventListener('mousedown', record);
+  });
+}
+
+/**
+ * Все записи пробы нажатий, по порядку появления.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<DownEventRecord[]>}
+ */
+function readDownEvents(page) {
+  return page.evaluate(() => {
+    const scope = /** @type {DownEventProbe} */ (/** @type {unknown} */ (globalThis));
+    return scope.__downEvents;
+  });
+}
+
+/**
+ * Записи пробы одного вида внутри одного уровня.
+ *
+ * @param {DownEventRecord[]} records все записи пробы.
+ * @param {string} type имя события.
+ * @param {number} button номер кнопки из `MouseEvent.button`.
+ * @param {string} level `id` уровня меню, `''` — событие вне дерева.
+ * @returns {DownEventRecord[]}
+ */
+function downsIn(records, type, button, level) {
+  return records.filter((entry) => {
+    return entry.type === type && entry.button === button && entry.level === level;
   });
 }
 
@@ -865,30 +903,82 @@ test.describe('глобальные слушатели', () => {
     // Наведение по-настоящему, а не заданное в разметке: гасится всё дерево, и
     // кейс обязан бить по пункту, а не по пустой рамке уровня.
     await hoverItem(page, 'Новый');
-    await watchPointerDown(page);
+    await watchDownEvents(page);
+    // `id` корня снимается до нажатий: после них в журнале уже не отличить корень
+    // от подменю, а проверять надо именно там, где пришло нажатие.
+    const rootId = (await readMenu(page)).levels[0].id;
 
     await page.mouse.down({ button: 'middle' });
     await page.mouse.up({ button: 'middle' });
 
-    const middle = await readPointerDownsOf(page, 1);
+    const rootRecords = await readDownEvents(page);
+    const rootPress = downsIn(rootRecords, 'pointerdown', MIDDLE_BUTTON, rootId);
     // Проба обязана увидеть событие: на пустом списке проверка `prevented` была бы
     // пустой, и кейс прошёл бы на пробе, которая ничего не записала.
-    expect(middle, 'событие средней кнопки дошло до пробы').toHaveLength(1);
-    expect(middle[0].prevented, 'средняя кнопка по меню погашена').toBe(true);
+    expect(rootPress, 'средняя кнопка по корню дошла до пробы').toHaveLength(1);
+    expect(rootPress[0].prevented, 'средняя кнопка по корню погашена').toBe(true);
+    // Совместимый `mousedown` не досылается вовсе, а не приходит погашенным:
+    // замерено на chromium, firefox и webkit, движок ведёт себя одинаково. Проверка
+    // на отсутствии, а не на `defaultPrevented`, потому что отменять нечего —
+    // события нет. Контроль ниже доказывает, что проба `mousedown` вообще жива,
+    // иначе пустой список ничего бы не значил.
+    expect(
+      downsIn(rootRecords, 'mousedown', MIDDLE_BUTTON, rootId),
+      'совместимый mousedown по средней кнопке не досылается',
+    ).toEqual([]);
 
     const after = await readMenu(page);
     expect(after.openCount, 'меню осталось открытым').toBe(1);
     expect(after.log, 'действие пункта не вызвано').toEqual([]);
     expect(after.errors, 'страница без ошибок').toEqual([]);
 
+    // Подменю открыто наведением на владельца с доводом часов до задержки показа:
+    // путь нажатия гасится одинаково в любом уровне, и кейс не должен зависеть от
+    // того, каким способом уровень открыт.
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const submenuId = /** @type {string} */ (await submenuIdOf(page, 'Экспорт'));
+    expect(isOpen(await readMenu(page), submenuId), 'подменю «Экспорт» показано').toBe(true);
+
+    await hoverItem(page, 'PDF');
+    await page.mouse.down({ button: 'middle' });
+    await page.mouse.up({ button: 'middle' });
+
+    // Отдельное нажатие по подменю, а не проверка «всех уровней сразу»: подписка
+    // только на корень гасила бы ровно то, что уже проверено выше, и кейс на
+    // ней остался бы зелёным.
+    const submenuRecords = await readDownEvents(page);
+    const submenuPress = downsIn(submenuRecords, 'pointerdown', MIDDLE_BUTTON, submenuId);
+    expect(submenuPress, 'средняя кнопка по подменю дошла до пробы').toHaveLength(1);
+    expect(submenuPress[0].prevented, 'средняя кнопка по подменю погашена').toBe(true);
+    expect(
+      downsIn(submenuRecords, 'mousedown', MIDDLE_BUTTON, submenuId),
+      'совместимый mousedown по средней кнопке в подменю не досылается',
+    ).toEqual([]);
+
+    const withSubmenu = await readMenu(page);
+    expect(withSubmenu.openCount, 'подменю осталось открытым').toBe(2);
+    expect(withSubmenu.log, 'действие пункта подменю не вызвано').toEqual([]);
+    expect(withSubmenu.errors, 'страница без ошибок').toEqual([]);
+
     // Контроль на соседние кнопки: гасится ровно средняя. Без него кейс прошёл бы и
     // на `preventDefault` безусловном, который заблокировал бы всё дерево, и на
     // «гасим всё, кроме основной», который заблокировал бы правый клик.
     await page.mouse.down();
     await page.mouse.up();
-    const primary = await readPointerDownsOf(page, 0);
-    expect(primary, 'событие основной кнопки дошло до пробы').toHaveLength(1);
+    const controls = await readDownEvents(page);
+    const primary = downsIn(controls, 'pointerdown', PRIMARY_BUTTON, submenuId);
+    expect(primary, 'основная кнопка по подменю дошла до пробы').toHaveLength(1);
     expect(primary[0].prevented, 'основная кнопка не погашена').toBe(false);
+    // Основная кнопка не гасится, и потому совместимое событие приходит обычным
+    // порядком. Эта запись доказывает, что проба `mousedown` слушает и пишет: без
+    // неё пустой журнал по средней кнопке был бы свойством мёртвого слушателя, а
+    // не движка. `cancelable` здесь `true`, то есть `preventDefault()` на таком
+    // событии сработало бы, и `false` означает именно «не гасили».
+    const primaryCompat = downsIn(controls, 'mousedown', PRIMARY_BUTTON, submenuId);
+    expect(primaryCompat, 'совместимый mousedown основной кнопки дошёл').toHaveLength(1);
+    expect(primaryCompat[0].cancelable, 'совместимый mousedown снимаем').toBe(true);
+    expect(primaryCompat[0].prevented, 'совместимый mousedown не погашен').toBe(false);
 
     // Правая кнопка — синтетическим `pointerdown`, а не настоящим нажатием: правое
     // нажатие подтверждается `contextmenu`, который зовёт `open()` и переоткрывает
@@ -896,23 +986,25 @@ test.describe('глобальные слушатели', () => {
     // контроль идёт после основной кнопки: та кликает по пункту и закрывает меню.
     // `cancelable` обязателен: у `PointerEvent` он по умолчанию `false`, и при нём
     // `preventDefault()` не делает ничего, то есть проба записала бы `false` и на
-    // заблокированной правой кнопке.
-    await page.evaluate(() => {
+    // заблокированной правой кнопке. Остальные поля не читаются: `buttons` не
+    // смотрит никто, а `composed` отвечает за пересечение тени, которой на
+    // странице нет, — проба и гасящий обработчик живут на обычном дереве. Номер
+    // кнопки приходит аргументом, а не константой модуля: тело `page.evaluate`
+    // уезжает в браузер, где константы спецификации не существует.
+    await page.evaluate((wanted) => {
       const item = document.querySelector('.vc-item');
       if (!(item instanceof HTMLElement)) {
         throw new Error('пункт меню не найден');
       }
       item.dispatchEvent(
         new PointerEvent('pointerdown', {
-          button: 2,
-          buttons: 2,
+          button: wanted,
           bubbles: true,
-          composed: true,
           cancelable: true,
         }),
       );
-    });
-    const right = await readPointerDownsOf(page, 2);
+    }, RIGHT_BUTTON);
+    const right = downsIn(await readDownEvents(page), 'pointerdown', RIGHT_BUTTON, rootId);
     expect(right, 'событие правой кнопки дошло до пробы').toHaveLength(1);
     expect(right[0].prevented, 'правая кнопка не погашена').toBe(false);
   });
