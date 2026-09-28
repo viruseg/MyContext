@@ -70,6 +70,17 @@ import { CLOSE_GRACE_MS, OPEN_GRACE_MS } from '../../src/constants.js';
  * @property {(name: string) => string | null} submenuIdOf
  */
 
+/**
+ * @typedef {object} PointerDownRecord
+ * @property {number} button номер кнопки из `PointerEvent.button`.
+ * @property {boolean} prevented `defaultPrevented` к моменту всплытия на документ.
+ */
+
+/**
+ * @typedef {object} PointerDownProbe
+ * @property {PointerDownRecord[]} __pointerDown записи пробы на `globalThis`.
+ */
+
 const STYLESHEET_PATH = '/styles/mycontext.css';
 
 const PAGE_HTML = `<!doctype html>
@@ -208,6 +219,44 @@ async function centreOf(page, label) {
 async function hoverItem(page, label) {
   const point = await centreOf(page, label);
   await page.mouse.move(point.x, point.y);
+}
+
+/**
+ * Записи пробы `pointerdown`, отобранные по номеру кнопки: `button` у события —
+ * не позиция в журнале, и порядок появления событий сам по себе ничего не
+ * доказывает, пока записи не отобраны по кнопке.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {number} button номер кнопки из `PointerEvent.button`.
+ * @returns {Promise<PointerDownRecord[]>}
+ */
+function readPointerDownsOf(page, button) {
+  return page.evaluate((wanted) => {
+    const scope = /** @type {PointerDownProbe} */ (/** @type {unknown} */ (globalThis));
+    return scope.__pointerDown.filter((entry) => {
+      return entry.button === wanted;
+    });
+  }, button);
+}
+
+/**
+ * Заводит пробу `pointerdown` на документе.
+ *
+ * Фаза всплытия, а не `capture`: гасит библиотека подпиской на самом элементе
+ * уровня, а capture на документе прошла бы раньше неё и записала бы `false` даже
+ * при исправном поведении — то есть проверяла бы не то событие.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<void>}
+ */
+function watchPointerDown(page) {
+  return page.evaluate(() => {
+    const scope = /** @type {PointerDownProbe} */ (/** @type {unknown} */ (globalThis));
+    scope.__pointerDown = [];
+    document.addEventListener('pointerdown', (event) => {
+      scope.__pointerDown.push({ button: event.button, prevented: event.defaultPrevented });
+    });
+  });
 }
 
 /**
@@ -807,6 +856,65 @@ test.describe('глобальные слушатели', () => {
 
     const after = await readMenu(page);
     expect(after.openCount, 'меню осталось открытым').toBe(1);
+  });
+
+  test('средняя кнопка мыши по меню гасится', async ({ page }) => {
+    await makeMenu(page, 'first', 'chain', 'surface');
+    await openAt(page, 'first', SURFACE_POINT);
+    expect((await readMenu(page)).openCount, 'меню открыто').toBe(1);
+    // Наведение по-настоящему, а не заданное в разметке: гасится всё дерево, и
+    // кейс обязан бить по пункту, а не по пустой рамке уровня.
+    await hoverItem(page, 'Новый');
+    await watchPointerDown(page);
+
+    await page.mouse.down({ button: 'middle' });
+    await page.mouse.up({ button: 'middle' });
+
+    const middle = await readPointerDownsOf(page, 1);
+    // Проба обязана увидеть событие: на пустом списке проверка `prevented` была бы
+    // пустой, и кейс прошёл бы на пробе, которая ничего не записала.
+    expect(middle, 'событие средней кнопки дошло до пробы').toHaveLength(1);
+    expect(middle[0].prevented, 'средняя кнопка по меню погашена').toBe(true);
+
+    const after = await readMenu(page);
+    expect(after.openCount, 'меню осталось открытым').toBe(1);
+    expect(after.log, 'действие пункта не вызвано').toEqual([]);
+    expect(after.errors, 'страница без ошибок').toEqual([]);
+
+    // Контроль на соседние кнопки: гасится ровно средняя. Без него кейс прошёл бы и
+    // на `preventDefault` безусловном, который заблокировал бы всё дерево, и на
+    // «гасим всё, кроме основной», который заблокировал бы правый клик.
+    await page.mouse.down();
+    await page.mouse.up();
+    const primary = await readPointerDownsOf(page, 0);
+    expect(primary, 'событие основной кнопки дошло до пробы').toHaveLength(1);
+    expect(primary[0].prevented, 'основная кнопка не погашена').toBe(false);
+
+    // Правая кнопка — синтетическим `pointerdown`, а не настоящим нажатием: правое
+    // нажатие подтверждается `contextmenu`, который зовёт `open()` и переоткрывает
+    // меню, то есть кейс мерил бы не блокировку, а порядок событий. Заодно поэтому
+    // контроль идёт после основной кнопки: та кликает по пункту и закрывает меню.
+    // `cancelable` обязателен: у `PointerEvent` он по умолчанию `false`, и при нём
+    // `preventDefault()` не делает ничего, то есть проба записала бы `false` и на
+    // заблокированной правой кнопке.
+    await page.evaluate(() => {
+      const item = document.querySelector('.vc-item');
+      if (!(item instanceof HTMLElement)) {
+        throw new Error('пункт меню не найден');
+      }
+      item.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          button: 2,
+          buttons: 2,
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+        }),
+      );
+    });
+    const right = await readPointerDownsOf(page, 2);
+    expect(right, 'событие правой кнопки дошло до пробы').toHaveLength(1);
+    expect(right[0].prevented, 'правая кнопка не погашена').toBe(false);
   });
 
   test('правый клик вне дерева закрывает меню, но не подавляет системное', async ({ page }) => {

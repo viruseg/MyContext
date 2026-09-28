@@ -42,6 +42,7 @@ const ICON_TYPES = new Set([RASTER_TYPE, 'emoji', 'svg']);
 const ITEMS_PATH = 'items';
 const CHAIN_ROOT_INDEX = 0;
 const PRIMARY_MOUSE_BUTTON = 0;
+const MIDDLE_MOUSE_BUTTON = 1;
 const DESTROYED_MESSAGE = 'MyContext: экземпляр уничтожен';
 const POPOVER_REQUIREMENT =
   'MyContext: браузер не поддерживает Popover API — нет HTMLElement.prototype.showPopover';
@@ -527,6 +528,26 @@ export class MyContext {
       return;
     }
     this.#feedPointerMove({ x: event.clientX, y: event.clientY });
+  };
+
+  /**
+   * Средняя кнопка мыши не должна ничего делать с меню: по ней браузер запускает
+   * автоскролл и вставку выделенного, а `user-select: none` их не отменяет.
+   * Гасится всё дерево, поэтому подписка на уровень, а не на пункт: `#onItemDown`
+   * висит только на владельцах подменю и блокировать ему нечего.
+   *
+   * Отдельного слушателя на `mousedown` не нужно: отмена `pointerdown` отменяет и
+   * досинтезированное следом совместимое событие.
+   *
+   * @type {(event: PointerEvent) => void}
+   */
+  #onLevelPointerDown = (event) => {
+    if (this.#destroyed) {
+      return;
+    }
+    if (event.button === MIDDLE_MOUSE_BUTTON) {
+      event.preventDefault();
+    }
   };
 
   /**
@@ -1480,6 +1501,7 @@ export class MyContext {
     entry.element.addEventListener('click', this.#onLevelClick);
     entry.element.addEventListener('keydown', this.#onLevelKeydown);
     entry.element.addEventListener('pointermove', this.#onLevelPointerMove);
+    entry.element.addEventListener('pointerdown', this.#onLevelPointerDown);
     // Вход в подменю снимает отложенное закрытие: у корня нет владельца, и вход в
     // него не означает, что курсор идёт к подменю.
     if (parent !== null) {
