@@ -91,6 +91,9 @@ import { CLOSE_GRACE_MS, OPEN_GRACE_MS, SAFETY_PADDING, SUBMENU_OFFSET } from '.
  *   подходящего под селектор. Нужна для строк без подписи: разделителя, у которого
  *   её нет вовсе, и наводить приходится по прямоугольнику, а не по имени.
  * @property {(ownerLabel: string) => string | null} submenuIdOf
+ * @property {(index: number, disabled: boolean) => void} setDisabled правка поля
+ *   `disabled` у пункта набора последнего `make`: автор выключает пункт между
+ *   показами, и поле обязано дойти до уже построенного уровня.
  * @property {(disabled: boolean) => OwnerProbe} ownersOf
  */
 
@@ -437,6 +440,14 @@ test.beforeEach(async ({ page }) => {
         { label: 'Пустой', submenu: [], action: () => log.push('пустой') },
         { label: 'Заметки', action: () => log.push('заметки') },
       ],
+      // Два владельца на одном уровне и больше ничего. Кейс про отключённого
+      // между показами владельца держит подменю второго открытым, пока курсор
+      // стоит на первом, — а без второго владельца закрывать было бы нечего и
+      // проверять было бы не на что.
+      pair: [
+        { label: 'Первый', submenu: [{ label: 'Под первым' }] },
+        { label: 'Второй', submenu: [{ label: 'Под вторым' }] },
+      ],
       // Владелец с подменю, которое не помещается ни справа, ни слева и прижимается
       // к `padding`. Набор отдельный, и длинная подпись в нём нужна ровно для этого:
       // предмет кейса — геометрия показа, а не состав пунктов.
@@ -472,6 +483,9 @@ test.beforeEach(async ({ page }) => {
 
     /** @type {InstanceType<typeof MyContext> | null} */
     let menu = null;
+
+    /** @type {string} имя набора последнего `make`: правке `disabled` подлежит он. */
+    let currentSet = '';
 
     /**
      * @param {Element} item узел пункта или разделителя.
@@ -540,6 +554,7 @@ test.beforeEach(async ({ page }) => {
         if (menu !== null) {
           menu.destroy();
         }
+        currentSet = setName;
         log.length = 0;
         errors.length = 0;
         menu = new MyContext(sets[setName], { label: 'Меню подменю' });
@@ -601,6 +616,18 @@ test.beforeEach(async ({ page }) => {
           }
         }
         return null;
+      },
+      setDisabled(index, disabled) {
+        if (menu === null) {
+          throw new Error('меню не создано');
+        }
+        const item = sets[currentSet][index];
+        if (item === undefined || 'type' in item) {
+          throw new Error('в наборе нет такого пункта');
+        }
+        // Правка поля на живом объекте набора: автор выключает пункт между
+        // показами, и поле обязано дойти до уже построенного уровня.
+        item.disabled = disabled;
       },
       ownersOf(disabled) {
         // Рендер вызывается на тех же данных, что и меню: подменю непустое, и
@@ -951,6 +978,46 @@ test.describe('показ подменю', () => {
     const after = await readMenu(page);
     expect(isOpen(after, exportId), 'подменю «Экспорта» закрыто').toBe(false);
     expect(after.openCount, 'остался корень').toBe(1);
+    expect(expandedLabels(after), 'отметок развёрнутости не осталось').toEqual([]);
+  });
+
+  test('курсор на владельце, отключённом между показами, планирует закрытие как на любой строке', async ({ page }) => {
+    await makeMenu(page, 'pair', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    // Владелец за один показ успевает встать в карту показа подменю. Отключение
+    // между показами обязано оттуда выйти: на отключённом владельце решать нечего,
+    // и обработчик движения курсора возвращается до планирования закрытия, как на
+    // любой другой строке уровня.
+    await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown } */ (globalThis));
+      scope.__mc.close();
+      scope.__mc.setDisabled(0, true);
+    });
+    await openAt(page, OPEN_MIDDLE);
+    const second = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown } */ (globalThis));
+      return scope.__mc.submenuIdOf('Второй');
+    });
+    expect(second, 'второй владелец на месте').not.toBeNull();
+
+    await hoverItem(page, 'Второй');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const opened = await readMenu(page);
+    expect(isOpen(opened, /** @type {string} */ (second)), 'подменю второго открыто').toBe(true);
+    // Контроль премиссы: отключённый владелец не должен ни открывать подменю сам,
+    // ни помечаться развёрнутым.
+    const deaf = itemOf(opened, 'Первый');
+    expect(deaf.haspopup, 'у отключённого владельца нет `aria-haspopup`').toBeNull();
+    expect(deaf.expanded, 'отметки развёрнутости нет').toBeNull();
+
+    await hoverItem(page, 'Первый');
+    await page.clock.fastForward(CLOSE_GRACE_MS);
+
+    const after = await readMenu(page);
+    expect(isOpen(after, /** @type {string} */ (second)), 'подменю второго закрыто').toBe(false);
+    expect(after.openCount, 'остался корень').toBe(1);
+    // Наведение на отключённого владельца не открывает его подменю: раскрывать
+    // нечего, а открытое подменю было бы меню без пути к закрытию.
     expect(expandedLabels(after), 'отметок развёрнутости не осталось').toEqual([]);
   });
 

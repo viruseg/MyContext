@@ -176,6 +176,9 @@ import { expect, test } from '@playwright/test';
 /**
  * @typedef {object} KeyboardProbe
  * @property {(set: string, buildSubmenus?: boolean) => void} open
+ * @property {(index: number, disabled: boolean) => void} reshow повторный показ
+ *   корневого уровня после правки `disabled` у пункта набора: тот же путь, что и
+ *   `open`, но меню не пересобирается.
  * @property {(index: number) => string | null} ensureSubmenu пытается завести
  *   уровень-подменю пункта по индексу и отдаёт сообщение слоя либо `null`, если
  *   уровень заведён.
@@ -243,6 +246,9 @@ test.beforeEach(async ({ page }) => {
     let layer = null;
     /** @type {LevelEntry | null} */
     let root = null;
+    /** @type {string} имя набора, открытого последним: правке `disabled` подлежит
+     *  именно он, а набор приходит в пробу по имени. */
+    let openedSet = '';
     /** @type {Record<string, number[]>} пути снимка последнего прогона. */
     let pathsOfRun = {};
 
@@ -870,6 +876,7 @@ test.beforeEach(async ({ page }) => {
 
     const probe = /** @type {KeyboardProbe} */ ({
       open(set, buildSubmenus) {
+        openedSet = set;
         layer = createLayer({ label: 'Меню файла', theme: 'light', actions });
         const items = sets[set];
         root = layer.ensureLevel(items, null, 0, null);
@@ -880,6 +887,20 @@ test.beforeEach(async ({ page }) => {
         }
         openedLayer().showRoot(root, { x: 60, y: 60 });
         keyboard.registerLevel(root, { focus: true });
+      },
+      reshow(index, disabled) {
+        const items = sets[openedSet];
+        const item = items[index];
+        if (item === undefined || 'type' in item) {
+          throw new Error('в наборе нет такого пункта');
+        }
+        // Правка поля — ровно то, что делает автор между показами, и повторный
+        // показ — ровно то, что делает оркестратор: тот же уровень заново заводится,
+        // показывается и отдаётся движку, без пересборки меню.
+        item.disabled = disabled;
+        const entry = openedLayer().ensureLevel(items, null, 0, null);
+        openedLayer().showRoot(entry, { x: 60, y: 60 });
+        keyboard.registerLevel(entry, { focus: true });
       },
       ensureSubmenu(index) {
         const entry = openedRoot();
@@ -1248,6 +1269,49 @@ test.describe('роуминг-фокус', () => {
       order: [],
     });
     expect(result.after.actions).toEqual([]);
+  });
+
+  test('пункт, выпавший из кольца между показами, не остаётся помеченным', async ({ page }) => {
+    const result = await page.evaluate(() => {
+      const scope = /** @type {{ __vcKb: KeyboardProbe }} */ (
+        /** @type {unknown} */ (globalThis)
+      );
+      const probe = scope.__vcKb;
+      probe.open('offLimits');
+      // Владелец сначала доступен, и на нём появляется отметка роуминга: без неё
+      // кейс проверял бы сброс на пустом месте, а состояние «выключили активный
+      // пункт» было бы не тем, что стоит проверить. Две стрелки — вторая
+      // доступная строка набора, отделять которую от первой нечем, и «Мёртвый
+      // владелец» пропускается кольцом само собой.
+      probe.run([{ command: 'press', key: 'ArrowDown' }, { command: 'press', key: 'ArrowDown' }], {
+        root: [],
+      });
+      const marked = probe.read({ root: [] });
+      // Автор выключает пункт между показами, и меню открывается заново.
+      probe.reshow(2, true);
+      return { marked, after: probe.read({ root: [] }) };
+    });
+
+    expect(result.marked.levels.root.activeMarks, 'отметка была').toBe(1);
+    expect(result.marked.levels.root.focusLabel, 'отмечен владелец').toBe('Живой владелец');
+    // Пункт вне кольца не может нести `tabindex="0"`: иначе `Tab` зациклил бы меню
+    // на элементе, который нельзя выбрать, а `aria-disabled` приглушал бы строку,
+    // помеченную как выбранная.
+    expect(result.after.levels.root.tabStops, 'в цикле Tab никого').toBe(0);
+    expect(result.after.levels.root.activeMarks, 'отметок нет').toBe(0);
+    expect(result.after.levels.root.activeIndex, 'активного пункта нет').toBe(-1);
+    expect(result.after.levels.root.items[2]).toMatchObject({
+      label: 'Живой владелец',
+      tabindex: '-1',
+      active: false,
+      focusable: false,
+      // Признаки раскрытия уходят тем же проходом: раскрыть отключённый пункт
+      // нечем, и `aria-owns` уводил бы скринридер в меню, которого не будет.
+      hasSubmenu: false,
+      haspopup: null,
+      expanded: null,
+      owns: null,
+    });
   });
 
   test('наведение мыши выделяет пункт и перебивает клавиатуру', async ({ page }) => {

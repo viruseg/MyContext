@@ -37,9 +37,18 @@ import { renderIcon } from './icons.js';
  * нечем — ни мышью, ни с клавиатуры, ни кликом, — а шеврон, `aria-haspopup` и
  * `aria-owns` обещали бы раскрытие, которого не будет. В родных меню у
  * отключённого пункта признака подменю тоже нет. Отсюда и то, что решение
- * принимается один раз, а не по двум независимым полям: `focusable` и
- * `hasSubmenu` читают одну и ту же переменную `disabled`, поэтому пункт не может
+ * принимается по одной переменной `disabled`, а не по двум независимым полям:
+ * `focusable` и `hasSubmenu` читают одно и то же, поэтому пункт не может
  * оказаться недоступным для роуминга и при этом обещать подменю.
+ *
+ * **Перечитывается `disabled`, и только он.** Уровень переиспользуется между
+ * показами, а решение о доступности принимается при его сборке, — без
+ * `refreshItems` поле, выставленное автором после первого показа, не действовало
+ * бы никогда. Непустота подменю при этом не перечитывается: состав уровня,
+ * подписи и иконки задаются первой сборкой, и меняются они новым экземпляром.
+ * Владельцем пункт остаётся по факту непустого подменю, снятому при сборке, —
+ * поэтому признак владельца выводится из `submenuId`, а не из текущего
+ * `item.submenu`.
  *
  * **Каждый владелец подменю резервирует `id` подменю в `aria-owns`.** Подменю
  * лежат в `<body>` рядом с корневым меню, а не внутри пункта (спека 8.3):
@@ -49,6 +58,9 @@ import { renderIcon } from './icons.js';
  * нет контейнера-`menu`, и `aria-owns` указывает на ещё не созданный узел.
  * Создатель подменю обязан взять идентификатор из
  * `owner.getAttribute('aria-owns')`: другой id сделал бы ссылку висячей.
+ * Зарезервированный id хранится у пункта в `submenuId` — оттуда его и
+ * возвращает `refreshItems`, потому что второй идентификатор на то же подменю
+ * сделал бы ссылку висячей с другой стороны.
  */
 
 /**
@@ -108,6 +120,15 @@ import { renderIcon } from './icons.js';
  *   `false` у разделителей, у пунктов с пустым `submenu` и у отключённых:
  *   признак один, и он означает «подменю можно раскрыть», а не «подменю есть».
  * @property {string | null} key внутренний ключ пункта; у разделителя `null`.
+ * @property {string | null} submenuId `id`, зарезервированный под подменю этого
+ *   пункта при сборке уровня; у не-владельцев и у разделителя `null`. Непустой
+ *   ровно у тех пунктов, у которых `hasSubmenu` может стать истинным в принципе,
+ *   и `refreshItems` берёт признак владельца отсюда, а не из текущего
+ *   `item.submenu`.
+ * @property {HTMLElement | null} chevron узел `.vc-chevron`; у не-владельцев при
+ *   сборке `null`. `refreshItems` убирает его с пункта, потерявшего владение, и
+ *   возвращает по адресу, а не ищет заново: шеврон в разметке ровно у владельцев,
+ *   и искать его селектором значило бы допустить второе его место.
  */
 
 /**
@@ -210,7 +231,14 @@ function renderSeparator() {
   element.className = 'vc-separator';
   element.setAttribute('role', 'separator');
   element.setAttribute('aria-orientation', 'horizontal');
-  return { element, focusable: false, hasSubmenu: false, key: null };
+  return {
+    element,
+    focusable: false,
+    hasSubmenu: false,
+    key: null,
+    submenuId: null,
+    chevron: null,
+  };
 }
 
 /**
@@ -233,6 +261,8 @@ function renderMenuItem(item, context, itemIndex, setSize) {
   // обещал подменю, которое нечем было раскрыть.
   const disabled = item.disabled === true;
   const hasSubmenu = isSubmenuOwner(item);
+  /** @type {string | null} */
+  let submenuId = null;
   const element = document.createElement('div');
   element.className = 'vc-item';
   element.setAttribute('role', 'menuitem');
@@ -246,12 +276,13 @@ function renderMenuItem(item, context, itemIndex, setSize) {
     element.setAttribute('aria-disabled', 'true');
   }
   if (hasSubmenu) {
+    submenuId = submenuIdOf(context, itemIndex);
     element.setAttribute('aria-haspopup', 'menu');
     element.setAttribute('aria-expanded', 'false');
     // Направление шеврона по умолчанию; движок позиционирования переставляет его
     // на `left`, когда подменю пришлось открыть слева.
     element.dataset.chevron = 'right';
-    element.setAttribute('aria-owns', submenuIdOf(context, itemIndex));
+    element.setAttribute('aria-owns', submenuId);
   }
 
   const slot = document.createElement('span');
@@ -267,8 +298,10 @@ function renderMenuItem(item, context, itemIndex, setSize) {
   element.appendChild(slot);
   element.appendChild(label);
 
+  /** @type {HTMLElement | null} */
+  let chevron = null;
   if (hasSubmenu) {
-    const chevron = document.createElement('span');
+    chevron = document.createElement('span');
     chevron.className = 'vc-chevron';
     element.appendChild(chevron);
   }
@@ -278,6 +311,8 @@ function renderMenuItem(item, context, itemIndex, setSize) {
     focusable: !disabled,
     hasSubmenu,
     key: keyOf(context, itemIndex),
+    submenuId,
+    chevron,
   };
 }
 
@@ -375,4 +410,70 @@ export function renderLevel(items, context) {
   }
 
   return { element, items: rendered, scroll: { list, up, down } };
+}
+
+/**
+ * Приводит уже построенный уровень к текущему значению `disabled` его пунктов.
+ *
+ * Уровень живёт дольше одного показа, и поле, выставленное автором между
+ * показами, без этого прохода не действовало бы никогда: и разметка, и контракт
+ * `RenderedItem` остались бы от решения, принятого при сборке. Перечитывается
+ * одно поле, и признак владельца следует из него, а не из состава подменю, —
+ * поэтому уровень, однажды построенный, меняет состояние, но не состав.
+ *
+ * Отметки роуминга с пункта, выпавшего из кольца, снимает движок, а не этот
+ * проход: `data-active` — его словарь, и состояние «отключённый и активный»
+ * обязано быть недостижимо, а не запрещено здешним присваиванием.
+ *
+ * @param {Array<MenuItem | SeparatorItem>} items пункты уровня в исходном порядке.
+ * @param {RenderedItem[]} renderedItems пункты того же уровня по порядку.
+ * @returns {void}
+ */
+export function refreshItems(items, renderedItems) {
+  for (const [itemIndex, renderedItem] of renderedItems.entries()) {
+    const item = items[itemIndex];
+    if (isSeparator(item) || renderedItem.key === null) {
+      continue;
+    }
+    const focusable = item.disabled !== true;
+    // Владельцем пункт остаётся по факту непустого подменю, снятому при сборке:
+    // непустота `submenu` здесь не перечитывается, и `submenuId` — единственное,
+    // что её помнит.
+    const hasSubmenu = renderedItem.submenuId !== null && focusable;
+    if (renderedItem.focusable === focusable && renderedItem.hasSubmenu === hasSubmenu) {
+      continue;
+    }
+    const element = renderedItem.element;
+    if (focusable) {
+      element.removeAttribute('aria-disabled');
+    } else {
+      element.setAttribute('aria-disabled', 'true');
+    }
+    if (hasSubmenu) {
+      element.setAttribute('aria-haspopup', 'menu');
+      // Развёрнутым быть не может: подменю открывается только после показа, а
+      // уровень, в котором владелец, сейчас как раз показывается.
+      element.setAttribute('aria-expanded', 'false');
+      element.dataset.chevron = 'right';
+      element.setAttribute('aria-owns', /** @type {string} */ (renderedItem.submenuId));
+      const chevron = renderedItem.chevron;
+      if (chevron !== null && chevron.parentElement !== element) {
+        element.appendChild(chevron);
+      }
+    } else {
+      // Владелец, потерявший подменю, не оставляет за собой его признаков: иначе
+      // `aria-owns` уводил бы скринридер в меню, раскрыть которое нечем, а
+      // `aria-haspopup` обещал бы раскрытие, которого не будет.
+      element.removeAttribute('aria-haspopup');
+      element.removeAttribute('aria-expanded');
+      element.removeAttribute('data-chevron');
+      element.removeAttribute('aria-owns');
+      const chevron = renderedItem.chevron;
+      if (chevron !== null && chevron.parentElement === element) {
+        element.removeChild(chevron);
+      }
+    }
+    renderedItem.focusable = focusable;
+    renderedItem.hasSubmenu = hasSubmenu;
+  }
 }

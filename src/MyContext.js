@@ -1569,6 +1569,7 @@ export class MyContext {
   #leadAhead(entry) {
     for (const rendered of entry.items) {
       if (!rendered.hasSubmenu || !rendered.focusable || rendered.key === null) {
+        this.#unsubscribeShowTarget(rendered);
         continue;
       }
       const item = this.#actions.get(rendered.key);
@@ -1589,6 +1590,27 @@ export class MyContext {
       rendered.element.addEventListener('pointerdown', this.#onItemDown);
       this.#ensureSubmenuLevel(item.submenu, entry, rendered);
     }
+  }
+
+  /**
+   * Снимает пункт с показа подменю: запись из карты и три подписки на нём.
+   *
+   * Отдельный проход по владельцам, а не проверка внутри `#leadAhead`, нужен из-за
+   * порядка: `#leadAhead` решает, кого заводить, и владельцем прошедшего показа
+   * был пункт, который отключили уже после. Пока такая запись в карте живёт, движение
+   * курсора по этому пункту возвращается раньше планирования закрытия, а возвращаться
+   * там нечем: решать на отключённом владельце нечего.
+   *
+   * @param {RenderedItem} rendered пункт, с показа подменю снимаемый.
+   * @returns {void}
+   */
+  #unsubscribeShowTarget(rendered) {
+    if (!this.#showTargets.delete(rendered.element)) {
+      return;
+    }
+    rendered.element.removeEventListener('pointerenter', this.#onItemEnter);
+    rendered.element.removeEventListener('pointerleave', this.#onItemLeave);
+    rendered.element.removeEventListener('pointerdown', this.#onItemDown);
   }
 
   /**

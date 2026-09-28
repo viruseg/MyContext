@@ -179,6 +179,19 @@ const WIDE_ITEMS = [
 ];
 
 /**
+ * Корневой уровень для кейсов про перечитывание состояния: обычный пункт и
+ * владелец непустого подменю. Владелец выбран потому, что `disabled` у него
+ * отнимает сразу два признака — доступность и раскрытие подменю, — и кейс
+ * проходит вхолостую, если проверяет только `aria-disabled`.
+ *
+ * @type {Array<MenuItem | SeparatorItem>}
+ */
+const MUTABLE_ITEMS = [
+  { label: 'Обычный' },
+  { label: 'Владелец', submenu: [{ label: 'Лист' }] },
+];
+
+/**
  * Корневой уровень из сорока пунктов: список заметно длиннее рамки, которую задаёт
  * вьюпорт кейса, то есть заведомое переполнение — ровно то состояние, на котором
  * слой принимает решение о прокрутке. Обратную сторону того же решения приходится
@@ -819,6 +832,121 @@ test.describe('показ', () => {
     // не нужны.
     expect(after.attribute, 'после смены вьюпорта признака нет').toBe(null);
     expect(after.displays).toEqual(['none', 'none']);
+  });
+});
+
+test.describe('перечитывание состояния пунктов', () => {
+  test('disabled, выставленный после первой сборки, снимает пункт с показа', async ({ page }) => {
+    const result = await page.evaluate((items) => {
+      const host = /** @type { { __vcProbe: LayerProbe } } */ (/** @type { unknown } */ (globalThis));
+      const layer = host.__vcProbe.create();
+      const first = layer.ensureLevel(items, null, 0, null);
+      const owner = first.items[1];
+      const ownsBefore = owner.element.getAttribute('aria-owns');
+      /**
+       * @param {HTMLElement} element
+       * @returns {number}
+       */
+      const chevronsOf = (element) => {
+        return element.querySelectorAll('.vc-chevron').length;
+      };
+      const chevronsBefore = chevronsOf(owner.element);
+
+      // Автор выключает пункт между показами — самый обычный случай: меню построено
+      // один раз и открывается многократно.
+      /** @type {MenuItem} */ (items[1]).disabled = true;
+      const second = layer.ensureLevel(items, null, 0, null);
+
+      return {
+        sameLevel: first === second,
+        sameElement: first.element === second.element,
+        ownsBefore,
+        chevronsBefore,
+        owner: {
+          focusable: owner.focusable,
+          hasSubmenu: owner.hasSubmenu,
+          ariaDisabled: owner.element.getAttribute('aria-disabled'),
+          ariaHasPopup: owner.element.getAttribute('aria-haspopup'),
+          ariaOwns: owner.element.getAttribute('aria-owns'),
+          ariaExpanded: owner.element.getAttribute('aria-expanded'),
+          chevrons: chevronsOf(owner.element),
+        },
+        plain: {
+          focusable: first.items[0].focusable,
+          ariaDisabled: first.items[0].element.getAttribute('aria-disabled'),
+        },
+      };
+    }, MUTABLE_ITEMS);
+
+    // Контроль премиссы: подменю у пункта было, иначе правка `disabled` не была бы
+    // правкой — у пункта без подменю ей нечего отнимать.
+    expect(result.ownsBefore, 'владелец зарезервировал id подменю').toMatch(/^vc-/);
+    expect(result.chevronsBefore, 'шеврон у владельца отрисован').toBe(1);
+    // Уровень не пересоздан: правка состояния не имеет права задеть DOM уровня.
+    expect(result.sameLevel, 'тот же уровень').toBe(true);
+    expect(result.sameElement, 'тот же элемент уровня').toBe(true);
+    // Один и тот же признак доступности читается и в разметке, и в контракте
+    // `RenderedItem`: расхождение между ними и было бы багом, а не стилем.
+    expect(result.owner.focusable, 'владелец вне кольца навигации').toBe(false);
+    expect(result.owner.hasSubmenu, 'владельцем больше не является').toBe(false);
+    expect(result.owner.ariaDisabled, 'помечен отключённым').toBe('true');
+    expect(result.owner.ariaHasPopup, 'признака раскрытия нет').toBe(null);
+    expect(result.owner.ariaOwns, 'зарезервированный id снят').toBe(null);
+    expect(result.owner.ariaExpanded, 'развёрнутости нет').toBe(null);
+    expect(result.owner.chevrons, 'шеврон убран из разметки').toBe(0);
+    // Сосед не задет: правка одного пункта не имеет права выкинуть другой из
+    // кольца, и без этого контроля кейс прошёл бы и с общим сбросом уровня.
+    expect(result.plain.focusable, 'сосед остался доступным').toBe(true);
+    expect(result.plain.ariaDisabled, 'сосед не отключён').toBe(null);
+  });
+
+  test('уровень подменю отключённого владельца переживает отключение и возвращается с тем же id', async ({ page }) => {
+    const result = await page.evaluate((items) => {
+      const host = /** @type { { __vcProbe: LayerProbe } } */ (/** @type { unknown } */ (globalThis));
+      const layer = host.__vcProbe.create();
+      const root = layer.ensureLevel(items, null, 0, null);
+      const owner = root.items[1];
+      const definition = /** @type {MenuItem} */ (items[1]);
+      const submenu = /** @type {Array<MenuItem | SeparatorItem>} */ (definition.submenu);
+      // Подменю заводится, пока владелец ещё владельцем: у него по наведению и по
+      // клику открывается уровень, и именно его переиспользование обещает README.
+      const sub = layer.ensureLevel(submenu, root, 1, owner);
+      const ownsBefore = owner.element.getAttribute('aria-owns');
+
+      definition.disabled = true;
+      layer.ensureLevel(items, null, 0, null);
+      const whileDisabled = {
+        ariaOwns: owner.element.getAttribute('aria-owns'),
+        hasSubmenu: owner.hasSubmenu,
+      };
+
+      definition.disabled = false;
+      const second = layer.ensureLevel(items, null, 0, null);
+      const restored = layer.ensureLevel(submenu, second, 1, second.items[1]);
+
+      return {
+        subId: sub.element.id,
+        whileDisabled,
+        // Тот же самый уровень подменю, а не второй: заведённый уровень от
+        // отключения пункта не умирает, и возвращение доступности его оживляет.
+        restoredSame: restored === sub,
+        children: second.children.length,
+        ariaOwnsAfter: owner.element.getAttribute('aria-owns'),
+        ownsBefore,
+      };
+    }, MUTABLE_ITEMS);
+
+    expect(result.ownsBefore, 'владелец зарезервировал id подменю').toMatch(/^vc-/);
+    expect(result.subId, 'уровень подменю живёт под зарезервированным id').toMatch(/^vc-/);
+    // Отключённый пункт обещать подменю не имеет права: раскрыть его нечем, и
+    // висячий `aria-owns` уводил бы скринридер в меню, которого не будет.
+    expect(result.whileDisabled.ariaOwns, 'зарезервированный id отпущен').toBe(null);
+    expect(result.whileDisabled.hasSubmenu, 'владельцем не является').toBe(false);
+    // Возвращается ровно тот id, который был зарезервирован: уровень подменю не
+    // пересоздаётся, и другой id сделал бы ссылку висячей.
+    expect(result.restoredSame, 'тот же уровень подменю').toBe(true);
+    expect(result.children, 'уровень подменю не задвоился').toBe(1);
+    expect(result.ariaOwnsAfter, 'тот же зарезервированный id').toBe(result.ownsBefore);
   });
 });
 

@@ -105,6 +105,9 @@ import { CURSOR_OFFSET, DEFAULT_ANIMATION_DURATION, SAFETY_PADDING } from '../..
  * @property {() => void} markRoot
  * @property {() => Snapshot} read
  * @property {() => number} actionsSize
+ * @property {(index: number, disabled: boolean) => void} setDisabled правка поля
+ *   `disabled` у пункта набора последнего `make`: автор меняет смысл действия
+ *   между показами, и поле должно дойти до уже построенного уровня.
  */
 
 const STYLESHEET_PATH = '/styles/mycontext.css';
@@ -666,6 +669,9 @@ test.beforeEach(async ({ page }) => {
     /** @type {InstanceType<typeof MyContext> | null} */
     let menu = null;
 
+    /** @type {string} имя набора последнего `make`: правке `disabled` подлежит он. */
+    let currentSet = '';
+
     /**
      * Точка, в которой действия набора `reopening` открывают меню заново. Приходит
      * аргументом `make` вместе с именем набора, потому что объявить её в пробе
@@ -779,6 +785,7 @@ test.beforeEach(async ({ page }) => {
         if (menu !== null) {
           menu.destroy();
         }
+        currentSet = setName;
         log.length = 0;
         errors.length = 0;
         contextmenu.length = 0;
@@ -837,6 +844,18 @@ test.beforeEach(async ({ page }) => {
           throw new Error('карта действий не найдена');
         }
         return actionMaps[actionMaps.length - 1].size;
+      },
+      setDisabled(index, disabled) {
+        if (menu === null) {
+          throw new Error('меню не создано');
+        }
+        const item = itemsOf(currentSet)[index];
+        if (item === undefined || 'type' in item) {
+          throw new Error('в наборе нет такого пункта');
+        }
+        // Правка поля на живом объекте набора — ровно то, что делает автор между
+        // показами, когда смысл действия изменился.
+        item.disabled = disabled;
       },
     });
 
@@ -1673,6 +1692,75 @@ test.describe('жизненный цикл MyContext', () => {
       after.levels[0].id,
       /** @type {string} */ (live.owns),
     ]);
+  });
+
+  test('attach: disabled, выставленный между показами, действует при следующем показе', async ({ page }) => {
+    await makeMenu(page, 'disabled', 'workspace');
+    const first = await rightClickAndRead(page);
+    // Метка на уровне переживает переиспользование узла и не переживает
+    // пересоздания: это и есть «уровень и его пункты не пересоздаются» из
+    // README, проверенное снаружи, а не по внутреннему состоянию.
+    await markRoot(page);
+    const live = first.levels[0].items[2];
+    expect(live.label).toBe('Живой');
+    expect(live.disabled, 'до правки пункт доступен').toBe(false);
+    expect(live.owns, 'у владельца зарезервирован адрес подменю').not.toBeNull();
+    expect(live.chevron, 'у владельца есть шеврон').toBe('right');
+
+    await closeMenu(page);
+    // Смысл действия изменился, и автор выключает пункт. Меню при этом не
+    // пересоздаётся — тот же экземпляр, тот же уровень, — и именно поэтому поле
+    // обязано доезжать до показанного уровня, а не остаться в конфигурации.
+    await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__mc.setDisabled(2, true);
+    });
+    const second = await rightClickAndRead(page);
+
+    // Уровень тот же самый: снимок помечен пробой, и метка пережила показ.
+    expect(second.levels[0].marked, 'уровень переиспользован, а не пересоздан').toBe(true);
+    const after = second.levels[0].items[2];
+    expect(after.label, 'пункт на месте').toBe('Живой');
+    expect(after.disabled, 'помечен отключённым').toBe(true);
+    // Владелец, который раскрыть нечем, не обещает раскрытия: ни шеврона, ни
+    // `aria-haspopup`, ни зарезервированного адреса.
+    expect(after.chevron, 'шеврон убран').toBeNull();
+    expect(after.haspopup, 'нет `aria-haspopup`').toBeNull();
+    expect(after.owns, 'адрес подменю отпущен').toBeNull();
+    // Сосед не задет: правка одного пункта не имеет права выкинуть другой.
+    expect(second.levels[0].items[1].disabled, 'сосед не отключён').toBe(false);
+  });
+
+  test('attach: пункт, отключённый между показами, выпадает из кольца и не кликается', async ({ page }) => {
+    await makeMenu(page, 'disabled', 'workspace');
+    await rightClickAndRead(page);
+    await closeMenu(page);
+    await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__mc.setDisabled(2, true);
+    });
+    const opened = await rightClickAndRead(page);
+
+    // Доступных пунктов осталось два: «Пустой» и «Глухой» ушли, «Живой» добавлен
+    // к отключённым. Кольцо идёт по порядку, и `End` обязан встать на «Пустой».
+    await page.keyboard.press('End');
+    const atEnd = await readMenu(page);
+    expect(atEnd.focusLabel, 'последний доступный — «Пустой»').toBe('Пустой');
+
+    // Клик по отключённому не действие: иначе у автора не было бы способа
+    // выключить действие, смысл которого изменился. `force` обязателен: Playwright
+    // element с `aria-disabled` считает непригодным и на него не кликает.
+    await itemByLabel(page, 'Живой').click({ force: true });
+    const afterClick = await readMenu(page);
+    expect(afterClick.log, 'действие не вызвано').toEqual([]);
+    expect(afterClick.openCount, 'меню не закрыто').toBe(1);
+    expect(afterClick.focusInMenu, 'фокус в меню').toBe(true);
+    // `ArrowRight` на отключённом владельце не открывает подменю: раскрывать
+    // нечего, и открытое подменю было бы меню без пути к закрытию.
+    await page.keyboard.press('End');
+    await page.keyboard.press('ArrowRight');
+    const afterRight = await readMenu(page);
+    expect(openIds(afterRight), 'подменю не открылось').toEqual([afterRight.levels[0].id]);
   });
 
   for (const closing of CLOSINGS) {

@@ -1,6 +1,6 @@
 import { DEFAULT_ANIMATION_DURATION, SAFETY_PADDING } from './constants.js';
 import { calculateMenuPosition, calculateSubmenuPosition } from './positioner.js';
-import { renderLevel } from './renderer.js';
+import { renderLevel, refreshItems } from './renderer.js';
 import { createScrollZones } from './scrollZones.js';
 import { applyAnimationDuration, applyTheme } from './theme.js';
 
@@ -410,7 +410,7 @@ export function createLayer(options) {
    * @param {number} levelIndex глубина уровня, начиная с 0; идёт в `aria-level`.
    * @param {RenderedItem | null} ownerItem пункт-владелец; `null` у корня.
    * @returns {LevelEntry} тот же уровень при повторном вызове с теми же
-   *   аргументами.
+   *   аргументами, приведённый к текущему состоянию его пунктов.
    */
   function ensureLevel(items, parent, levelIndex, ownerItem) {
     if (destroyed) {
@@ -422,6 +422,11 @@ export function createLayer(options) {
       }
       if (root === null) {
         root = createEntry(items, null, levelIndex, ownerItem, `${menuIdPrefix}-0`);
+      } else {
+        // Повторный показ — единственное время, когда состояние пунктов ещё можно
+        // догнать: автор выключает действие между показами, и без этого прохода
+        // поле действовало бы только на первом.
+        refreshItems(items, root.items);
       }
       return root;
     }
@@ -437,6 +442,7 @@ export function createLayer(options) {
       return child.ownerItem === ownerItem;
     });
     if (existing !== undefined) {
+      refreshItems(items, existing.items);
       return existing;
     }
     const entry = createEntry(items, parent, levelIndex, ownerItem, reservedSubmenuId(ownerItem));
