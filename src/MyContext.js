@@ -92,18 +92,38 @@ function validateIcon(icon, path) {
 }
 
 /**
+ * Строка таблицы глобальных слушателей.
+ *
+ * @typedef {object} GlobalHandlerRow
+ * @property {EventTarget} target
+ * @property {string} type
+ * @property {EventListener} handler
+ * @property {boolean} [passive] подписка без `preventDefault`; на снятии повторяется.
+ */
+
+/**
  * Расширение типа слушателя для таблицы глобальных обработчиков.
  *
  * `addEventListener` отдаёт обработчику `Event`, а наши обработчики объявлены с
  * узкими типами — `PointerEvent`, `KeyboardEvent` — ради проверок внутри тела.
- * Приводить приходится, и делается это здесь, ровно один раз на обработчик, а не в
- * каждом месте установки: внутри тела тип остаётся узким, и ошибка в разборе
- * события по-прежнему ловится компилятором. `never` в параметре делает приведение
- * безопасным по направлению: принять такой обработчик может только функция, способная
- * обработать любое событие, то есть ровно наш случай.
+ * Приводить приходится, и делается это здесь, ровно один раз на обработчик.
+ *
+ * **Что именно делает приведение.** Параметр-`never` не ограничивает ничего: по
+ * контравриантности `never` присваивается любому типу, поэтому такой параметр
+ * принимает вообще любую функцию. Ограничивает переход через `unknown` — сужение
+ * до `unknown` проходит для всего, а обратное расширение до `EventListener` не
+ * проходит ни для чего, кроме совместимых по параметру типов.
+ *
+ * Поэтому безопасность этого места держится **не** на приведении, а на таблице
+ * установки: каждая строка вешает обработчик на своё событие, и обработчик
+ * `#onGlobalScroll` с типом `Event` читает только `event.target`, тогда как
+ * `#onGlobalPointerMove` с типом `PointerEvent` читает `clientX`/`clientY` и
+ * получить `Event` не может. Переставить строки местами компилятор не заметит —
+ * это цена единственного необходимого приведения, и она описана здесь, а не
+ * оставлена без объяснения.
  *
  * @param {(event: never) => void} handler обработчик с узким типом события.
- * @returns {EventListener} тот же обработчик с типом `EventListener`.
+ * @returns {EventListener} тот же обработчик, расширенный до типа слушателя.
  */
 function asListener(handler) {
   return /** @type {EventListener} */ (/** @type {unknown} */ (handler));
@@ -274,7 +294,7 @@ export class MyContext {
    * списку, поэтому `detach()` и `destroy()` не могут оставить ни одного, а
    * добавить обработчик, забыв его снять, structurally невозможно.
    *
-   * @type {Array<{ target: EventTarget, type: string, handler: EventListener }>}
+   * @type {GlobalHandlerRow[]}
    */
   #globalHandlers = [];
 
@@ -466,14 +486,29 @@ export class MyContext {
   /**
    * Движение курсора в пустоте страницы. Внутри дерева движение разбирает
    * `#onLevelPointerMove` — и намеренно не там, где стоит пункт-владелец, потому
-   * что по владельцу решать нечего. Этот обработчик берёт только то, чего уровни
-   * не видят: точку вне меню. Без него подменю переживало бы уход курсора на пустое
-   * место страницы, потому что планировать закрытие больше было некому.
+   * что по владельцу решать нечего. Этот обработчик берёт то, чего уровни не
+   * видят: точку вне меню, включая пустоту страницы и сам привязанный контейнер.
+   * Без него подменю переживало бы уход курсора с дерева, потому что планировать
+   * закрытие больше было некому.
    *
-   * Над привязанным контейнером обработчик молчит по той же причине, по какой
-   * контейнер не входит в дерево: он и есть опора меню, и сносить каскад за то,
-   * что курсор вернулся на кнопку, от которой он и вырос, — неверно. Подменю при
-   * этом закроется как обычно: точка мимо клина, а `onClose` закроет один уровень.
+   * Внутри собственного дерева обработчик молчит: там решение принимает
+   * `#onLevelPointerMove`, и оно намеренно не трогает пункт-владелец, потому что
+   * по владельцу решать нечего. Раньше документ отдавал точку и там, откуда
+   * `pointerenter` пункта успевал спланировать закрытие раньше открытия, и
+   * подменю переставало открываться наведением вовсе.
+   *
+   * Над контейнером и над пустотой точка `hoverIntent` получает всегда, и в том
+   * числе над контейнером: там она необходима, чтобы подменю закрылось само, а не
+   * висело. Раньше обработчик возвращался над контейнером раньше `pointerMove`, и
+   * подменю над ним закрывалось лишь случайно — по пути `pointerleave` пункта-
+   * владельца, где якоря выхода ещё нет и `planClose` срабатывает вслепую. Внутри
+   * подменю этого пути нет, и подменю висело неограниченно.
+   *
+   * Флаг области ставится только над пустотой, но **снимается** и внутри дерева,
+   * и над контейнером. Он обязан означать «курсор сейчас не в дереве», а не
+   * «курсор когда-то уходил»: иначе возврат на обычный пункт того же уровня
+   * оставлял бы флаг истинным, и отложенное закрытие снесло бы весь каскад вместо
+   * одного уровня — при курсоре внутри меню.
    *
    * @type {(event: PointerEvent) => void}
    */
@@ -481,11 +516,11 @@ export class MyContext {
     if (this.#destroyed) {
       return;
     }
-    const target = event.target;
-    if (this.#isInsideTreeOrAnchor(target)) {
+    if (this.#isInsideMenu(event.target)) {
+      this.#pointerOutsideTree = false;
       return;
     }
-    this.#pointerOutsideTree = true;
+    this.#pointerOutsideTree = !this.#isInsideAnchor(event.target);
     this.#hover.pointerMove({ x: event.clientX, y: event.clientY });
   };
 
@@ -535,13 +570,18 @@ export class MyContext {
    * один уровень, а здесь закрылась бы цепочка — мимо `Escape` внутри меню, где
    * пользователь имеет право закрыть один уровень и остаться в остальных.
    *
+   * Проверяется именно дерево, а не дерево вместе с контейнером: фокус на
+   * контейнере — обычное состояние после клика по кнопке, и оставлять там
+   * клавиатурного пользователя с открытым меню без единого выхода нельзя.
+   * Контейнер не часть меню, и `Escape` на нём — уход из меню, а не шаг внутри.
+   *
    * @type {(event: KeyboardEvent) => void}
    */
   #onGlobalKeydown = (event) => {
     if (this.#destroyed || event.key !== 'Escape' || event.defaultPrevented) {
       return;
     }
-    if (this.#isInsideTreeOrAnchor(event.target)) {
+    if (this.#isInsideMenu(event.target)) {
       return;
     }
     this.#closeMenu({ returnFocus: false });
@@ -1148,17 +1188,24 @@ export class MyContext {
    * @returns {void}
    */
   #bindGlobalHandlers() {
-    /** @type {Array<{ target: EventTarget, type: string, handler: EventListener }>} */
+    /** @type {GlobalHandlerRow[]} */
     const handlers = [
       { target: document, type: 'pointermove', handler: asListener(this.#onGlobalPointerMove) },
       { target: document, type: 'pointerdown', handler: asListener(this.#onGlobalPointerDown) },
       { target: document, type: 'contextmenu', handler: asListener(this.#onGlobalContextMenu) },
       { target: document, type: 'keydown', handler: asListener(this.#onGlobalKeydown) },
-      { target: window, type: 'scroll', handler: asListener(this.#onGlobalScroll) },
+      // `passive: true` обязателен именно здесь: обработчик `scroll` не зовёт
+      // `preventDefault`, и браузеру не нужно ждать его, чтобы ответить на
+      // прокрутку. Снятие обязано передавать ту же опцию, иначе `removeEventListener`
+      // не найдёт подписку и обработчик переживёт `destroy()`.
+      { target: window, type: 'scroll', handler: asListener(this.#onGlobalScroll), passive: true },
       { target: window, type: 'resize', handler: asListener(this.#onGlobalResize) },
     ];
     for (const entry of handlers) {
-      entry.target.addEventListener(entry.type, entry.handler, true);
+      // `AddEventListenerOptions`, а не `EventListenerOptions`: у второго нет поля
+      // `passive`, и подписка без `preventDefault` через него не выражается.
+      const options = { capture: true, passive: entry.passive === true };
+      entry.target.addEventListener(entry.type, entry.handler, options);
     }
     this.#globalHandlers = handlers;
   }
@@ -1172,7 +1219,8 @@ export class MyContext {
    */
   #unbindGlobalHandlers() {
     for (const entry of this.#globalHandlers) {
-      entry.target.removeEventListener(entry.type, entry.handler, true);
+      const options = { capture: true, passive: entry.passive === true };
+      entry.target.removeEventListener(entry.type, entry.handler, options);
     }
     this.#globalHandlers = [];
   }

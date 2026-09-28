@@ -519,6 +519,80 @@ test.describe('глобальные слушатели', () => {
     );
   });
 
+  test('возврат курсора в дерево закрывает один уровень, а не каскад', async ({ page }) => {
+    await makeMenu(page, 'first', 'chain', 'surface');
+    await openAt(page, 'first', SURFACE_POINT);
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
+    const opened = await readMenu(page);
+    expect(opened.openCount, 'открыты корень и два подменю').toBe(3);
+
+    // Уход в пустоту планирует закрытие, возврат на пункт того же уровня — нет.
+    // Флаг области обязан означать «курсор сейчас не в дереве», а не «курсор
+    // когда-то уходил»: иначе отложенное закрытие сносит весь каскад при курсоре,
+    // который давно вернулся внутрь.
+    await page.mouse.move(VOID_POINT.x, VOID_POINT.y);
+    const back = await centreOf(page, 'PDF');
+    await page.mouse.move(back.x, back.y);
+    await page.clock.fastForward(CLOSE_GRACE_MS);
+
+    const after = await readMenu(page);
+    // Возврат на пункт подменю «Экспорта» оставляет корень и «Экспорт», и уводит
+    // «PNG» — самый глубокий уровень. Каскад целиком здесь означал бы, что меню
+    // исчезло под курсором.
+    expect(after.openCount, 'закрыт ровно один уровень').toBe(2);
+  });
+
+  test('уход курсора на контейнер закрывает подменю, но не каскад', async ({ page }) => {
+    await makeMenu(page, 'first', 'chain', 'surface');
+    await openAt(page, 'first', SURFACE_POINT);
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
+    expect((await readMenu(page)).openCount, 'открыты корень и подменю').toBe(2);
+
+    // Контейнер — точка страницы, не занятая поповером: меню открыто в центре
+    // `#surface` и закрывает середину, а сверху остаётся свободная полоса.
+    await page.mouse.click(30, 70);
+    await page.clock.fastForward(CLOSE_GRACE_MS * 3);
+
+    const after = await readMenu(page);
+    // Подменю обязано закрыться само: точка подаётся в `hoverIntent` и мимо клина.
+    // Каскад при этом цел — контейнер и есть опора меню.
+    expect(after.openCount, 'подменю закрылось, корень остался').toBe(1);
+  });
+
+  test('Escape на самом контейнере закрывает меню', async ({ page }) => {
+    await makeMenu(page, 'first', 'chain', 'surface');
+    await openAt(page, 'first', SURFACE_POINT);
+    expect((await readMenu(page)).openCount, 'меню открыто').toBe(1);
+
+    // Клик по контейнеру не закрывает меню, но ставит на него фокус — обычное
+    // состояние после клика по кнопке. Клавиатурный пользователь обязан иметь
+    // отсюда выход: контейнер не часть меню, и `Escape` на нём — уход, а не шаг
+    // внутри. Без этого меню с фокусом на кнопке закрыть нечем.
+    await page.mouse.click(30, 70);
+    expect((await readMenu(page)).focusOwnerId, 'фокус на контейнере').toBe('surface');
+    expect((await readMenu(page)).openCount, 'меню ещё открыто').toBe(1);
+
+    await page.keyboard.press('Escape');
+    expect((await readMenu(page)).openCount, 'Escape на контейнере закрыл меню').toBe(0);
+  });
+
+  test('нажатие не основной кнопкой вне меню его не закрывает', async ({ page }) => {
+    await makeMenu(page, 'first', 'chain', 'surface');
+    await openAt(page, 'first', SURFACE_POINT);
+    expect((await readMenu(page)).openCount, 'меню открыто').toBe(1);
+
+    // Средняя кнопка — не отмена меню: правый клик обрабатывается отдельно через
+    // `contextmenu`, а нажатие любой не основной кнопки молча закрывать нечего.
+    await page.mouse.click(VOID_POINT.x, VOID_POINT.y, { button: 'middle' });
+
+    const after = await readMenu(page);
+    expect(after.openCount, 'меню осталось открытым').toBe(1);
+  });
+
   test('правый клик вне дерева закрывает меню, но не подавляет системное', async ({ page }) => {
     await makeMenu(page, 'first', 'chain', 'surface');
     await openAt(page, 'first', SURFACE_POINT);
@@ -692,20 +766,31 @@ test.describe('глобальные слушатели', () => {
     expect(new Set(ids).size, 'id уровней не пересекаются').toBe(ids.length);
   });
 
-  test('меню одного экземпляра не закрывает меню другого', async ({ page }) => {
+  test('клик по контейнеру одного экземпляра не закрывает его меню, а чужое закрывает', async ({
+    page,
+  }) => {
     await makeMenu(page, 'first', 'chain', 'surface');
     await makeMenu(page, 'second', 'chain', 'far');
     await openAt(page, 'first', SURFACE_POINT);
     await openAt(page, 'second', FAR_POINT);
-    expect((await readMenu(page)).openCount, 'открыты оба меню').toBe(2);
+    const opened = await readMenu(page);
+    expect(opened.openCount, 'открыты оба меню').toBe(2);
+    const firstId = /** @type {string} */ (opened.levels.filter((l) => l.popoverOpen)[0].id);
+    const secondId = /** @type {string} */ (opened.levels.filter((l) => l.popoverOpen)[1].id);
 
-    // Клик по контейнеру первого закрывает его меню — и только его. Второе стоит
-    // в другом месте страницы и закрываться не должно: глобальный обработчик
-    // смотрит на «внутри дерева ли», а дерева у чужого экземпляра своё.
+    // Левый клик по контейнеру первого экземпляра. Для первого это его собственная
+    // опора, и закрывать нечего. Для второго клик — событие вне его дерева и вне
+    // его контейнера, то есть самое обычное «пользователь кликнул в другое место
+    // страницы», и закрыться должно именно оно.
     await page.mouse.click(40, 80);
 
     const after = await readMenu(page);
     expect(after.openCount, 'осталось одно меню').toBe(1);
+    // Выживший назван поимённо. Один только счётчик прошёл бы на реализации,
+    // которая закрыла не тот экземпляр: «одно осталось» и «осталось нужное» —
+    // разные утверждения, и счётчик здесь ровно то, что их не различает.
+    expect(isOpen(after, firstId), 'меню, чей контейнер кликнули, уцелело').toBe(true);
+    expect(isOpen(after, secondId), 'меню чужого экземпляра закрылось').toBe(false);
   });
 
   test('destroy одного экземпляра не ломает второй', async ({ page }) => {

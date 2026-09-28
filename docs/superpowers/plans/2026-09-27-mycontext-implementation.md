@@ -1096,11 +1096,11 @@ Expected: FAIL — глобальные слушатели не реализов
 
 Сначала вынести `#closeMenu({ returnFocus })` — тело нынешнего `close()` без `#returnFocus()`, а публичный `close()` становится `#closeMenu({ returnFocus: true })`. Публичный контракт Task 9 не меняется, а появляется путь закрытия без возврата фокуса.
 
-- `pointermove` на `document` в capture-фазе: прокинуть точку в `hover.pointerMove`, чтобы уход курсора с дерева планировал закрытие. **Это требование из ограничения выше, а не украшение** — без него пункт 1 Step 1 не может стать зелёным.
-- `pointerdown` на `document` в capture-фазе: если цель не внутри `.vc-menu` и не внутри привязанного контейнера — `#closeMenu({returnFocus: false})`
+- `pointermove` на `document` в capture-фазе: точку **вне своего дерева** (то есть над контейнером и над пустотой страницы) прокинуть в `hover.pointerMove`. Внутри дерева обработчик обязан молчать: там решение принимает `#onLevelPointerMove`, и оно намеренно не трогает пункт-владелец. Прокидывать точку и там нельзя — `pointerenter` пункта успевает спланировать закрытие раньше открытия, и подменю перестаёт открываться наведением вовсе.
+- `pointerdown` на `document` в capture-фазе: если цель не внутри `.vc-menu` и не внутри привязанного контейнера — `#closeMenu({returnFocus: false})`. Только основная кнопка: правый клик приходит отдельным событием `contextmenu`, и нажатие средней кнопки закрывать меню не повод
 - `contextmenu` на `document` в capture-фазе: `preventDefault()` только если цель внутри `.vc-menu`; иначе `#closeMenu({returnFocus: false})` без подавления системного меню
-- `keydown` на `document` в capture-фазе: только `Escape`, и только когда цель вне дерева меню. **Не передавать остальные клавиши в `keyboard.handleKeydown`**: движок уже слушает `keydown` на самом уровне (`MyContext.js:823`, Task 8), второй путь обработает клавиши дважды
-- `scroll` на `window` в capture-фазе с `passive: true`: если `event.target` — не `document` и не `body`, пропустить; иначе `#closeMenu({returnFocus: false})`
+- `keydown` на `document` в capture-фазе: только `Escape`, и только когда цель вне дерева меню. **Проверяется именно дерево, а не дерево вместе с контейнером**: контейнер не часть меню, и фокус на нём — обычное состояние после клика по кнопке, где у клавиатурного пользователя не должно быть выхода. **Не передавать остальные клавиши в `keyboard.handleKeydown`**: движок уже слушает `keydown` на самом уровне (`MyContext.js:823`, Task 8), второй путь обработает клавиши дважды
+- `scroll` на `window` в capture-фазе с `passive: true`: если `event.target` — не `document` и не `body`, пропустить; иначе `#closeMenu({returnFocus: false})`. Опция обязательна и на снятии: `removeEventListener` с другими опциями не найдёт подписку, и обработчик переживёт `destroy()`
 - `resize` на `window`: `#closeMenu({returnFocus: false})`
 
 - [ ] **Step 4: Реализовать `#unbindGlobalHandlers` и вызовы в `destroy`**
