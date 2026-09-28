@@ -1141,7 +1141,7 @@ test.describe('жизненный цикл MyContext', () => {
     await page.clock.fastForward(DEFAULT_ANIMATION_DURATION * 2);
 
     const after = await readMenu(page);
-    // Показ снял отметку закрытия последним шагом, иначе вход не оыграл бы.
+    // Показ снял отметку закрытия последним шагом, иначе вход не отыграл бы.
     expect(after.levels[0].closing, 'отметка снята показом').toBe(false);
     expect(after.openCount, 'меню показано').toBe(1);
     // Показ в новой точке, а не возврат в прежнюю: обе точки отличаются и по X, и
