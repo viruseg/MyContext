@@ -44,6 +44,9 @@ import { CURSOR_OFFSET, DEFAULT_ANIMATION_DURATION, SAFETY_PADDING } from '../..
  * @property {boolean} marked метка `data-probe`, оставленная пробой на узле.
  *   Переживает переоткрытие, если уровень переиспользован, и не переживает
  *   пересоздания — единственный способ отличить одно от другого снаружи.
+ * @property {boolean} closing несёт `data-vc-closing`: уровень гаснет на месте, в
+ *   Top Layer, и ещё не покинул его. Состояния «показан» и «гаснет» в одном
+ *   снимке неразличимы — оба уровня в Top Layer.
  * @property {MenuRect} rect рамка уровня во вьюпорте.
  * @property {ItemView[]} items
  */
@@ -60,6 +63,9 @@ import { CURSOR_OFFSET, DEFAULT_ANIMATION_DURATION, SAFETY_PADDING } from '../..
  * @typedef {object} Snapshot
  * @property {LevelView[]} levels уровни в порядке документа.
  * @property {number} openCount сколько из них в Top Layer.
+ * @property {number} hideCount сколько раз вызван `hidePopover`. Различает «меню
+ *   закрылось и открылось заново» и «меню перенеслось»: состояние у них одинаковое,
+ *   и в одном снимке не различить их нечем.
  * @property {string | null} focusOwnerId `id` элемента с фокусом либо имя тега.
  * @property {string | null} focusLabel подпись пункта с фокусом.
  * @property {boolean} focusInMenu стоит ли фокус в дереве уровней меню. Не то же
@@ -137,6 +143,62 @@ const SECOND_POINT = { x: 300, y: 470 };
 const REOPEN_POINT = { x: 520, y: 460 };
 
 /**
+ * Способы закрыть меню, пока отложенный показ ещё не сработал. Четыре, а не один:
+ * все они зовут `#closeMenu`, но приходят из четырёх разных обработчиков, и
+ * отмена отложенного показа обязана быть частью закрытия, а не одного из путей.
+ * Имя способа попадает в название кейса, чтобы падение показывало, какой именно
+ * путь перестал отменять показ.
+ *
+ * @type {{ title: string, apply: (page: import('@playwright/test').Page) => Promise<void> }[]}
+ */
+const CLOSINGS = [
+  {
+    title: 'Escape вне меню',
+    apply: async (page) => {
+      // Фокус уводится с гаснущего уровня на элемент страницы: `Escape` внутри
+      // дерева разбирает движок по своему реестру, а в окне закрытия реестр пуст, и
+      // глобальный обработчик цель внутри меню пропускает. Проверяется путь
+      // `Escape` снаружи меню — тот же, что и в кейсе про возврат фокуса.
+      await page.evaluate(() => {
+        const outside = document.getElementById('outside');
+        if (outside instanceof HTMLElement) {
+          outside.focus();
+        }
+      });
+      await page.keyboard.press('Escape');
+    },
+  },
+  {
+    title: 'скролл страницы',
+    apply: async (page) => {
+      await page.evaluate(() => {
+        // Полоса прокрутки нужна самой странице: все её блоки — `position: fixed`,
+        // документ не выше вьюпорта, и `scrollTo` не дал бы события вовсе. Без неё
+        // кейс проверял бы не закрытие скроллом, а его отсутствие.
+        const spacer = document.createElement('div');
+        spacer.style.height = '2000px';
+        document.body.append(spacer);
+        window.scrollTo(0, 1);
+      });
+    },
+  },
+  {
+    title: 'resize',
+    apply: async (page) => {
+      await page.setViewportSize({ width: VIEWPORT.width, height: VIEWPORT.height + 1 });
+    },
+  },
+  {
+    title: 'левая кнопка вне меню',
+    apply: async (page) => {
+      // Точка в стороне от меню и от контейнера: под гаснущим уровнем кликать
+      // нечего, и проверяется именно клик по странице.
+      await page.mouse.click(800, 620);
+    },
+  },
+];
+
+/**
  * @param {import('@playwright/test').Page} page
  * @param {string} set имя набора пунктов пробы.
  * @param {string | null} containerId контейнер привязки; `null` — без привязки.
@@ -200,6 +262,29 @@ function openMenu(page, x, y) {
     scope.__mc.open(point.x, point.y);
     return scope.__mc.read();
   }, { x, y });
+}
+
+/**
+ * Повторный `open()` на уже открытом меню и снимок после полного цикла.
+ *
+ * Отдельный хелпер, а не `openMenu`, потому что показ отложен на `animationDuration`
+ * и снимок, взятый в том же `evaluate`, видел бы меню на середине цикла. Часы
+ * замораживает вызывающий: `fastForward` без `page.clock.install()` бросает.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {number} x
+ * @param {number} y
+ * @returns {Promise<Snapshot>}
+ */
+function reopenMenu(page, x, y) {
+  return page.evaluate((point) => {
+    const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+    scope.__mc.open(point.x, point.y);
+  }, { x, y }).then(() => {
+    return page.clock.fastForward(DEFAULT_ANIMATION_DURATION * 2).then(() => {
+      return readMenu(page);
+    });
+  });
 }
 
 /**
@@ -426,6 +511,22 @@ test.beforeEach(async ({ page }) => {
     const errors = [];
     /** @type {ProbeContextMenu[]} */
     const contextmenu = [];
+    /**
+     * Счётчик `hidePopover`: снимок открытого меню одинаков и после полного цикла
+     * переоткрытия, и после простого переноса, поэтому различает их только число
+     * скрытий. Подмена одного метода `HTMLElement` — приём того же рода, что и
+     * обёртки `showPopover` в `tests/e2e/layer.spec.js`: платформенный метод, через
+     * который проходит всё состояние уровня, и наблюдение за ним поведения не
+     * меняет.
+     *
+     * @type {number}
+     */
+    let hideCount = 0;
+    const nativeHide = HTMLElement.prototype.hidePopover;
+    HTMLElement.prototype.hidePopover = function patchedHide() {
+      hideCount += 1;
+      return nativeHide.call(this);
+    };
     globalThis.addEventListener('error', (event) => {
       errors.push(String(event.message));
     });
@@ -626,6 +727,7 @@ test.beforeEach(async ({ page }) => {
           id: element.id,
           popoverOpen: element.matches(':popover-open'),
           marked: element.hasAttribute('data-probe'),
+          closing: element.hasAttribute('data-vc-closing'),
           rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
           items: Array.from(element.querySelectorAll('.vc-item, .vc-separator')).map((node) => {
             return readItem(node);
@@ -643,6 +745,7 @@ test.beforeEach(async ({ page }) => {
         openCount: levels.filter((level) => {
           return level.popoverOpen;
         }).length,
+        hideCount,
         focusOwnerId: active === null
           ? null
           : active.id === '' ? String(active.tagName).toLowerCase() : active.id,
@@ -665,6 +768,9 @@ test.beforeEach(async ({ page }) => {
         errors.length = 0;
         contextmenu.length = 0;
         removed.length = 0;
+        // Счётчик обнуляется после сноса прежнего экземпляра: его закрытие — не
+        // событие проверяемого кейса, и счётчик за него отвечать не должен.
+        hideCount = 0;
         reopenPoint = point ?? null;
         menu = new MyContext(itemsOf(setName), { label: 'Меню файла' });
         const container = containerOf(containerId);
@@ -949,25 +1055,72 @@ test.describe('жизненный цикл MyContext', () => {
     expect(withActive.focusLabel, 'первая стрелка даёт первый пункт').toBe('Первый');
   });
 
-  test('open() идемпотентен: повторный вызов не создаёт второе меню в DOM', async ({ page }) => {
+  test('open() на открытом меню проходит полный цикл: закрытие и показ в новой точке', async ({ page }) => {
+    // Часы заморожены ради `reopenMenu`, который долистывает отложенный показ через
+    // `fastForward`, а тот без установленных часов бросает. Под `reduce` цикл и так
+    // проходит за один такт, то есть заморозка ничего не ускоряет и ничего не
+    // проверяет — она только делает вызов хелпера допустимым.
+    await page.clock.install();
     await makeMenu(page, 'flat', null);
     const first = await openMenu(page, WORKSPACE_POINT.x, WORKSPACE_POINT.y);
     await markRoot(page);
 
-    const second = await openMenu(page, 500, 400);
+    const second = await reopenMenu(page, 500, 400);
 
     expect(first.levels).toHaveLength(1);
     expect(second.levels, 'уровень один').toHaveLength(1);
-    // Метка на узле пережила второй `open()`: уровень переиспользован, а не
-    // пересоздан. Идентификатор уровня при пересоздании был бы тем же, и по нему
-    // сравнить нельзя — сравнивается узел.
+    // Полный цикл, а не перепозиционирование. Без числа скрытий «закрылось и
+    // открылось заново» и «перенеслось» дают один и тот же снимок, и кейс прошёл бы
+    // на переносе — ровно на том, что перестало быть контрактом.
+    expect(second.hideCount, 'меню скрылось и показалось заново').toBe(first.hideCount + 1);
+    expect(second.openCount, 'открыт один уровень').toBe(1);
+    // Метка на узле пережила цикл: уровень переиспользован, а не пересоздан.
+    // Идентификатор уровня при пересоздании был бы тем же, и по нему сравнить
+    // нельзя — сравнивается узел.
     expect(second.levels[0].id).toBe(first.levels[0].id);
     expect(second.levels[0].marked, 'тот же узел').toBe(true);
-    expect(second.openCount, 'открыт один уровень').toBe(1);
-    // Перепозиционирование состоялось: меню уехало в новую точку, а не осталось
-    // там, где было.
+    // Показ состоялся в новой точке: под `reduce` цикл проходит за один такт, и
+    // снимок читает результат ровно того `open()`, который его вызвал.
     expect(second.levels[0].rect.left).toBeCloseTo(500 + CURSOR_OFFSET, 2);
     expect(second.levels[0].rect.top).toBeCloseTo(400 + CURSOR_OFFSET, 2);
+  });
+
+  test('выходная анимация отиграна до показа в новой точке', async ({ page }) => {
+    // `reduce` снят: под ним отложенность пропускается целиком, состояния «меню
+    // гаснет в Top Layer» не существует, и кейс прошёл бы на показе без всякого
+    // выхода — то есть проверял бы не анимацию, а её отсутствие.
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await makeMenu(page, 'flat', null);
+    const first = await openMenu(page, WORKSPACE_POINT.x, WORKSPACE_POINT.y);
+    expect(first.levels[0].closing, 'только что открытое меню не гаснет').toBe(false);
+    expect(first.levels[0].rect.left, 'меню стоит в точке первого вызова')
+      .toBeCloseTo(WORKSPACE_POINT.x + CURSOR_OFFSET, 2);
+
+    // Отдельным `evaluate`: снимок, взятый в том же вызове, что и второй `open()`,
+    // увидел бы уже показанное меню и ничего бы не сказал о промежутке.
+    await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__mc.open(500, 400);
+    });
+
+    // Выход идёт на месте, в Top Layer: `hidePopover` ещё не зван, но отметка
+    // закрытия уже стоит, и `pointer-events` сняты. Показ отложен ровно на
+    // `animationDuration` — столько же, сколько идёт выход, поэтому кадра без меню
+    // не бывает.
+    const fading = await readMenu(page);
+    expect(fading.levels[0].closing, 'уровень гаснет на месте').toBe(true);
+    expect(fading.openCount, 'уровень ещё в Top Layer').toBe(1);
+
+    await page.waitForTimeout(DEFAULT_ANIMATION_DURATION * 2);
+
+    const after = await readMenu(page);
+    // Показ снял отметку закрытия последним шагом, иначе вход не оыграл бы.
+    expect(after.levels[0].closing, 'отметка снята показом').toBe(false);
+    expect(after.openCount, 'меню показано').toBe(1);
+    // Показ в новой точке, а не возврат в прежнюю: обе точки отличаются и по X, и
+    // по Y, и точка показа — единственное, что отличает один от другого снаружи.
+    expect(after.levels[0].rect.left).toBeCloseTo(500 + CURSOR_OFFSET, 2);
+    expect(after.levels[0].rect.top).toBeCloseTo(400 + CURSOR_OFFSET, 2);
   });
 
   test('close() скрывает меню и возвращает фокус на элемент-владелец', async ({ page }) => {
@@ -1493,5 +1646,86 @@ test.describe('жизненный цикл MyContext', () => {
       after.levels[0].id,
       /** @type {string} */ (live.owns),
     ]);
+  });
+
+  for (const closing of CLOSINGS) {
+    test(`окно закрытия отменяет отложенный показ: ${closing.title}`, async ({ page }) => {
+      // Настоящие часы и снятый `reduce` обязательны: под `reduce` отложенность
+      // пропускается целиком, окна между сокрытием и показом не существует, и кейс
+      // проверял бы не отмену показа, а её отсутствие.
+      await page.emulateMedia({ reducedMotion: 'no-preference' });
+      await makeMenu(page, 'flat', 'workspace');
+      await openMenu(page, WORKSPACE_POINT.x, WORKSPACE_POINT.y);
+      const inWindow = await openMenu(page, SECOND_POINT.x, SECOND_POINT.y);
+      // Окно существует: уровень гаснет на месте и ещё в Top Layer. Без этого
+      // снимка «отложенный показ отменён» ничего бы не говорила — с равным успехом
+      // прошла бы и синхронная реализация без всякой отложенности.
+      expect(inWindow.levels[0].closing, 'меню гаснет, а не показано').toBe(true);
+      expect(inWindow.openCount, 'уровень ещё в Top Layer').toBe(1);
+
+      await closing.apply(page);
+
+      // Трёх анимаций достаточно: и сокрытие, и показ стоят на
+      // `animationDuration`, и закрытие снимает обе задачи.
+      await page.waitForTimeout(DEFAULT_ANIMATION_DURATION * 3);
+
+      const after = await readMenu(page);
+      expect(after.openCount, 'отложенный показ отменён закрытием').toBe(0);
+    });
+  }
+
+  test('destroy() в окне закрытия не воскрешает меню', async ({ page }) => {
+    // Настоящие часы и снятый `reduce` — по той же причине, что и в кейсе про
+    // способы закрытия: окно между сокрытием и показом под `reduce` не бывает.
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    /** @type {string[]} */
+    const pageErrors = [];
+    page.on('pageerror', (error) => {
+      pageErrors.push(String(error));
+    });
+    await makeMenu(page, 'flat', 'workspace');
+    await openMenu(page, WORKSPACE_POINT.x, WORKSPACE_POINT.y);
+    const inWindow = await openMenu(page, SECOND_POINT.x, SECOND_POINT.y);
+    expect(inWindow.levels[0].closing, 'меню гаснет, а не показано').toBe(true);
+
+    const after = await destroyMenu(page);
+    await page.waitForTimeout(DEFAULT_ANIMATION_DURATION * 3);
+
+    const later = await readMenu(page);
+    // Оба снимка обязательны: по первому видно, что `destroy()` снёс уровни, по
+    // второму — что отложенный показ не вернул их в документ. Снимок после
+    // ожидания показал бы ноль уровней и на воскрешённом меню, если бы воскресшее
+    // не показалось сразу.
+    expect(after.levels, 'уровни сняты destroy()').toHaveLength(0);
+    expect(later.levels, 'отложенный показ не воскресил меню').toHaveLength(0);
+    expect(later.openCount).toBe(0);
+    // Показ, доигравший после `destroy()`, бросил бы наружу ошибку слоя; страница
+    // обязана остаться чистой.
+    expect(pageErrors, 'страница без ошибок').toEqual([]);
+  });
+
+  test('второй правый клик в окне закрытия начинает цикл заново', async ({ page }) => {
+    // Настоящие часы и снятый `reduce` — по той же причине, что и в кейсе про
+    // способы закрытия.
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await makeMenu(page, 'flat', 'workspace');
+    await openMenu(page, 200, 150);
+    const inWindow = await openMenu(page, 400, 300);
+    // «Открытое» меню в окне — это и висящий показ, а не только непустая цепочка:
+    // без этого третье нажатие сочло бы меню закрытым и прошло бы мимо цикла.
+    expect(inWindow.levels[0].closing, 'второй вызов оставил меню гаснущим').toBe(true);
+    await openMenu(page, 600, 450);
+
+    await page.waitForTimeout(DEFAULT_ANIMATION_DURATION * 3);
+
+    const after = await readMenu(page);
+    // Показан ровно один уровень и стоит он в третьей точке: третий вызов отменил
+    // показ второго и поставил свой, а не показал меню немедленно поверх
+    // гаснущего и не вернул его во вторую точку.
+    expect(after.openCount, 'показан один уровень').toBe(1);
+    expect(after.levels[0].rect.left, 'меню в третьей точке по горизонтали')
+      .toBeCloseTo(600 + CURSOR_OFFSET, 2);
+    expect(after.levels[0].rect.top, 'меню в третьей точке по вертикали')
+      .toBeCloseTo(450 + CURSOR_OFFSET, 2);
   });
 });

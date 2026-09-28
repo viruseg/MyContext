@@ -216,6 +216,21 @@ function openAt(page, point) {
 }
 
 /**
+ * Закрытие перед показом: `open()` на открытом меню проходит полный цикл, и
+ * обход, проверяющий геометрию показа, обязан начинать каждую точку с закрытого
+ * меню — иначе он проверял бы ещё и порядок таймеров.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<void>}
+ */
+function closeMenu(page) {
+  return page.evaluate(() => {
+    const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+    scope.__mc.close();
+  });
+}
+
+/**
  * @param {import('@playwright/test').Page} page
  * @param {string} label
  * @returns {Promise<{ x: number, y: number }>}
@@ -616,6 +631,10 @@ test.describe('приёмка по критериям готовности', () 
     const corner = await readMenu(page);
     expect(corner.levels[0].rect.left, 'у точки (0, 0) меню отжато к отступу')
       .toBe(SAFETY_PADDING);
+    // Закрытие перед вторым показом обязательно: `open()` на открытом меню
+    // проходит полный цикл, и критерий проверял бы не геометрию показа, а
+    // поведение переоткрытия — смешивать их здесь нельзя.
+    await closeMenu(page);
     await openAt(page, { x: 400, y: 400 });
     const middle = await readMenu(page);
     expect(middle.levels[0].rect.left, 'у точки (400, 400) меню идёт за курсором')
@@ -625,6 +644,11 @@ test.describe('приёмка по критериям готовности', () 
     let measured = 0;
     for (const x of GRID_X) {
       for (const y of GRID_Y) {
+        // Закрытие перед каждой точкой — по той же причине: критерий проверяет
+        // геометрию показа, а полный цикл переоткрытия заменял бы её проверкой
+        // порядка таймеров. Под `reduce` цикл синхронен, и снимок остаётся верным,
+        // но смешивать два предмета в одном обходе нельзя.
+        await closeMenu(page);
         await openAt(page, { x, y });
         // Подменю открывается клавишей с первого пункта, и мышь в кейсе не нужна.
         // Показ меню выделения не оставляет, поэтому до пункта-владельца — шаг вниз:
