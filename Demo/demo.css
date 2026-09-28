@@ -1,9 +1,136 @@
+/*
+ * Демонстрационная страница MyContext.
+ *
+ * Файл подключается вторым, после `styles/mycontext.css`, и это единственная
+ * причина, по которой он здесь: правила меню внизу перекрывают токены библиотеки.
+ * Переопределяются только цветовые токены и шрифт. Геометрические токены
+ * (`--vc-padding`, `--vc-item-height`, `--vc-icon-size`, `--vc-chevron-size`,
+ * `--vc-animation-duration`) не трогаются: движок позиционирования измеряет уже
+ * ограниченный ими элемент и считает отступ до края вьюпорта равным
+ * `SAFETY_PADDING`, то есть расхождение сдвигает меню за гарантированные границы.
+ */
+
 :root {
-  color-scheme: light dark;
-  font-family: system-ui, sans-serif;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  color-scheme: light;
+  --demo-bg: #f2f3f5;
+  --demo-surface: #ffffff;
+  --demo-text: #1f2023;
+  --demo-muted: #6b7280;
+  --demo-border: color-mix(in srgb, var(--demo-text) 16%, transparent);
+  --demo-accent: #7c3aed;
+}
+
+:root[data-demo-theme="dark"] {
+  color-scheme: dark;
+  --demo-bg: #101216;
+  --demo-surface: #1b1d21;
+  --demo-text: #e8eaed;
+  --demo-muted: #9aa1ab;
+  --demo-border: color-mix(in srgb, var(--demo-text) 20%, transparent);
+  --demo-accent: #c4b5fd;
 }
 
 body {
   margin: 0;
-  padding: 2rem;
+  padding: 2rem clamp(1rem, 4vw, 3rem) 4rem;
+  background: var(--demo-bg);
+  color: var(--demo-text);
+  line-height: 1.45;
+}
+
+.demo-header {
+  max-width: 60rem;
+  margin: 0 auto 2rem;
+}
+
+.demo-header__title {
+  margin: 0 0 0.5rem;
+  font-size: 2rem;
+}
+
+.demo-header__lead {
+  margin: 0 0 1.25rem;
+  max-width: 46rem;
+  color: var(--demo-muted);
+}
+
+.demo-theme-toggle {
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--demo-border);
+  border-radius: 8px;
+  background: var(--demo-surface);
+  color: var(--demo-text);
+  font: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.demo-theme-toggle[aria-pressed="true"] {
+  border-color: var(--demo-accent);
+  color: var(--demo-accent);
+}
+
+.demo-scenarios {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-width: 60rem;
+  margin: 0 auto;
+}
+
+/*
+ * Блок сценария — цель привязки `contextmenu`, а не только рамка: правый клик по
+ * заголовку и подсказке открывает то же меню. Высота в 11rem нужна не красоте, а
+ * проверкам: точка правого клика берётся у левого верхнего угла блока, и от неё
+ * четыре уровня подменю укладываются вправо, не переворачиваясь.
+ */
+.demo-scenario {
+  min-height: 11rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--demo-border);
+  border-radius: 12px;
+  background: var(--demo-surface);
+}
+
+.demo-scenario__title {
+  margin: 0 0 0.25rem;
+  font-size: 1.05rem;
+}
+
+.demo-scenario__hint {
+  margin: 0;
+  color: var(--demo-muted);
+  font-size: 0.9rem;
+}
+
+/*
+ * Токены меню под тему страницы.
+ *
+ * Селектор из двух частей — `:root[data-demo-theme]` плюс `.vc-menu` — весом
+ * (0,3,0), то есть перевешивает и `.vc-menu[data-vc-theme="dark"]`, и
+ * `.vc-menu[data-vc-theme="auto"]` из медиазапроса библиотеки. Благодаря этому
+ * меню следует за страницей при любой системной схеме, а `data-vc-theme`,
+ * который ставит библиотека, остаётся `auto` и ничего не значит для каскада.
+ */
+:root[data-demo-theme="light"] .vc-menu {
+  --vc-bg-solid: #ffffff;
+  --vc-text: #241f2e;
+  --vc-muted: #6d6780;
+  --vc-accent: #7c3aed;
+  --vc-accent-text: #ffffff;
+  --vc-active-bg: var(--vc-accent);
+  --vc-separator: color-mix(in srgb, var(--vc-text) 14%, transparent);
+  --vc-shadow: 0 10px 30px rgba(30, 20, 60, 0.18);
+}
+
+:root[data-demo-theme="dark"] .vc-menu {
+  --vc-bg-solid: #22242b;
+  --vc-text: #eceaf5;
+  --vc-muted: #a49fb8;
+  --vc-accent: #c4b5fd;
+  --vc-accent-text: #17131f;
+  --vc-active-bg: var(--vc-accent);
+  --vc-separator: color-mix(in srgb, var(--vc-text) 18%, transparent);
+  --vc-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
 }

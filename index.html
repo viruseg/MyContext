@@ -1,14 +1,36 @@
 <!doctype html>
-<html lang="ru">
+<html lang="ru" data-demo-theme="light">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>MyContext — демо</title>
+    <!-- Порядок обязателен: токены меню объявлены в `styles/mycontext.css`, а
+         `Demo/demo.css` перекрывает их под тему страницы. Обратный порядок
+         отдал бы палитру библиотеки, и переключатель темы красил бы страницу,
+         но не меню. -->
+    <link rel="stylesheet" href="./styles/mycontext.css" />
     <link rel="stylesheet" href="./Demo/demo.css" />
   </head>
   <body>
-    <h1>MyContext</h1>
-    <p>Демонстрационная страница библиотеки.</p>
+    <header class="demo-header">
+      <h1 class="demo-header__title">MyContext</h1>
+      <p class="demo-header__lead">
+        Контекстные меню на чистом ES-модуле: без рантайм-зависимостей, с Top Layer,
+        неограниченной вложенностью подменю и полной клавиатурной навигацией.
+        Правый клик по любому блоку ниже открывает его меню.
+      </p>
+      <button type="button" class="demo-theme-toggle" data-theme-toggle aria-pressed="false">
+        Тёмная тема
+      </button>
+    </header>
+    <main class="demo-scenarios">
+      <section class="demo-scenario" data-scenario="basic"></section>
+      <section class="demo-scenario" data-scenario="nested"></section>
+      <section class="demo-scenario" data-scenario="disabled"></section>
+      <section class="demo-scenario" data-scenario="icons"></section>
+      <section class="demo-scenario" data-scenario="long"></section>
+      <section class="demo-scenario" data-scenario="mixed"></section>
+    </main>
     <script type="module" src="./Demo/demo.js"></script>
   </body>
 </html>
