@@ -619,6 +619,43 @@ test.describe('показ подменю', () => {
     expect(isOpen(after, ownerId), 'подменю осталось открытым').toBe(true);
   });
 
+  test('нажатие правой кнопкой подменю не открывает', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const ownerId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Экспорт');
+    });
+
+    await hoverItem(page, 'Экспорт');
+    // Синтетическое `pointerdown` с `button: 2`, а не `mouse.down({ button:
+    // 'right' })`: браузер отдаёт `pointerdown` и `contextmenu` одной пачкой и не
+    // всегда одинаково, — webkit в одном прогоне из трёх присылал `contextmenu`
+    // уже после `mouse.down()`, и настоящий правый клик либо проходил, либо нет.
+    // `contextmenu` здесь не нужен: подтверждать нечего, кейс бьёт по той же двери
+    // `pointerdown` на пункте, а мутация `button === 2` в guard его роняет.
+    await page.evaluate(() => {
+      const label = Array.from(document.querySelectorAll('.vc-label')).find((node) => {
+        return node.textContent === 'Экспорт';
+      });
+      const item = label === undefined ? null : label.closest('.vc-item');
+      if (!(item instanceof HTMLElement)) {
+        throw new Error('пункт «Экспорт» не найден');
+      }
+      item.dispatchEvent(
+        new PointerEvent('pointerdown', { button: 2, buttons: 2, bubbles: true, composed: true }),
+      );
+    });
+
+    const pressed = await readMenu(page);
+    expect(isOpen(pressed, ownerId), 'правая кнопка не открывает подменю').toBe(false);
+    expect(pressed.openCount, 'открыт только корень').toBe(1);
+    // Задача открытия не тронута: подменю появилось бы по наведению, и это
+    // доказывает, что кейс проверяет нажатие, а не само наведение.
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    expect(isOpen(await readMenu(page), ownerId), 'подменю открыто по наведению').toBe(true);
+  });
+
   test('стрелка вправо открывает подменю и отдаёт его движку', async ({ page }) => {
     await makeMenu(page, 'tree', 'surface');
     await openAt(page, OPEN_MIDDLE);

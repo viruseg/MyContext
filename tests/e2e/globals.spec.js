@@ -61,6 +61,7 @@ import { CLOSE_GRACE_MS, OPEN_GRACE_MS } from '../../src/constants.js';
  * @property {(slot: 'first' | 'second', set: string, containerId: string | null) => void} make
  * @property {(slot: 'first' | 'second', x: number, y: number) => void} open
  * @property {(slot: 'first' | 'second') => void} destroy
+ * @property {(slot: 'first' | 'second') => void} detach
  * @property {() => Snapshot} read
  * @property {(name: string) => MenuRect | null} rectOf
  * @property {(name: string) => string | null} submenuIdOf
@@ -160,6 +161,18 @@ function destroyMenu(page, slot) {
   return page.evaluate((name) => {
     const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
     scope.__mc.destroy(name);
+  }, slot);
+}
+
+/**
+ * @param {import('@playwright/test').Page} page
+ * @param {'first' | 'second'} slot
+ * @returns {Promise<void>}
+ */
+function detachMenu(page, slot) {
+  return page.evaluate((name) => {
+    const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+    scope.__mc.detach(name);
   }, slot);
 }
 
@@ -455,6 +468,17 @@ test.describe('глобальные слушатели', () => {
             throw new Error(`нет экземпляра ${slot}`);
           }
           menu.destroy();
+        },
+        /**
+         * @param {'first' | 'second'} slot
+         * @returns {void}
+         */
+        detach(slot) {
+          const menu = instances.get(slot);
+          if (menu === undefined) {
+            throw new Error(`нет экземпляра ${slot}`);
+          }
+          menu.detach();
         },
         read,
         rectOf: rectOfLabel,
@@ -854,6 +878,35 @@ test.describe('глобальные слушатели', () => {
     await page.mouse.click(VOID_POINT.x, VOID_POINT.y);
     const closed = await readMenu(page);
     expect(closed.openCount, 'второй экземпляр всё ещё слышит страницу').toBe(0);
+  });
+
+  test('detach снимает все глобальные слушатели', async ({ page }) => {
+    await makeMenu(page, 'first', 'chain', 'surface');
+    await detachMenu(page, 'first');
+
+    const after = await readMenu(page);
+    // Тот же список, что и у `destroy`, и тем же способом: шесть снятий поимённо,
+    // потому что `detach` зовёт тот же `#unbindGlobalHandlers`. Формулировка «снимает
+    // все» прошла бы на забытом обработчике.
+    for (const type of ['pointermove', 'pointerdown', 'contextmenu', 'keydown', 'scroll', 'resize']) {
+      const node = type === 'scroll' || type === 'resize' ? 'window' : 'document';
+      expect(after.removed, `слушатель ${type} снят`).toContain(`${type}@${node}`);
+    }
+    // С контейнера снят и `contextmenu` — иначе правый клик продолжал бы открывать
+    // меню у экземпляра, который автор отвязал.
+    expect(after.removed, 'contextmenu снят с контейнера').toContain('contextmenu@элемент');
+
+    // Журнал снятий — это запись вызовов, а не поведение. Меню после `detach`
+    // остаётся пригодным для `open()`, и скролл страницы его больше не сносит:
+    // снимать слушатели и не слышать страницу — разные утверждения.
+    await openAt(page, 'first', SURFACE_POINT);
+    expect((await readMenu(page)).openCount, 'экземпляр после detach открывается').toBe(1);
+    await page.evaluate(() => {
+      window.scrollTo(0, 300);
+    });
+    await page.waitForFunction(() => window.scrollY > 0);
+    const scrolled = await readMenu(page);
+    expect(scrolled.openCount, 'скролл страницы после detach меню не закрывает').toBe(1);
   });
 
   test('destroy снимает все глобальные слушатели', async ({ page }) => {

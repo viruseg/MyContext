@@ -196,6 +196,19 @@ test.describe('открытие', () => {
     expect(hover.isOpenPending()).toBe(false);
   });
 
+  test('itemPress без висящей задачи открытия не вызывает onOpen', () => {
+    const { clock, hover, calls } = setup();
+
+    hover.itemPress();
+
+    // Ни открытие, ни закрытие не планировалось, поэтому нажатию выполнять
+    // нечего. Вызов `onOpen` здесь означал бы, что нажатие открывает подменю мимо
+    // задержки по событию, которого не было, — а guard стоит именно на этом.
+    expect(calls).toEqual([]);
+    expect(hover.isOpenPending()).toBe(false);
+    expect(clock.tasks).toHaveLength(0);
+  });
+
   test('повторный itemEnter не перезапускает задержку открытия', () => {
     const { clock, hover, calls } = setup();
 
