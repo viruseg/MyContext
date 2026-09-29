@@ -178,6 +178,26 @@ function expectPx(actual, expected, name) {
   expect(actual, name).toBeCloseTo(expected, 2);
 }
 
+/**
+ * Масштаб по X из вычисленного `transform`.
+ *
+ * Строка разбирается, а не сравнивается с эталоном: CSSOM отдаёт `matrix(...)` с
+ * запятыми и пробелами, и вид записи неодинаков — `none` у пустого преобразования,
+ * матрица у `scale()`. Оба молчащих значения приводятся к единице, иначе переход,
+ * которого не было, выглядел бы как движение: `none` и `matrix(1, 0, 0, 1, 0, 0)`
+ * — одна и та же матрица.
+ *
+ * @param {string} transform вычисленное значение `transform`.
+ * @returns {number} масштаб по X; единица, если преобразования нет.
+ */
+function scaleOf(transform) {
+  const matrix = /^matrix\(([^)]+)\)$/.exec(transform);
+  if (matrix === null) {
+    return 1;
+  }
+  return Number.parseFloat(matrix[1].split(',')[0]);
+}
+
 test.beforeEach(async ({ page }) => {
   await page.setViewportSize(VIEWPORT);
   // `goto` обязателен перед `setContent`: без него у документа нет адреса, и ни
@@ -1529,6 +1549,58 @@ test.describe('закрытие', () => {
     // прозрачным и не принимало бы событий — то есть не открылось бы вовсе.
     expect(marks.atReshow).toEqual({ closing: false, pointerEvents: 'auto', open: true });
     expect(marks.afterReshow.opacity).toBeGreaterThan(0.98);
+  });
+
+  test('вход доигрывает масштаб, а не только прозрачность', async ({ page }) => {
+    // Настоящее движение: под `reduce` переходов нет вовсе, и кейс проверял бы не
+    // анимацию, а её отсутствие.
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    const samples = await page.evaluate(async ({ duration }) => {
+      const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (
+        /** @type {unknown} */ (globalThis)
+      );
+      const { rootItems } = host.__vcSets();
+      const layer = host.__vcProbe.real();
+      const root = layer.ensureLevel(rootItems, null, 0, null);
+      const element = root.element;
+      /** @type {Array<{ transform: string, opacity: string }>} */
+      const samples = [];
+      let sampling = true;
+      // Кадр за кадром на всём окне входа. Снимок «в середине» зависел бы от того,
+      // на каком кадре доехал IPC, а окно входа длится одну длительность и на
+      // медленной машине в него попадает разное число кадров.
+      const sample = () => {
+        // Пока уровень в Top Layer: у отцепленного элемента `getComputedStyle` не
+        // про раскладку вовсе, и его пустое значение сошло бы за идущую анимацию.
+        if (sampling && element.matches(':popover-open')) {
+          const style = globalThis.getComputedStyle(element);
+          samples.push({ transform: style.transform, opacity: style.opacity });
+        }
+        if (sampling) {
+          globalThis.requestAnimationFrame(sample);
+        }
+      };
+      globalThis.requestAnimationFrame(sample);
+      layer.showRoot(root, { x: 40, y: 40 });
+      await new Promise((resolve) => {
+        globalThis.setTimeout(resolve, duration * 2);
+      });
+      sampling = false;
+      return samples;
+    }, { duration: TEST_ANIMATION_DURATION });
+
+    // Контроль: переход входа действительно шёл, иначе проверка ниже прошла бы на
+    // пустом наборе кадров.
+    const opacities = samples.map((reading) => Number.parseFloat(reading.opacity));
+    expect(opacities.length, 'переход входа дал кадры').toBeGreaterThan(0);
+    expect(Math.min(...opacities), 'вход гаснет с нуля').toBeLessThan(0.95);
+    // А теперь то, ради чего кейс: кроме прозрачности доигрывает и масштаб.
+    // `showRoot` замеряет уровень маской, и маска обнуляет `transform` — если
+    // обнуление остаётся последним вычисленным стилем, браузер берёт его как
+    // начальное значение перехода, `@starting-style` не срабатывает, и вход
+    // превращается в голое проявление: `none` и `scale(1)` — одна матрица.
+    const scales = samples.map((reading) => scaleOf(reading.transform));
+    expect(Math.min(...scales), 'меню входит не в полный размер').toBeLessThan(0.99);
   });
 
   test('reduced-motion: hidePopover вызывается немедленно, без задачи в планировщике', async ({ page }) => {

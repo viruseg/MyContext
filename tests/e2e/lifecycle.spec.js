@@ -265,6 +265,36 @@ function readMenu(page) {
 }
 
 /**
+ * Досматривает входные переходы меню до конца.
+ *
+ * Нужен кейсам со снятым `reduce` и остановленными часами: показ меню проходит
+ * настоящим CSS-переходом, а он живёт реальным временем, которого у кейса нет.
+ * `waitForFunction` не годится — остановленные часы останавливают и кадры, а по
+ * ним ходит ожидание; `fastForward` двигает только фальшивые таймеры и на
+ * переходы не смотрит.
+ *
+ * `finish()` прыгает к концу синхронно, поэтому рамка читается уже покойной.
+ * Без этого `getBoundingClientRect` отдаёт прямоугольник, сдвинутый на
+ * `0.02 × ширина`: вход начинается с `scale(0.96)`, и меню ещё не в полном
+ * размере. Прыгать нужно именно до конца, а не до середины, — иначе смещение
+ * просто станет другим.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<void>}
+ */
+function settleEntryAnimations(page) {
+  return page.evaluate(() => {
+    for (const level of document.querySelectorAll('.vc-menu')) {
+      for (const animation of level.getAnimations()) {
+        animation.finish();
+      }
+    }
+  }).then(() => {
+    return undefined;
+  });
+}
+
+/**
  * @param {import('@playwright/test').Page} page
  * @param {string} containerId
  * @returns {Promise<Snapshot>}
@@ -1161,7 +1191,9 @@ test.describe('жизненный цикл MyContext', () => {
     await page.clock.install({ time: CLOCK_START_AT });
     await page.clock.pauseAt(CLOCK_FROZEN_AT);
     await makeMenu(page, 'flat', null);
-    const first = await openMenu(page, WORKSPACE_POINT.x, WORKSPACE_POINT.y);
+    await openMenu(page, WORKSPACE_POINT.x, WORKSPACE_POINT.y);
+    await settleEntryAnimations(page);
+    const first = await readMenu(page);
     expect(first.levels[0].closing, 'только что открытое меню не гаснет').toBe(false);
     expect(first.levels[0].rect.left, 'меню стоит в точке первого вызова')
       .toBeCloseTo(WORKSPACE_POINT.x + CURSOR_OFFSET, 2);
@@ -1183,6 +1215,7 @@ test.describe('жизненный цикл MyContext', () => {
     expect(fading.openCount, 'уровень ещё в Top Layer').toBe(1);
 
     await page.clock.fastForward(DEFAULT_ANIMATION_DURATION * 2);
+    await settleEntryAnimations(page);
 
     const after = await readMenu(page);
     // Показ снял отметку закрытия последним шагом, иначе вход не отыграл бы.
@@ -1886,6 +1919,7 @@ test.describe('жизненный цикл MyContext', () => {
     expect(during.levels[0].closing, 'меню ещё гаснет').toBe(true);
 
     await page.clock.fastForward(DEFAULT_ANIMATION_DURATION * 3);
+    await settleEntryAnimations(page);
 
     const after = await readMenu(page);
     // Показан ровно один уровень и стоит он в третьей точке: третий вызов отменил

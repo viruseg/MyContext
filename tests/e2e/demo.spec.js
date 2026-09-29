@@ -40,6 +40,20 @@ import { OPEN_GRACE_MS, SAFETY_PADDING } from '../../src/constants.js';
  */
 
 /**
+ * Снимок перехода между меню разных экземпляров, снятый слушателем на документе
+ * в фазе всплытия. `null` означает, что слушатель не сработал: правый клик до
+ * документа не дошёл, и читать дальше нечего.
+ *
+ * @typedef {object} HandoverLevel
+ * @property {string} id
+ * @property {boolean} open `:popover-open` — уровень в Top Layer.
+ * @property {boolean} closing несёт `data-vc-closing`.
+ *
+ * @typedef {object} DemoScope
+ * @property {HandoverLevel[] | null} __handover
+ */
+
+/**
  * Накопленные сообщения страницы.
  *
  * @typedef {object} PageLog
@@ -1322,4 +1336,80 @@ test('демо: у каждого сценария свой независимы
   const log = pageLog(page);
   expect(log.messages, 'сообщений консоли за все шесть меню').toEqual([]);
   expect(log.errors, 'ошибок за все шесть меню').toEqual([]);
+});
+
+test('демо: правый клик по другому блоку гасит чужое меню и открывает своё в одном такте', async ({ page }) => {
+  // `reduce` снят: под ним закрытие мгновенное, состояния «чужое меню гаснет в Top
+  // Layer» не существует, и кейс прошёл бы на показе без всякого выхода — то есть
+  // проверял бы не переход между меню, а его отсутствие.
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  const firstId = await openScenario(page, 'basic');
+  // Вход первого меню обязан закончиться. Пока оно доигрывает, «чужое меню» и «только
+  // что показанное» — одно и то же состояние, и снимок перехода ничего бы не
+  // различал.
+  await page.waitForFunction((id) => {
+    const level = document.getElementById(id);
+    if (level === null) {
+      return false;
+    }
+    return level.matches(':popover-open')
+      && !level.hasAttribute('data-vc-closing')
+      && globalThis.getComputedStyle(level).opacity === '1';
+  }, firstId);
+
+  // Снимок снимается слушателем на `document` в фазе всплытия, то есть после
+  // глобальных обработчиков capture-фазы и после `open()` целевого блока. Любая
+  // другая точка наблюдения — до или после события — либо увидела бы гаснущее
+  // меню уже погасшим, либо не увидела бы показанного: окно между двумя меню
+  // длится одну анимацию, и поездка туда-обратно его перекрывает.
+  await page.evaluate(() => {
+    const scope = /** @type {DemoScope} */ (/** @type {unknown} */ (globalThis));
+    scope.__handover = null;
+    document.addEventListener('contextmenu', () => {
+      scope.__handover = Array.from(document.querySelectorAll('.vc-menu')).map((element) => {
+        return {
+          id: element.id,
+          open: element.matches(':popover-open'),
+          closing: element.hasAttribute('data-vc-closing'),
+        };
+      });
+    }, { once: true });
+  });
+
+  const point = await rightClickPointIn(page, 'nested');
+  await page.mouse.click(point.x, point.y, { button: 'right' });
+  const handover = await page.evaluate(() => {
+    const scope = /** @type {DemoScope} */ (/** @type {unknown} */ (globalThis));
+    return scope.__handover;
+  });
+
+  // Ровно два уровня: экземпляры на странице свои, и каждый открыл свой.
+  expect(handover, 'снимок перехода снят').not.toBe(null);
+  expect(handover ?? [], 'в момент перехода на странице два уровня').toHaveLength(2);
+  const fading = (handover ?? []).find((level) => {
+    return level.id === firstId;
+  });
+  const shown = (handover ?? []).find((level) => {
+    return level.id !== firstId;
+  });
+  // Чужое меню ещё в Top Layer и уже гаснет: выход идёт на месте, а `hidePopover`
+  // отложен на анимацию.
+  expect(fading?.open, 'чужое меню ещё в Top Layer').toBe(true);
+  expect(fading?.closing, 'чужое меню гаснет').toBe(true);
+  // И своё открыто в этом же такте. Оба перехода идут одновременно, а не
+  // последовательно: показ отложен на `animationDuration` только внутри одного
+  // экземпляра, и разные экземпляры о нём не знают.
+  expect(shown?.open, 'своё меню открыто').toBe(true);
+  expect(shown?.closing, 'своё меню не гаснет').toBe(false);
+
+  // И переход завершается без наложения: чужое меню ушло, своё осталось.
+  await page.waitForFunction((id) => {
+    const open = Array.from(document.querySelectorAll('.vc-menu')).filter((level) => {
+      return level.matches(':popover-open');
+    });
+    return open.length === 1 && open[0].id === id;
+  }, /** @type {string} */ (shown?.id));
+  const settled = await readMenu(page);
+  expect(settled.openCount, 'после перехода открыт один уровень').toBe(1);
+  expect(levelOf(settled, /** @type {string} */ (shown?.id)).open, 'осталось меню нового блока').toBe(true);
 });
