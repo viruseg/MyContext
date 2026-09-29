@@ -1,4 +1,5 @@
-import { DEFAULT_ANIMATION_DURATION, DEFAULT_MENU_LABEL } from './constants.js';
+import { DEFAULT_ANIMATION_DURATION, DEFAULT_AUTO_HIDE_DISTANCE, DEFAULT_MENU_LABEL } from './constants.js';
+import { nearestRectDistance } from './geometry.js';
 import { createHoverIntent } from './hoverIntent.js';
 import { createKeyboard } from './keyboard.js';
 import { createLayer } from './layer.js';
@@ -15,6 +16,7 @@ import { assertItems } from './renderer.js';
  * @typedef {import('./layer.js').LevelEntry} LevelEntry
  * @typedef {import('./layer.js').MenuLayer} MenuLayer
  * @typedef {import('./layer.js').Point} Point
+ * @typedef {import('./geometry.js').Rect} Rect
  * @typedef {import('./keyboard.js').KeyboardController} KeyboardController
  * @typedef {import('./keyboard.js').KeyboardHost} KeyboardHost
  * @typedef {import('./hoverIntent.js').HoverIntentController} HoverIntentController
@@ -32,6 +34,12 @@ import { assertItems } from './renderer.js';
  * @property {string} [label] доступное имя меню, `DEFAULT_MENU_LABEL` по умолчанию:
  *   имя у уровня обязательно (`createLayer` требует строку), а пустое имя не читается
  *   и не проходит аудит — потому и проверяется, а не подставляется по умолчанию.
+ * @property {number} [autoHideDistance] расстояние от показанных уровней до курсора,
+ *   px, после которого меню скрывает себя само, `DEFAULT_AUTO_HIDE_DISTANCE` по
+ *   умолчанию. `0` — правило выключено. Меряется до ближайшего уровня открытой
+ *   цепочки, то есть уход в сторону закрывает меню, а уход в сторону открытого
+ *   подменю — нет. Требуется конечное неотрицательное число: `NaN` в сравнении
+ *   ложен всегда, и правило молча превратилось бы в «не скрываться никогда».
  */
 
 const ITEM_SELECTOR = '.vc-item';
@@ -246,6 +254,17 @@ function defaultCancel(handle) {
  * обязательно и относится к переоткрытию: в окне между сокрытием и показом цепочка
  * уже пуста, и проверка по одной цепочке сочла бы меню закрытым — третий правый
  * клик подряд прошёл бы мимо цикла и показал меню немедленно, без выхода.
+ *
+ * **Автоскрытие — единственное правило закрытия без предыстории.** Всё остальное
+ * приходит событием, которое само о себе говорит: клик, скролл, `resize`, потеря
+ * фокуса, `Escape`. Правило `autoHideDistance` спрашивает вместо этого о геометрии
+ * — далеко ли курсор от показанных рамок, — и поэтому у него нет и не может быть
+ * вопроса «а был ли курсор в меню»: предыдущая такая попытка породила прежнюю
+ * «безопасную область» вокруг подменю, от которой этой библиотеки отказались, и
+ * вернуть её значило бы вернуть её поломки. Меряется до ближайшего уровня цепочки,
+ * а не до объединённой рамки: зазор между уровнями пуст, и объединение считало бы
+ * его частью меню. Порог нулём — это «выключено», а не «закрывать в первом же
+ * пикселе за краем», иначе дефолт означал бы ровно то поведение, которое отменено.
  *
  * **Слушатель `keydown` висит на уровне, а не на документе.** Глобальные слушатели —
  * отдельная задача, и до их появления клавиши адресуются пункту, а не документу.
@@ -699,6 +718,11 @@ export class MyContext {
    * `#onLevelPointerMove`. Этот обработчик берёт то, чего уровни не видят: движение
    * по странице мимо меню, включая пустоту и сам привязанный контейнер.
    *
+   * **Автоскрытие проверяется первым, до всякой работы с отметками.** Правило
+   * `autoHideDistance` — единственное здесь, которое само закрывает меню по
+   * движению, и закрывать надо до того, как движение что-либо изменит: закрытый
+   * уровень уже не должен ни терять отметку, ни переносить фокус.
+   *
    * **Подменю он не закрывает, и в этом его единственная задача — не мешать.** Уход
    * курсора в сторону не означает намерения убрать меню с экрана: в системных меню
    * так же, и открытый в нативном стиле список не следует за курсором. Раньше
@@ -730,6 +754,10 @@ export class MyContext {
     if (this.#destroyed) {
       return;
     }
+    if (this.#hidesByAutoDistance(event)) {
+      this.#closeMenu({ returnFocus: true });
+      return;
+    }
     if (this.#isInsideMenu(event.target)) {
       this.#pointerInside = true;
       return;
@@ -747,6 +775,58 @@ export class MyContext {
       this.#keyboard.clearActive(current);
     }
   };
+
+  /**
+   * Ушёл ли курсор дальше `autoHideDistance` от всего, что показано.
+   *
+   * Ответ считается по геометрии, а не по «курсор был внутри»: у правила нет
+   * предыстории, и меню, открытое программно мимо курсора, скрывается по
+   * первому же движению мыши. Для программного `open()` это и есть смысл опции —
+   * она объявлена на всё время жизни меню, а не на «после посещения».
+   *
+   * **Проверяется до `#isInsideMenu`, а не после.** Курсор над пунктом лежит
+   * внутри рамки, расстояние до неё нулевое, и правило не сработало бы в принципе —
+   * но только если до него дойдёт управление, а `#isInsideMenu` на этом пути
+   * возвращает управление раньше. Значит, порядок обязан быть именно таким.
+   *
+   * **Рамки берутся у уровней `#chain`, то есть у показанных.** Закрывающийся
+   * уровень в Top Layer ещё виден, но показан он ненадолго и меню уже гаснет;
+   * мерить по нему значило бы удерживать меню из-за того, что скоро исчезнет.
+   *
+   * **Пустая цепочка — не закрытие.** Меню в этот момент либо закрыто, либо
+   * переоткрывается, и в обоих случаях закрывать нечего: `nearestRectDistance`
+   * вернул бы бесконечность, а на `#reopenHandle` такой вызов сработал бы как
+   * отмена отложенного показа, то есть меню просто не открылось бы.
+   *
+   * @param {PointerEvent} event движение курсора, координаты которого и меряются.
+   * @returns {boolean}
+   */
+  #hidesByAutoDistance(event) {
+    const distance = this.#options.autoHideDistance;
+    if (distance <= 0 || this.#chain.length === 0) {
+      return false;
+    }
+    return nearestRectDistance({ x: event.clientX, y: event.clientY }, this.#chainRects()) > distance;
+  }
+
+  /**
+   * Рамки показанных уровней в координатах вьюпорта.
+   *
+   * `getBoundingClientRect` отдаёт рамку с учётом `transform`, то есть на четыре
+   * процента меньше вычисленной во время входной анимации. Для правила «курсор
+   * далеко ли» такая поправка безобидна: она двигает край, а не меняет, где
+   * пользователь стоит относительно меню, и порог заведомо больше этих четырёх
+   * процентов. Взамен снимается вопрос про поля каркаса, отступы и зоны
+   * прокрутки: рамка приходит та, которую видит человек.
+   *
+   * @returns {Rect[]}
+   */
+  #chainRects() {
+    return this.#chain.map((entry) => {
+      const { left, top, width, height } = entry.element.getBoundingClientRect();
+      return { left, top, width, height };
+    });
+  }
 
   /**
    * Левый клик вне дерева меню, контейнер включая: клик по странице — это уход из
@@ -980,6 +1060,7 @@ export class MyContext {
       theme: options.theme ?? 'auto',
       animationDuration: options.animationDuration ?? DEFAULT_ANIMATION_DURATION,
       label: options.label ?? DEFAULT_MENU_LABEL,
+      autoHideDistance: options.autoHideDistance ?? DEFAULT_AUTO_HIDE_DISTANCE,
     };
     this.#actions = new Map();
     this.#levels = new Map();
@@ -1820,7 +1901,7 @@ export class MyContext {
     if (!isRecord(options)) {
       throw new TypeError(`${path}: опции должны быть объектом`);
     }
-    const { theme, animationDuration, label } = options;
+    const { theme, animationDuration, label, autoHideDistance } = options;
     if (theme !== undefined && theme !== 'auto' && theme !== 'light' && theme !== 'dark') {
       throw new TypeError(
         `${path}.theme: неизвестная тема «${String(theme)}», ожидается auto, light или dark`,
@@ -1841,6 +1922,23 @@ export class MyContext {
     // строкой. Раньше и то и другое проходило молча.
     if (label !== undefined && !isNonEmptyString(label)) {
       throw new TypeError(`${path}.label: имя меню обязано быть непустой строкой`);
+    }
+    // Расстояние автоскрытия проверяется по тем же двум признакам, что и
+    // `animationDuration`, и по той же причине. `NaN` в сравнении с числом ложен
+    // всегда, то есть «негодное расстояние» и «выключенное правило» стали бы
+    // неразличимы — а это худший вид поломки: автор задал опцию, а меню не
+    // скрывается, и винить нечего. Отрицательное значение не имеет прочтения
+    // вовсе: расстояние до меню неотрицательно, и порог ниже нуля закрыл бы
+    // меню в момент открытия.
+    if (autoHideDistance !== undefined) {
+      if (typeof autoHideDistance !== 'number' || !Number.isFinite(autoHideDistance)) {
+        throw new TypeError(
+          `${path}.autoHideDistance: расстояние должно быть конечным числом, px`,
+        );
+      }
+      if (autoHideDistance < 0) {
+        throw new TypeError(`${path}.autoHideDistance: расстояние не может быть отрицательным`);
+      }
     }
   }
 

@@ -4,6 +4,7 @@ import { MyContext } from '../../src/MyContext.js';
 /**
  * @typedef {import('../../src/MyContext.js').MenuItem} MenuItem
  * @typedef {import('../../src/MyContext.js').SeparatorItem} SeparatorItem
+ * @typedef {import('../../src/MyContext.js').MyContextOptions} MyContextOptions
  */
 
 /**
@@ -21,6 +22,16 @@ import { MyContext } from '../../src/MyContext.js';
  */
 function menuOf(items) {
   return new MyContext(/** @type {Array<MenuItem | SeparatorItem>} */ (items));
+}
+
+/**
+ * Меню с проверяемыми опциями и заведомо годным составом.
+ *
+ * @param {unknown} options проверяемый блок опций.
+ * @returns {MyContext}
+ */
+function menuWithOptions(options) {
+  return new MyContext([{ labelAction: () => 'Пункт' }], /** @type {MyContextOptions} */ (options));
 }
 
 /**
@@ -161,5 +172,36 @@ test.describe('валидация корневого состава', () => {
     expect(() => menuOf([{ labelAction: () => 'Ветка', submenuAction: () => 'не массив' }]))
       .not.toThrow();
     expect(() => menuOf([{ labelAction: () => 'Пункт', submenuAction: () => [] }])).not.toThrow();
+  });
+});
+
+test.describe('валидация опции autoHideDistance', () => {
+  test('не число отклоняется', () => {
+    // Правило проверки то же, что у `animationDuration`, и по той же причине:
+    // `NaN` в сравнении с числом всегда `false`, то есть правило молча
+    // превратилось бы в «меню не скрывается никогда», и негодная опция
+    // выдавала бы себя за выключенную — худший из ответов, потому что автор
+    // задал её вовсе не для того.
+    expect(() => menuWithOptions({ autoHideDistance: '100' })).toThrow(TypeError);
+    expect(() => menuWithOptions({ autoHideDistance: '100' })).toThrow('options.autoHideDistance');
+    expect(() => menuWithOptions({ autoHideDistance: Number.NaN })).toThrow('options.autoHideDistance');
+    expect(() => menuWithOptions({ autoHideDistance: Number.POSITIVE_INFINITY }))
+      .toThrow('options.autoHideDistance');
+  });
+
+  test('отрицательное расстояние отклоняется', () => {
+    // Отрицательный порог не имеет прочтения: расстояние до меню неотрицательно,
+    // и правило «превысил порог» при таком пороге срабатывало бы в самом меню —
+    // то есть закрывало бы его в момент открытия. Отвергнуть значение честнее,
+    // чем трактовать его как «выключено».
+    expect(() => menuWithOptions({ autoHideDistance: -1 })).toThrow('options.autoHideDistance');
+  });
+
+  test('ноль и положительное расстояние принимаются', () => {
+    // Ноль — это выключенное автоскрытие, а не его отсутствие: опция объявлена
+    // всегда, и автор может задать её нулём явно, не отличая этого от «не задал».
+    expect(() => menuWithOptions({ autoHideDistance: 0 })).not.toThrow();
+    expect(() => menuWithOptions({ autoHideDistance: 120 })).not.toThrow();
+    expect(() => menuWithOptions({ autoHideDistance: 0.5 })).not.toThrow();
   });
 });
