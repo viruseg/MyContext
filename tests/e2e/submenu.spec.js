@@ -91,10 +91,10 @@ import { CLOSE_GRACE_MS, OPEN_GRACE_MS, SAFETY_PADDING, SUBMENU_OFFSET } from '.
  *   подходящего под селектор. Нужна для строк без подписи: разделителя, у которого
  *   её нет вовсе, и наводить приходится по прямоугольнику, а не по имени.
  * @property {(ownerLabel: string) => string | null} submenuIdOf
- * @property {(index: number, disabled: boolean) => void} setDisabled правка поля
- *   `disabled` у пункта набора последнего `make`: автор выключает пункт между
- *   показами, и поле обязано дойти до уже построенного уровня.
- * @property {(disabled: boolean) => OwnerProbe} ownersOf
+ * @property {(index: number, enabled: boolean) => void} setAvailability правка
+ *   `isEnabledAction` у пункта набора последнего `make`: автор выключает пункт
+ *   между показами, и решение обязано дойти до уже построенного уровня.
+ * @property {(enabled: boolean) => OwnerProbe} ownersOf
  */
 
 /**
@@ -433,7 +433,7 @@ test.beforeEach(async ({ page }) => {
         },
         {
           label: 'Глухой',
-          disabled: true,
+          isEnabledAction: () => false,
           submenu: [{ label: 'Под глухим' }],
           action: () => log.push('глухой'),
         },
@@ -467,7 +467,7 @@ test.beforeEach(async ({ page }) => {
       // невыбираемых строках ловит обе границы разом, поэтому набор свой.
       unselectable: [
         { label: 'Живой' },
-        { label: 'Глухой', disabled: true },
+        { label: 'Глухой', isEnabledAction: () => false },
         { type: 'separator' },
         { label: 'Второй' },
       ],
@@ -617,7 +617,7 @@ test.beforeEach(async ({ page }) => {
         }
         return null;
       },
-      setDisabled(index, disabled) {
+      setAvailability(index, enabled) {
         if (menu === null) {
           throw new Error('меню не создано');
         }
@@ -625,14 +625,18 @@ test.beforeEach(async ({ page }) => {
         if (item === undefined || 'type' in item) {
           throw new Error('в наборе нет такого пункта');
         }
-        // Правка поля на живом объекте набора: автор выключает пункт между
-        // показами, и поле обязано дойти до уже построенного уровня.
-        item.disabled = disabled;
+        // Предикат вешается на живом объекте набора: автор выключает пункт между
+        // показами, и решение обязано дойти до уже построенного уровня.
+        item.isEnabledAction = () => enabled;
       },
-      ownersOf(disabled) {
+      ownersOf(enabled) {
         // Рендер вызывается на тех же данных, что и меню: подменю непустое, и
-        // единственное различие между двумя пунктами — `disabled`.
-        const items = [{ label: 'Владелец', submenu: [{ label: 'Лист' }], disabled }];
+        // единственное различие между двумя пунктами — ответ предиката.
+        const items = [{
+          label: 'Владелец',
+          submenu: [{ label: 'Лист' }],
+          isEnabledAction: () => enabled,
+        }];
         const level = renderLevel(items, {
           levelIndex: 0,
           menuId: 'vc-проба',
@@ -991,7 +995,7 @@ test.describe('показ подменю', () => {
     await page.evaluate(() => {
       const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown } */ (globalThis));
       scope.__mc.close();
-      scope.__mc.setDisabled(0, true);
+      scope.__mc.setAvailability(0, false);
     });
     await openAt(page, OPEN_MIDDLE);
     const second = await page.evaluate(() => {
@@ -1487,8 +1491,8 @@ test.describe('показ подменю', () => {
     const owners = await page.evaluate(() => {
       const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
       return {
-        live: scope.__mc.ownersOf(false),
-        deaf: scope.__mc.ownersOf(true),
+        live: scope.__mc.ownersOf(true),
+        deaf: scope.__mc.ownersOf(false),
       };
     });
 

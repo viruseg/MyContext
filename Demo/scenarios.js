@@ -163,10 +163,14 @@ export const scenarios = [
     title: 'Отключённые пункты',
     items: [
       { label: 'Доступно', icon: { type: 'emoji', value: '✅' } },
-      { label: 'Отключённый пункт', disabled: true, icon: { type: 'emoji', value: '🚫' } },
+      {
+        label: 'Отключённый пункт',
+        isEnabledAction: () => false,
+        icon: { type: 'emoji', value: '🚫' },
+      },
       {
         label: 'Отключённый владелец',
-        disabled: true,
+        isEnabledAction: () => false,
         submenu: [{ label: 'Под глухим' }, { label: 'Тоже под ним' }],
       },
       separator(),
@@ -227,8 +231,12 @@ export const scenarios = [
           },
         ],
       },
-      { label: 'Отключённый владелец', disabled: true, submenu: [{ label: 'Под глухим' }] },
-      { label: 'Отключённый пункт', disabled: true },
+      {
+        label: 'Отключённый владелец',
+        isEnabledAction: () => false,
+        submenu: [{ label: 'Под глухим' }],
+      },
+      { label: 'Отключённый пункт', isEnabledAction: () => false },
       separator(),
       {
         label: 'Пустое подменю',

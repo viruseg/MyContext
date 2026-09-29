@@ -53,18 +53,33 @@ const SQUARE_SVG = {
 
 /**
  * Фикстура уровня: пункт с иконкой и `id`, пункт без иконки, разделитель,
- * отключённый пункт и владелец подменю. Все четыре состояния, которыми
- * различаются пункты, в одном списке — иначе каждый кейс рисовал бы свой.
+ * отключённый предикатом пункт и владелец подменю. Все четыре состояния,
+ * которыми различаются пункты, в одном списке — иначе каждый кейс рисовал бы свой.
  *
- * @type {Array<MenuItem | SeparatorItem>}
+ * Собирается в странице, а не передаётся аргументом `page.evaluate`: сериализация
+ * туда не везёт функции, а `isEnabledAction` — функция. Заводится в `beforeEach`
+ * на `globalThis.__vcFixture` и достаётся приведением внутри каждого кейса —
+ * ровно так же, как проба слоя в `tests/e2e/layer.spec.js`.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<void>}
  */
-const FIXTURE_ITEMS = [
-  { label: 'Открыть', id: 'open', icon: EMOJI },
-  { label: 'Открыть в новом окне' },
-  { type: 'separator' },
-  { label: 'Копировать', id: 'copy', disabled: true },
-  { label: 'Экспорт', id: 'export', submenu: [{ label: 'PDF' }, { label: 'PNG' }] },
-];
+function fixtureIn(page) {
+  return page.evaluate(({ emoji }) => {
+    const host = /** @type {{ __vcFixture?: () => Array<MenuItem | SeparatorItem> }} */ (
+      /** @type {unknown} */ (globalThis)
+    );
+    host.__vcFixture = () => {
+      return [
+        { label: 'Открыть', id: 'open', icon: emoji },
+        { label: 'Открыть в новом окне' },
+        { type: 'separator' },
+        { label: 'Копировать', id: 'copy', isEnabledAction: () => false },
+        { label: 'Экспорт', id: 'export', submenu: [{ label: 'PDF' }, { label: 'PNG' }] },
+      ];
+    };
+  }, { emoji: EMOJI });
+}
 
 test.beforeEach(async ({ page }) => {
   // `goto` обязателен перед `setContent`: без него у документа нет адреса, и ни
@@ -86,11 +101,16 @@ test.beforeEach(async ({ page }) => {
   // `getBoundingClientRect`. Без этого кейсы на геометрию меряли бы недовыведенное
   // меню и падали бы по таймауту в зависимости от того, успела ли анимация кончиться.
   await page.emulateMedia({ reducedMotion: 'reduce' });
+  await fixtureIn(page);
 });
 
 test.describe('пункт', () => {
   test('role=menuitem, tabindex=-1, data-active отсутствует', async ({ page }) => {
-    const result = await page.evaluate(async (levelItems) => {
+    const result = await page.evaluate(async () => {
+      const host = /** @type { { __vcFixture: () => Array<MenuItem | SeparatorItem> } } */ (
+        /** @type { unknown } */ (globalThis)
+      );
+      const levelItems = host.__vcFixture();
       const { renderLevel } = await import('../../src/renderer.js');
       const level = renderLevel(levelItems, {
         levelIndex: 0,
@@ -116,7 +136,7 @@ test.describe('пункт', () => {
           return child.className;
         }),
       };
-    }, FIXTURE_ITEMS);
+    });
 
     // Сравнение по всему набору, а не по отдельным полям: пропуск любого
     // атрибута или класса здесь роняет кейс, а не остаётся незамеченным.
@@ -133,8 +153,12 @@ test.describe('пункт', () => {
     });
   });
 
-  test('disabled: aria-disabled=true, tabindex=-1, в items помечен focusable=false', async ({ page }) => {
-    const result = await page.evaluate(async (levelItems) => {
+  test('isEnabledAction вернул false: aria-disabled=true, tabindex=-1, в items помечен focusable=false', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const host = /** @type { { __vcFixture: () => Array<MenuItem | SeparatorItem> } } */ (
+        /** @type { unknown } */ (globalThis)
+      );
+      const levelItems = host.__vcFixture();
       const { renderLevel } = await import('../../src/renderer.js');
       const level = renderLevel(levelItems, {
         levelIndex: 0,
@@ -142,7 +166,7 @@ test.describe('пункт', () => {
         label: 'Меню файла',
         actions: new Map(),
       });
-      // Индекс 3 — отключённый пункт фикстуры, после разделителя.
+      // Индекс 3 — отключённый предикатом пункт фикстуры, после разделителя.
       const item = level.items[3];
       return {
         role: item.element.getAttribute('role'),
@@ -158,7 +182,7 @@ test.describe('пункт', () => {
           return entry.focusable;
         }).includes(item),
       };
-    }, FIXTURE_ITEMS);
+    });
 
     expect(result).toEqual({
       role: 'menuitem',
@@ -170,8 +194,97 @@ test.describe('пункт', () => {
     });
   });
 
+  test('isEnabledAction без поля и с возвратом true оставляют пункт доступным', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderLevel } = await import('../../src/renderer.js');
+      const level = renderLevel([
+        { label: 'Без предиката' },
+        { label: 'Вернул true', isEnabledAction: () => true },
+      ], {
+        levelIndex: 0,
+        menuId: 'vc-level-0',
+        label: 'Меню файла',
+        actions: new Map(),
+      });
+      return level.items.map((item) => {
+        return {
+          focusable: item.focusable,
+          ariaDisabled: item.element.getAttribute('aria-disabled'),
+        };
+      });
+    });
+
+    // Поле опционально, и его отсутствие — не повод гасить пункт: иначе автор,
+    // не задавший предикат вовсе, получил бы меню из мёртвых строк.
+    expect(result).toEqual([
+      { focusable: true, ariaDisabled: null },
+      { focusable: true, ariaDisabled: null },
+    ]);
+  });
+
+  test('isEnabledAction, вернувший не-булево, отключает пункт', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderLevel } = await import('../../src/renderer.js');
+      // Пункты заходят через `unknown`: предикаты здесь возвращают не `boolean`,
+      // и тип их бы отверг — а проверяется ровно то, как рендерер ведёт себя с
+      // таким возвратом. Приведение ничего не скрывает: решение принимает
+      // рендерер во время выполнения, а не компилятор.
+      const items = /** @type {Array<MenuItem>} */ (/** @type {unknown} */ ([
+        { label: 'Без возврата', isEnabledAction: () => {} },
+        { label: 'Строка', isEnabledAction: () => 'да' },
+        { label: 'Единица', isEnabledAction: () => 1 },
+      ]));
+      const level = renderLevel(items, {
+        levelIndex: 0,
+        menuId: 'vc-level-0',
+        label: 'Меню файла',
+        actions: new Map(),
+      });
+      return level.items.map((item) => {
+        return {
+          focusable: item.focusable,
+          ariaDisabled: item.element.getAttribute('aria-disabled'),
+        };
+      });
+    });
+
+    // Сравнение строгое, `=== true`. Не-булево — это не «достаточно истинно»,
+    // а предикат, который не ответил на заданный вопрос: забытый `return` у
+    // автора гасит пункт, и он видит причину, а не молча работающее меню.
+    expect(result).toEqual([
+      { focusable: false, ariaDisabled: 'true' },
+      { focusable: false, ariaDisabled: 'true' },
+      { focusable: false, ariaDisabled: 'true' },
+    ]);
+  });
+
+  test('isEnabledAction вызван при сборке ровно один раз на пункт', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const { renderLevel } = await import('../../src/renderer.js');
+      const calls = [];
+      renderLevel([
+        { label: 'Первый', isEnabledAction: () => { calls.push(1); return true; } },
+        { label: 'Второй' },
+      ], {
+        levelIndex: 0,
+        menuId: 'vc-level-0',
+        label: 'Меню файла',
+        actions: new Map(),
+      });
+      return calls.length;
+    });
+
+    // Предикат — решение об одном пункте, и оно принимается один раз на сборку.
+    // Показов будет много, вызовов на первой сборке быть не должно два.
+    expect(result).toBe(1);
+  });
+
   test('с подменю: aria-haspopup=menu, aria-expanded=false, data-chevron=right', async ({ page }) => {
-    const result = await page.evaluate(async (levelItems) => {
+    const result = await page.evaluate(async () => {
+      const host = /** @type { { __vcFixture: () => Array<MenuItem | SeparatorItem> } } */ (
+        /** @type { unknown } */ (globalThis)
+      );
+      const levelItems = host.__vcFixture();
       const { renderLevel } = await import('../../src/renderer.js');
       const level = renderLevel(levelItems, {
         levelIndex: 0,
@@ -188,7 +301,7 @@ test.describe('пункт', () => {
         chevron: item.element.getAttribute('data-chevron'),
         hasSubmenu: item.hasSubmenu,
         // Владелец подменю — обычный доступный пункт: `focusable` зависит только
-        // от `disabled`.
+        // от `isEnabledAction`.
         focusable: item.focusable,
         key: item.key,
         chevrons: item.element.querySelectorAll('.vc-chevron').length,
@@ -197,7 +310,7 @@ test.describe('пункт', () => {
         }),
         owns: item.element.getAttribute('aria-owns'),
       };
-    }, FIXTURE_ITEMS);
+    });
 
     expect(result).toEqual({
       role: 'menuitem',
@@ -216,7 +329,11 @@ test.describe('пункт', () => {
   });
 
   test('разделитель: role=separator и aria-orientation=horizontal, в focusable-список не попадает', async ({ page }) => {
-    const result = await page.evaluate(async (levelItems) => {
+    const result = await page.evaluate(async () => {
+      const host = /** @type { { __vcFixture: () => Array<MenuItem | SeparatorItem> } } */ (
+        /** @type { unknown } */ (globalThis)
+      );
+      const levelItems = host.__vcFixture();
       const { renderLevel } = await import('../../src/renderer.js');
       const actions = new Map();
       const level = renderLevel(levelItems, {
@@ -248,7 +365,7 @@ test.describe('пункт', () => {
         // Ключа нет — значит, нет и записи в общей карте активов.
         separatorKeyed: actions.has('vc-level-0:2'),
       };
-    }, FIXTURE_ITEMS);
+    });
 
     expect(result).toEqual({
       role: 'separator',
@@ -270,7 +387,11 @@ test.describe('пункт', () => {
 
 test.describe('нумерация уровня', () => {
   test('aria-level равен levelIndex плюс один', async ({ page }) => {
-    const result = await page.evaluate(async (levelItems) => {
+    const result = await page.evaluate(async () => {
+      const host = /** @type { { __vcFixture: () => Array<MenuItem | SeparatorItem> } } */ (
+        /** @type { unknown } */ (globalThis)
+      );
+      const levelItems = host.__vcFixture();
       const { renderLevel } = await import('../../src/renderer.js');
       /**
        * @param {number} levelIndex
@@ -290,7 +411,7 @@ test.describe('нумерация уровня', () => {
         second: readAriaLevel(1),
         third: readAriaLevel(2),
       };
-    }, FIXTURE_ITEMS);
+    });
 
     // `aria-level` начинается с 1, а `levelIndex` — с 0: корневое меню обязано
     // объявить себя первым уровнем, иначе скринридер считает вложенность не
@@ -500,9 +621,12 @@ test.describe('сетка пункта', () => {
   });
 
   test('иконки: лейблы с иконкой и без совпадают по координате X', async ({ page }) => {
-    const result = await page.evaluate(async ({ levelItems, iconSize }) => {
+    const result = await page.evaluate(async ({ iconSize }) => {
+      const fixtures = /** @type { { __vcFixture: () => Array<MenuItem | SeparatorItem> } } */ (
+        /** @type { unknown } */ (globalThis)
+      );
       const { renderLevel } = await import('../../src/renderer.js');
-      const level = renderLevel(levelItems, {
+      const level = renderLevel(fixtures.__vcFixture(), {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -546,7 +670,7 @@ test.describe('сетка пункта', () => {
         withIcon: labelPlace(0),
         withoutIcon: labelPlace(1),
       };
-    }, { levelItems: FIXTURE_ITEMS, iconSize: DEFAULT_ICON_SIZE });
+    }, { iconSize: DEFAULT_ICON_SIZE });
 
     // Сравнение с допуском в тысячную долю пикселя: дорожка приходит из
     // `grid-template-columns` с округлением до трёх знаков, а габарит лейбла —
@@ -1067,7 +1191,11 @@ test.describe('ключи и коллбэки', () => {
 
 test.describe('каркас уровня', () => {
   test('меню получает role=menu и aria-label из контекста', async ({ page }) => {
-    const result = await page.evaluate(async (levelItems) => {
+    const result = await page.evaluate(async () => {
+      const host = /** @type { { __vcFixture: () => Array<MenuItem | SeparatorItem> } } */ (
+        /** @type { unknown } */ (globalThis)
+      );
+      const levelItems = host.__vcFixture();
       const { renderLevel } = await import('../../src/renderer.js');
       const level = renderLevel(levelItems, {
         levelIndex: 0,
@@ -1098,7 +1226,7 @@ test.describe('каркас уровня', () => {
         // Имя опционально, и без него атрибута нет, а не пустая строка.
         withoutLabel: withoutLabel.element.getAttribute('aria-label'),
       };
-    }, FIXTURE_ITEMS);
+    });
 
     expect(result).toEqual({
       role: 'menu',
@@ -1118,7 +1246,11 @@ test.describe('каркас уровня', () => {
   });
 
   test('зоны прокрутки: обе зоны — соседи списка и недоступны с клавиатуры', async ({ page }) => {
-    const result = await page.evaluate(async (levelItems) => {
+    const result = await page.evaluate(async () => {
+      const host = /** @type { { __vcFixture: () => Array<MenuItem | SeparatorItem> } } */ (
+        /** @type { unknown } */ (globalThis)
+      );
+      const levelItems = host.__vcFixture();
       const { renderLevel } = await import('../../src/renderer.js');
       const level = renderLevel(levelItems, {
         levelIndex: 0,
@@ -1158,7 +1290,7 @@ test.describe('каркас уровня', () => {
         scrollDownIsZone: level.scroll.down === level.element.querySelector('.vc-scroll-zone-down'),
         scrollListIsList: level.scroll.list === list,
       };
-    }, FIXTURE_ITEMS);
+    });
 
     expect(result).toEqual({
       up: { className: 'vc-scroll-zone vc-scroll-zone-up', ariaHidden: 'true', tabIndex: null, position: 0 },

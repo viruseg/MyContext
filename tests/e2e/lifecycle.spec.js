@@ -105,9 +105,9 @@ import { CURSOR_OFFSET, DEFAULT_ANIMATION_DURATION, SAFETY_PADDING } from '../..
  * @property {() => void} markRoot
  * @property {() => Snapshot} read
  * @property {() => number} actionsSize
- * @property {(index: number, disabled: boolean) => void} setDisabled правка поля
- *   `disabled` у пункта набора последнего `make`: автор меняет смысл действия
- *   между показами, и поле должно дойти до уже построенного уровня.
+ * @property {(index: number, enabled: boolean) => void} setAvailability правка
+ *   `isEnabledAction` у пункта набора последнего `make`: автор меняет смысл
+ *   действия между показами, и решение должно дойти до уже построенного уровня.
  */
 
 const STYLESHEET_PATH = '/styles/mycontext.css';
@@ -602,7 +602,7 @@ test.beforeEach(async ({ page }) => {
       disabled: [
         {
           label: 'Глухой',
-          disabled: true,
+          isEnabledAction: () => false,
           submenu: [{ label: 'Под глухим' }],
           action: () => log.push('глухой'),
         },
@@ -634,7 +634,11 @@ test.beforeEach(async ({ page }) => {
       // местах.
       nonclosing: [
         { type: 'separator' },
-        { label: 'Отключённый', disabled: true, action: () => log.push('отключённый') },
+        {
+          label: 'Отключённый',
+          isEnabledAction: () => false,
+          action: () => log.push('отключённый'),
+        },
         ownerItem,
       ],
       // Пункты, чьи действия открывают меню в другом месте страницы: закрытие,
@@ -669,7 +673,7 @@ test.beforeEach(async ({ page }) => {
     /** @type {InstanceType<typeof MyContext> | null} */
     let menu = null;
 
-    /** @type {string} имя набора последнего `make`: правке `disabled` подлежит он. */
+    /** @type {string} имя набора последнего `make`: правке `isEnabledAction` подлежит он. */
     let currentSet = '';
 
     /**
@@ -845,7 +849,7 @@ test.beforeEach(async ({ page }) => {
         }
         return actionMaps[actionMaps.length - 1].size;
       },
-      setDisabled(index, disabled) {
+      setAvailability(index, enabled) {
         if (menu === null) {
           throw new Error('меню не создано');
         }
@@ -853,9 +857,9 @@ test.beforeEach(async ({ page }) => {
         if (item === undefined || 'type' in item) {
           throw new Error('в наборе нет такого пункта');
         }
-        // Правка поля на живом объекте набора — ровно то, что делает автор между
-        // показами, когда смысл действия изменился.
-        item.disabled = disabled;
+        // Предикат вешается на живом объекте набора — ровно то, что делает автор
+        // между показами, когда смысл действия изменился.
+        item.isEnabledAction = () => enabled;
       },
     });
 
@@ -887,7 +891,7 @@ test.describe('жизненный цикл MyContext', () => {
     expect(after.contextmenu).toEqual([{ container: 'workspace', prevented: true }]);
   });
 
-  test('attach: пункт с disabled и подменю не открывает подменю мышью', async ({ page }) => {
+  test('attach: отключённый пункт с подменю не открывает подменю мышью', async ({ page }) => {
     await makeMenu(page, 'disabled', 'workspace');
     await rightClick(page, WORKSPACE_POINT);
 
@@ -941,7 +945,7 @@ test.describe('жизненный цикл MyContext', () => {
     expect(afterLeaf.openCount, 'меню закрылось после действия').toBe(0);
   });
 
-  test('attach: пункт с disabled и подменю не открывает подменю по ArrowRight', async ({ page }) => {
+  test('attach: отключённый пункт с подменю не открывает подменю по ArrowRight', async ({ page }) => {
     await makeMenu(page, 'disabled', 'workspace');
     await rightClick(page, WORKSPACE_POINT);
 
@@ -1665,17 +1669,17 @@ test.describe('жизненный цикл MyContext', () => {
     const after = await readMenu(page);
     const deaf = after.levels[0].items[0];
     const live = after.levels[0].items[2];
-    // Владелец — это одно условие: непустое подменю И не отключённый пункт.
+    // Владелец — это одно условие: непустое подменю И доступный пункт.
     // Отключённый пункт с непустым подменю владельцем не является, и все признаки
     // подменю у него отсутствуют: обещать раскрытие, которого не будет, не должен
     // ни один слой. До Task 10 разметку ставил рендерер по непустоте подменю
-    // независимо от `disabled`, и кейс закреплял обратное утверждение.
+    // независимо от доступности, и кейс закреплял обратное утверждение.
     expect(deaf.label).toBe('Глухой');
     expect(deaf.disabled).toBe(true);
     expect(deaf.chevron, 'у отключённого пункта шеврона нет').toBeNull();
     expect(deaf.owns, 'адрес подменю не зарезервирован').toBeNull();
     expect(deaf.haspopup, 'нет `aria-haspopup`').toBeNull();
-    // Контроль в том же снимке: сосед с непустым подменю и без `disabled` сохраняет
+    // Контроль в том же снимке: сосед с непустым подменю и доступный сохраняет
     // все признаки, и разница между ними читается рядом.
     expect(live.label).toBe('Живой');
     expect(live.chevron, 'у доступного владельца шеврон есть').toBe('right');
@@ -1694,7 +1698,7 @@ test.describe('жизненный цикл MyContext', () => {
     ]);
   });
 
-  test('attach: disabled, выставленный между показами, действует при следующем показе', async ({ page }) => {
+  test('attach: предикат, ответивший false между показами, действует при следующем показе', async ({ page }) => {
     await makeMenu(page, 'disabled', 'workspace');
     const first = await rightClickAndRead(page);
     // Метка на уровне переживает переиспользование узла и не переживает
@@ -1713,7 +1717,7 @@ test.describe('жизненный цикл MyContext', () => {
     // обязано доезжать до показанного уровня, а не остаться в конфигурации.
     await page.evaluate(() => {
       const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
-      scope.__mc.setDisabled(2, true);
+      scope.__mc.setAvailability(2, false);
     });
     const second = await rightClickAndRead(page);
 
@@ -1737,7 +1741,7 @@ test.describe('жизненный цикл MyContext', () => {
     await closeMenu(page);
     await page.evaluate(() => {
       const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
-      scope.__mc.setDisabled(2, true);
+      scope.__mc.setAvailability(2, false);
     });
     const opened = await rightClickAndRead(page);
 

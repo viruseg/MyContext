@@ -93,6 +93,19 @@ test.describe('валидация конфигурации', () => {
     expect(() => menuOf([{ label: 'Первый', action: 'нажать' }])).toThrow('items[0].action');
   });
 
+  test('isEnabledAction не функция отклоняется', () => {
+    expect(() => menuOf([{ label: 'Первый', isEnabledAction: 'да' }]))
+      .toThrow('items[0].isEnabledAction');
+  });
+
+  test('disabled отклоняется: поле заменено на isEnabledAction', () => {
+    // Отклоняется, а не игнорируется. Поле ушло из контракта, и пункт с `disabled:
+    // true` иначе молча стал бы активным: автор, перенёсший половину пунктов,
+    // получил бы кликабельные действия там, где они выключены, и узнал бы об
+    // этом по чужому симптому. Тот же довод, что и у `type` у разделителя.
+    expect(() => menuOf([{ label: 'Первый', disabled: true }])).toThrow('items[0].disabled');
+  });
+
   test('submenu не массив отклоняется', () => {
     expect(() => menuOf([{ label: 'Первый', submenu: { label: 'Вложенный' } }])).toThrow(
       'items[0].submenu',
@@ -170,9 +183,10 @@ test.describe('валидация конфигурации', () => {
         label: 'Создать',
         icon: { type: 'emoji', value: '📄' },
         action: () => {},
+        isEnabledAction: () => false,
         submenu: [
           { label: 'Документ', action: () => {} },
-          { label: 'Папку', disabled: true },
+          { label: 'Папку', isEnabledAction: () => false },
         ],
       },
       { type: 'separator' },

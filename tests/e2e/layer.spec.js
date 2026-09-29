@@ -180,16 +180,20 @@ const WIDE_ITEMS = [
 
 /**
  * Корневой уровень для кейсов про перечитывание состояния: обычный пункт и
- * владелец непустого подменю. Владелец выбран потому, что `disabled` у него
- * отнимает сразу два признака — доступность и раскрытие подменю, — и кейс
- * проходит вхолостую, если проверяет только `aria-disabled`.
+ * владелец непустого подменю, у которого `isEnabledAction` читает замыкание.
+ * Владелец выбран потому, что отказ предиката отнимает у него сразу два признака —
+ * доступность и раскрытие подменю, — и кейс проходит вхолостую, если проверяет
+ * только `aria-disabled`.
  *
- * @type {Array<MenuItem | SeparatorItem>}
+ * Пункты собираются в странице, а не хранятся здесь константой: предикат есть
+ * функция, а `page.evaluate` не везёт функции в аргумент. Заводит их
+ * `beforeEach` на `globalThis.__vcItems`, а кейс достаёт приведением.
+ *
+ * @typedef {object} MutableSet
+ * @property {{ ownerEnabled: boolean }} state замыкание предиката: кейс
+ *   переключает его между показами.
+ * @property {Array<MenuItem | SeparatorItem>} items пункты уровня.
  */
-const MUTABLE_ITEMS = [
-  { label: 'Обычный' },
-  { label: 'Владелец', submenu: [{ label: 'Лист' }] },
-];
 
 /**
  * Корневой уровень из сорока пунктов: список заметно длиннее рамки, которую задаёт
@@ -383,10 +387,30 @@ test.beforeEach(async ({ page }) => {
       },
     });
 
-    const host = /** @type {{ __vcProbe?: LayerProbe }} */ (
+    const host = /** @type {{ __vcProbe?: LayerProbe, __vcItems?: () => MutableSet }} */ (
       /** @type {unknown} */ (globalThis)
     );
     host.__vcProbe = probe;
+    // Пункты с предикатом рождаются здесь, а не приходят аргументом: `evaluate`
+    // не сериализует функцию в аргумент, а `isEnabledAction` — функция. Состояние
+    // у каждого вызова своё, поэтому два кейса, переключающие доступность,
+    // не делят замыкание.
+    host.__vcItems = () => {
+      const state = { ownerEnabled: true };
+      return {
+        state,
+        items: [
+          { label: 'Обычный' },
+          {
+            label: 'Владелец',
+            submenu: [{ label: 'Лист' }],
+            isEnabledAction: () => {
+              return state.ownerEnabled;
+            },
+          },
+        ],
+      };
+    };
   }, { animationDuration: TEST_ANIMATION_DURATION });
 });
 
@@ -836,10 +860,13 @@ test.describe('показ', () => {
 });
 
 test.describe('перечитывание состояния пунктов', () => {
-  test('disabled, выставленный после первой сборки, снимает пункт с показа', async ({ page }) => {
-    const result = await page.evaluate((items) => {
-      const host = /** @type { { __vcProbe: LayerProbe } } */ (/** @type { unknown } */ (globalThis));
+  test('предикат, ответивший false между показами, снимает пункт с показа', async ({ page }) => {
+    const result = await page.evaluate(() => {
+      const host = /** @type { { __vcProbe: LayerProbe, __vcItems: () => MutableSet } } */ (
+        /** @type { unknown } */ (globalThis)
+      );
       const layer = host.__vcProbe.create();
+      const { items, state } = host.__vcItems();
       const first = layer.ensureLevel(items, null, 0, null);
       const owner = first.items[1];
       const ownsBefore = owner.element.getAttribute('aria-owns');
@@ -853,8 +880,9 @@ test.describe('перечитывание состояния пунктов', ()
       const chevronsBefore = chevronsOf(owner.element);
 
       // Автор выключает пункт между показами — самый обычный случай: меню построено
-      // один раз и открывается многократно.
-      /** @type {MenuItem} */ (items[1]).disabled = true;
+      // один раз и открывается многократно. Предикат читает замыкание, поэтому
+      // менять ему нечего: меняется состояние, из которого он читает.
+      state.ownerEnabled = false;
       const second = layer.ensureLevel(items, null, 0, null);
 
       return {
@@ -876,10 +904,10 @@ test.describe('перечитывание состояния пунктов', ()
           ariaDisabled: first.items[0].element.getAttribute('aria-disabled'),
         },
       };
-    }, MUTABLE_ITEMS);
+    });
 
-    // Контроль премиссы: подменю у пункта было, иначе правка `disabled` не была бы
-    // правкой — у пункта без подменю ей нечего отнимать.
+    // Контроль премиссы: подменю у пункта было, иначе отказ предиката не был бы
+    // отказом — у пункта без подменю ему нечего отнимать.
     expect(result.ownsBefore, 'владелец зарезервировал id подменю').toMatch(/^vc-/);
     expect(result.chevronsBefore, 'шеврон у владельца отрисован').toBe(1);
     // Уровень не пересоздан: правка состояния не имеет права задеть DOM уровня.
@@ -900,10 +928,13 @@ test.describe('перечитывание состояния пунктов', ()
     expect(result.plain.ariaDisabled, 'сосед не отключён').toBe(null);
   });
 
-  test('уровень подменю отключённого владельца переживает отключение и возвращается с тем же id', async ({ page }) => {
-    const result = await page.evaluate((items) => {
-      const host = /** @type { { __vcProbe: LayerProbe } } */ (/** @type { unknown } */ (globalThis));
+  test('уровень подменю отказавшего владельца переживает отказ и возвращается с тем же id', async ({ page }) => {
+    const result = await page.evaluate(() => {
+      const host = /** @type { { __vcProbe: LayerProbe, __vcItems: () => MutableSet } } */ (
+        /** @type { unknown } */ (globalThis)
+      );
       const layer = host.__vcProbe.create();
+      const { items, state } = host.__vcItems();
       const root = layer.ensureLevel(items, null, 0, null);
       const owner = root.items[1];
       const definition = /** @type {MenuItem} */ (items[1]);
@@ -913,14 +944,14 @@ test.describe('перечитывание состояния пунктов', ()
       const sub = layer.ensureLevel(submenu, root, 1, owner);
       const ownsBefore = owner.element.getAttribute('aria-owns');
 
-      definition.disabled = true;
+      state.ownerEnabled = false;
       layer.ensureLevel(items, null, 0, null);
       const whileDisabled = {
         ariaOwns: owner.element.getAttribute('aria-owns'),
         hasSubmenu: owner.hasSubmenu,
       };
 
-      definition.disabled = false;
+      state.ownerEnabled = true;
       const second = layer.ensureLevel(items, null, 0, null);
       const restored = layer.ensureLevel(submenu, second, 1, second.items[1]);
 
@@ -928,13 +959,13 @@ test.describe('перечитывание состояния пунктов', ()
         subId: sub.element.id,
         whileDisabled,
         // Тот же самый уровень подменю, а не второй: заведённый уровень от
-        // отключения пункта не умирает, и возвращение доступности его оживляет.
+        // отказа пункта не умирает, и возвращение доступности его оживляет.
         restoredSame: restored === sub,
         children: second.children.length,
         ariaOwnsAfter: owner.element.getAttribute('aria-owns'),
         ownsBefore,
       };
-    }, MUTABLE_ITEMS);
+    });
 
     expect(result.ownsBefore, 'владелец зарезервировал id подменю').toMatch(/^vc-/);
     expect(result.subId, 'уровень подменю живёт под зарезервированным id').toMatch(/^vc-/);

@@ -176,9 +176,9 @@ import { expect, test } from '@playwright/test';
 /**
  * @typedef {object} KeyboardProbe
  * @property {(set: string, buildSubmenus?: boolean) => void} open
- * @property {(index: number, disabled: boolean) => void} reshow повторный показ
- *   корневого уровня после правки `disabled` у пункта набора: тот же путь, что и
- *   `open`, но меню не пересобирается.
+ * @property {(index: number, enabled: boolean) => void} reshow повторный показ
+ *   корневого уровня после правки `isEnabledAction` у пункта набора: тот же путь,
+ *   что и `open`, но меню не пересобирается.
  * @property {(index: number) => string | null} ensureSubmenu пытается завести
  *   уровень-подменю пункта по индексу и отдаёт сообщение слоя либо `null`, если
  *   уровень заведён.
@@ -246,8 +246,8 @@ test.beforeEach(async ({ page }) => {
     let layer = null;
     /** @type {LevelEntry | null} */
     let root = null;
-    /** @type {string} имя набора, открытого последним: правке `disabled` подлежит
-     *  именно он, а набор приходит в пробу по имени. */
+    /** @type {string} имя набора, открытого последним: правке `isEnabledAction`
+     *  подлежит именно он, а набор приходит в пробу по имени. */
     let openedSet = '';
     /** @type {Record<string, number[]>} пути снимка последнего прогона. */
     let pathsOfRun = {};
@@ -272,7 +272,7 @@ test.beforeEach(async ({ page }) => {
      */
     const cycle = [
       { label: 'Первый' },
-      { label: 'Заблокированный', disabled: true },
+      { label: 'Заблокированный', isEnabledAction: () => false },
       { type: 'separator' },
       { label: 'Второй' },
     ];
@@ -288,7 +288,7 @@ test.beforeEach(async ({ page }) => {
       { label: 'Первый' },
       { label: 'Второй' },
       { label: 'Третий' },
-      { label: 'Хвост', disabled: true },
+      { label: 'Хвост', isEnabledAction: () => false },
       { type: 'separator' },
     ];
 
@@ -317,7 +317,7 @@ test.beforeEach(async ({ page }) => {
      * @type {Array<MenuItem | SeparatorItem>}
      */
     const dead = [
-      { label: 'Глухой', disabled: true },
+      { label: 'Глухой', isEnabledAction: () => false },
       { type: 'separator' },
     ];
 
@@ -332,7 +332,11 @@ test.beforeEach(async ({ page }) => {
      */
     const offLimits = [
       { label: 'Живой' },
-      { label: 'Мёртвый владелец', disabled: true, submenu: [{ label: 'Внутрь' }] },
+      {
+        label: 'Мёртвый владелец',
+        isEnabledAction: () => false,
+        submenu: [{ label: 'Внутрь' }],
+      },
       { label: 'Живой владелец', submenu: [{ label: 'Тоже внутрь' }] },
     ];
     /**
@@ -888,16 +892,18 @@ test.beforeEach(async ({ page }) => {
         openedLayer().showRoot(root, { x: 60, y: 60 });
         keyboard.registerLevel(root, { focus: true });
       },
-      reshow(index, disabled) {
+      reshow(index, enabled) {
         const items = sets[openedSet];
         const item = items[index];
         if (item === undefined || 'type' in item) {
           throw new Error('в наборе нет такого пункта');
         }
-        // Правка поля — ровно то, что делает автор между показами, и повторный
-        // показ — ровно то, что делает оркестратор: тот же уровень заново заводится,
-        // показывается и отдаётся движку, без пересборки меню.
-        item.disabled = disabled;
+        // Предикат вешается здесь, а не задаётся в наборе заранее: правка между
+        // показами — ровно то, что делает автор, — меняет решение о доступности,
+        // а не структуру пункта. Повторный показ — ровно то, что делает
+        // оркестратор: тот же уровень заново заводится, показывается и отдаётся
+        // движку, без пересборки меню.
+        item.isEnabledAction = () => enabled;
         const entry = openedLayer().ensureLevel(items, null, 0, null);
         openedLayer().showRoot(entry, { x: 60, y: 60 });
         keyboard.registerLevel(entry, { focus: true });
@@ -1042,7 +1048,7 @@ test.describe('роуминг-фокус', () => {
     expect(up.steps[0].prevented).toBe(true);
   });
 
-  test('ArrowDown переключает активный пункт циклически, минуя disabled и разделители', async ({ page }) => {
+  test('ArrowDown переключает активный пункт циклически, минуя отключённые и разделители', async ({ page }) => {
     const result = await runScenario(page, {
       set: 'cycle',
       paths: { root: [] },
@@ -1288,7 +1294,7 @@ test.describe('роуминг-фокус', () => {
       });
       const marked = probe.read({ root: [] });
       // Автор выключает пункт между показами, и меню открывается заново.
-      probe.reshow(2, true);
+      probe.reshow(2, false);
       return { marked, after: probe.read({ root: [] }) };
     });
 

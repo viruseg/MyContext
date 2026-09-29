@@ -379,7 +379,7 @@ test.beforeEach(async ({ page }) => {
           { label: 'Вектор', icon: { type: 'svg', value: svgSource } },
           { label: 'Растр', icon: { type: 'raster', value: rasterSource, alt: 'Образец' } },
           { label: 'Без иконки' },
-          { label: 'Отключён', disabled: true },
+          { label: 'Отключён', isEnabledAction: () => false },
           { type: 'separator' },
           { label: 'Тоже без иконки' },
         ],

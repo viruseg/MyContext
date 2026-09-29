@@ -1823,6 +1823,18 @@ export class MyContext {
     if (item.action !== undefined && typeof item.action !== 'function') {
       throw new TypeError(`${path}.action: обработчик пункта должен быть функцией`);
     }
+    // `disabled` отклоняется, а не игнорируется: поле ушло из контракта в пользу
+    // `isEnabledAction`, и оставленное автором `disabled: true` иначе молча
+    // сделало бы пункт активным. Автор узнал бы об этом по клику, который сработал
+    // там, где действие выключено. Довод тот же, что и у `type` у разделителя.
+    if (item.disabled !== undefined) {
+      throw new TypeError(
+        `${path}.disabled: поле убрано, используйте isEnabledAction: () => boolean`,
+      );
+    }
+    if (item.isEnabledAction !== undefined && typeof item.isEnabledAction !== 'function') {
+      throw new TypeError(`${path}.isEnabledAction: предикат доступности должен быть функцией`);
+    }
     const submenu = item.submenu;
     if (submenu === undefined) {
       return;

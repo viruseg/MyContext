@@ -737,16 +737,21 @@ async function readItemBoxes(page) {
  * Фикстура `#m` прячется, а не удаляется: её оформление проверяют остальные кейсы
  * файла, и живое меню в том же Top Layer перекрыло бы её собой.
  *
+ * Предикат доступности не передаётся пунктами: `page.evaluate` не сериализует
+ * функцию в аргумент, поэтому недоступные пункты перечисляются индексами, а
+ * `isEnabledAction` вешается уже в странице.
+ *
  * @param {import('@playwright/test').Page} page
  * @param {import('../../src/renderer.js').MenuItem[]} items
+ * @param {number[]} [unavailable] индексы пунктов, чей предикат ответит `false`.
  * @returns {Promise<void>}
  */
-async function mountLiveMenu(page, items) {
+async function mountLiveMenu(page, items, unavailable = []) {
   // `reduce` убирает и входной переход `scale`, и отложенное закрытие: под ним
   // показ синхронен, то есть рамки пунктов, снятые сразу после `open()`, суть
   // рамки показанного меню.
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.evaluate(async (entries) => {
+  await page.evaluate(async ({ entries, dead }) => {
     const { MyContext } = await import('../../src/MyContext.js');
     const fixture = document.getElementById('m');
     if (fixture instanceof HTMLElement) {
@@ -756,12 +761,18 @@ async function mountLiveMenu(page, items) {
     trigger.type = 'button';
     trigger.id = 'live-trigger';
     document.body.appendChild(trigger);
-    const menu = new MyContext(entries, { label: 'Меню пробы' });
+    const menu = new MyContext(dead.reduce((list, index) => {
+      const entry = list[index];
+      if (entry !== undefined) {
+        entry.isEnabledAction = () => false;
+      }
+      return list;
+    }, entries), { label: 'Меню пробы' });
     menu.attach(trigger);
     trigger.focus();
     const scope = /** @type {{ __live?: LiveMenu }} */ (/** @type {unknown} */ (globalThis));
     scope.__live = { menu, trigger };
-  }, items);
+  }, { entries: items, dead: unavailable });
 }
 
 /**
@@ -1755,8 +1766,8 @@ test.describe('пункты и состояния', () => {
     // отключённый пункт проверялось бы на разметке, в которой отметок нет.
     await mountLiveMenu(page, [
       { label: 'Доступно' },
-      { label: 'Глухой', disabled: true },
-    ]);
+      { label: 'Глухой' },
+    ], [1]);
     await openLiveMenu(page, { x: 200, y: 200 });
 
     /**
