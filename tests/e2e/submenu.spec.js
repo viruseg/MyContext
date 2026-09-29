@@ -1091,6 +1091,36 @@ test.describe('показ подменю', () => {
     expect(afterKey.focusLabel).toBe('Заметки');
   });
 
+  test('стрелка после мышиного открытия выделяет пункт подменю, а не родительского уровня', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+
+    // Сценарий целиком: подменю открыто мышью, курсор остаётся над пунктом
+    // основного меню, который его открыл, и первая же стрелка с клавиатуры.
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const opened = await readMenu(page);
+    expect(opened.openCount, 'подменю открыто').toBe(2);
+    // Показ мышью фокус с владельца не увёл: он остался в родительском уровне, и
+    // поэтому уровень, из которого придёт клавиша, — не тот, на который она должна
+    // подействовать. Без этой проверки тест проходил бы и без нового правила.
+    expect(opened.focusLabel, 'фокус на владельце').toBe('Экспорт');
+    expect(activeLabels(opened), 'отмечен только владелец').toEqual(['Экспорт']);
+
+    await page.keyboard.press('ArrowDown');
+    const afterKey = await readMenu(page);
+    // Выделение ушло в подменю — оно открыто последним и потому главнее, — а
+    // отметка владельца осталась: она означает «подменю раскрыто», а не «курсор
+    // стоит здесь».
+    expect(activeLabels(afterKey).sort(), 'выделены владелец и первый пункт подменю')
+      .toEqual(['PDF', 'Экспорт']);
+    expect(afterKey.focusLabel, 'фокус ушёл в подменю').toBe('PDF');
+    // Родительский уровень не тронут: подменю по-прежнему открыто и по-прежнему
+    // принадлежит своему владельцу.
+    expect(afterKey.openCount, 'оба уровня на месте').toBe(2);
+    expect(expandedLabels(afterKey), 'развёрнут «Экспорт»').toEqual(['Экспорт']);
+  });
+
   test('курсор над невыбираемой строкой выделение не меняет и не сбрасывает', async ({ page }) => {
     await makeMenu(page, 'unselectable', 'surface');
     await openAt(page, OPEN_MIDDLE);
