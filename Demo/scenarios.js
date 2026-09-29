@@ -91,16 +91,16 @@ const PRINT_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
  */
 function baseItems() {
   return [
-    { label: 'Открыть', icon: { type: 'emoji', value: '📂' } },
-    { label: 'Переименовать', icon: { type: 'svg', value: CONTRAST_SVG } },
-    { label: 'Свойства' },
-    { label: 'Печать', icon: { type: 'svg', value: PRINT_SVG } },
-    { label: 'Предпросмотр', icon: { type: 'raster', value: RASTER_PIXEL, alt: 'Кадр' } },
-    { label: 'Закладка', icon: { type: 'emoji', value: '🔖' } },
-    { label: 'Сжать', icon: { type: 'svg', value: GAMMA_SVG } },
-    { label: 'В очередь' },
+    { labelAction: () => 'Открыть', iconAction: () => ({ type: 'emoji', value: '📂' }) },
+    { labelAction: () => 'Переименовать', iconAction: () => ({ type: 'svg', value: CONTRAST_SVG }) },
+    { labelAction: () => 'Свойства' },
+    { labelAction: () => 'Печать', iconAction: () => ({ type: 'svg', value: PRINT_SVG }) },
+    { labelAction: () => 'Предпросмотр', iconAction: () => ({ type: 'raster', value: RASTER_PIXEL, alt: 'Кадр' }) },
+    { labelAction: () => 'Закладка', iconAction: () => ({ type: 'emoji', value: '🔖' }) },
+    { labelAction: () => 'Сжать', iconAction: () => ({ type: 'svg', value: GAMMA_SVG }) },
+    { labelAction: () => 'В очередь' },
     separator(),
-    { label: 'Удалить' },
+    { labelAction: () => 'Удалить' },
   ];
 }
 
@@ -123,28 +123,28 @@ export const scenarios = [
     id: 'nested',
     title: 'Вложенность',
     items: [
-      { label: 'Обновить', icon: { type: 'emoji', value: '🔄' } },
+      { labelAction: () => 'Обновить', iconAction: () => ({ type: 'emoji', value: '🔄' }) },
       {
-        label: 'Ветка',
-        icon: { type: 'svg', value: CONTRAST_SVG },
-        submenu: [
-          { label: 'Простой пункт' },
+        labelAction: () => 'Ветка',
+        iconAction: () => ({ type: 'svg', value: CONTRAST_SVG }),
+        submenuAction: () => [
+          { labelAction: () => 'Простой пункт' },
           {
-            label: 'Второй уровень',
-            icon: { type: 'emoji', value: '2️⃣' },
-            submenu: [
-              { label: 'Соседняя ветка' },
+            labelAction: () => 'Второй уровень',
+            iconAction: () => ({ type: 'emoji', value: '2️⃣' }),
+            submenuAction: () => [
+              { labelAction: () => 'Соседняя ветка' },
               {
-                label: 'Третий уровень',
-                icon: { type: 'svg', value: GAMMA_SVG },
-                submenu: [
-                  { label: 'Лист' },
+                labelAction: () => 'Третий уровень',
+                iconAction: () => ({ type: 'svg', value: GAMMA_SVG }),
+                submenuAction: () => [
+                  { labelAction: () => 'Лист' },
                   {
-                    label: 'Четвёртый уровень',
-                    icon: { type: 'emoji', value: '4️⃣' },
-                    submenu: [
-                      { label: 'Замыкающий пункт' },
-                      { label: 'Соседний лист' },
+                    labelAction: () => 'Четвёртый уровень',
+                    iconAction: () => ({ type: 'emoji', value: '4️⃣' }),
+                    submenuAction: () => [
+                      { labelAction: () => 'Замыкающий пункт' },
+                      { labelAction: () => 'Соседний лист' },
                     ],
                   },
                 ],
@@ -153,7 +153,7 @@ export const scenarios = [
           },
         ],
       },
-      { label: 'Свойства' },
+      { labelAction: () => 'Свойства' },
     ],
   },
   {
@@ -162,24 +162,23 @@ export const scenarios = [
     id: 'disabled',
     title: 'Отключённые пункты',
     items: [
-      { label: 'Доступно', icon: { type: 'emoji', value: '✅' } },
+      { labelAction: () => 'Доступно', iconAction: () => ({ type: 'emoji', value: '✅' }) },
       {
-        label: 'Отключённый пункт',
+        labelAction: () => 'Отключённый пункт',
         isEnabledAction: () => false,
-        icon: { type: 'emoji', value: '🚫' },
+        iconAction: () => ({ type: 'emoji', value: '🚫' }),
       },
       {
-        label: 'Отключённый владелец',
+        labelAction: () => 'Отключённый владелец',
         isEnabledAction: () => false,
-        submenu: [{ label: 'Под глухим' }, { label: 'Тоже под ним' }],
+        submenuAction: () => [{ labelAction: () => 'Под глухим' }, { labelAction: () => 'Тоже под ним' }],
       },
       separator(),
       {
-        label: 'Доступный владелец',
-        icon: { type: 'svg', value: CONTRAST_SVG },
-        submenu: [{ label: 'Раскрывается' }, { label: 'Тоже раскрывается' }],
+        labelAction: () => 'Доступный владелец',
+        iconAction: () => ({ type: 'svg', value: CONTRAST_SVG }),
+        submenuAction: () => [{ labelAction: () => 'Раскрывается' }, { labelAction: () => 'Тоже раскрывается' }],
       },
-      { label: 'Пустое подменю', submenu: [] },
     ],
   },
   {
@@ -188,13 +187,13 @@ export const scenarios = [
     id: 'icons',
     title: 'Иконки',
     items: [
-      { label: 'Эмодзи', icon: { type: 'emoji', value: '😀' } },
-      { label: 'Вектор', icon: { type: 'svg', value: CONTRAST_SVG } },
-      { label: 'Растр', icon: { type: 'raster', value: RASTER_PIXEL, alt: 'Образец' } },
-      { label: 'Без иконки' },
+      { labelAction: () => 'Эмодзи', iconAction: () => ({ type: 'emoji', value: '😀' }) },
+      { labelAction: () => 'Вектор', iconAction: () => ({ type: 'svg', value: CONTRAST_SVG }) },
+      { labelAction: () => 'Растр', iconAction: () => ({ type: 'raster', value: RASTER_PIXEL, alt: 'Образец' }) },
+      { labelAction: () => 'Без иконки' },
       separator(),
-      { label: 'Ещё вектор', icon: { type: 'svg', value: GAMMA_SVG } },
-      { label: 'Ещё растр', icon: { type: 'raster', value: RASTER_PIXEL, alt: 'Второй образец' } },
+      { labelAction: () => 'Ещё вектор', iconAction: () => ({ type: 'svg', value: GAMMA_SVG }) },
+      { labelAction: () => 'Ещё растр', iconAction: () => ({ type: 'raster', value: RASTER_PIXEL, alt: 'Второй образец' }) },
     ],
   },
   {
@@ -205,44 +204,39 @@ export const scenarios = [
     id: 'long',
     title: 'Длинный список',
     items: Array.from({ length: 40 }, (unused, index) => {
-      return { label: `Пункт ${String(index + 1)}` };
+      return { labelAction: () => `Пункт ${String(index + 1)}` };
     }),
   },
   {
-    // Всё вместе: вложенность, отключённый владелец, три типа иконок, разделитель
-    // и пустое подменю — то есть всё, что проверяется на других блоках по
-    // отдельности, в одном меню.
+    // Всё вместе: вложенность, отключённый владелец, три типа иконок и разделитель
+    // — то есть всё, что проверяется на других блоках по отдельности, в одном меню.
     id: 'mixed',
     title: 'Всё вместе',
     items: [
-      { label: 'Новый', icon: { type: 'emoji', value: '➕' } },
-      { label: 'Открыть', icon: { type: 'svg', value: CONTRAST_SVG } },
-      { label: 'Без иконки' },
+      { labelAction: () => 'Новый', iconAction: () => ({ type: 'emoji', value: '➕' }) },
+      { labelAction: () => 'Открыть', iconAction: () => ({ type: 'svg', value: CONTRAST_SVG }) },
+      { labelAction: () => 'Без иконки' },
       separator(),
       {
-        label: 'Экспорт',
-        icon: { type: 'svg', value: PRINT_SVG },
-        submenu: [
-          { label: 'В PDF', icon: { type: 'raster', value: RASTER_PIXEL, alt: 'Документ' } },
-          { label: 'В текст' },
+        labelAction: () => 'Экспорт',
+        iconAction: () => ({ type: 'svg', value: PRINT_SVG }),
+        submenuAction: () => [
+          { labelAction: () => 'В PDF', iconAction: () => ({ type: 'raster', value: RASTER_PIXEL, alt: 'Документ' }) },
+          { labelAction: () => 'В текст' },
           {
-            label: 'В изображение',
-            submenu: [{ label: 'PNG' }, { label: 'JPEG' }],
+            labelAction: () => 'В изображение',
+            submenuAction: () => [{ labelAction: () => 'PNG' }, { labelAction: () => 'JPEG' }],
           },
         ],
       },
       {
-        label: 'Отключённый владелец',
+        labelAction: () => 'Отключённый владелец',
         isEnabledAction: () => false,
-        submenu: [{ label: 'Под глухим' }],
+        submenuAction: () => [{ labelAction: () => 'Под глухим' }],
       },
-      { label: 'Отключённый пункт', isEnabledAction: () => false },
+      { labelAction: () => 'Отключённый пункт', isEnabledAction: () => false },
       separator(),
-      {
-        label: 'Пустое подменю',
-        submenu: [],
-      },
-      { label: 'Последний' },
+      { labelAction: () => 'Последний' },
     ],
   },
 ];

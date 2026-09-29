@@ -71,11 +71,11 @@ function fixtureIn(page) {
     );
     host.__vcFixture = () => {
       return [
-        { label: 'Открыть', id: 'open', icon: emoji },
-        { label: 'Открыть в новом окне' },
+        { labelAction: () => 'Открыть', id: 'open', iconAction: () => emoji },
+        { labelAction: () => 'Открыть в новом окне' },
         { type: 'separator' },
-        { label: 'Копировать', id: 'copy', isEnabledAction: () => false },
-        { label: 'Экспорт', id: 'export', submenu: [{ label: 'PDF' }, { label: 'PNG' }] },
+        { labelAction: () => 'Копировать', id: 'copy', isEnabledAction: () => false },
+        { labelAction: () => 'Экспорт', id: 'export', submenuAction: () => [{ labelAction: () => 'PDF' }, { labelAction: () => 'PNG' }] },
       ];
     };
   }, { emoji: EMOJI });
@@ -129,7 +129,7 @@ test.describe('пункт', () => {
         key: item.key,
         focusable: item.focusable,
         hasSubmenu: item.hasSubmenu,
-        label: item.element.querySelector('.vc-label')?.textContent,
+        labelAction: () => item.element.querySelector('.vc-label')?.textContent,
         // Шеврон есть только у владельцев подменю, поэтому у первого пункта его
         // нет даже при зарезервированной колонке.
         children: Array.from(item.element.children, (child) => {
@@ -148,7 +148,7 @@ test.describe('пункт', () => {
       key: 'vc-level-0:0',
       focusable: true,
       hasSubmenu: false,
-      label: 'Открыть',
+      labelAction: () => 'Открыть',
       children: ['vc-icon-slot', 'vc-label'],
     });
   });
@@ -198,8 +198,8 @@ test.describe('пункт', () => {
     const result = await page.evaluate(async () => {
       const { renderLevel } = await import('../../src/renderer.js');
       const level = renderLevel([
-        { label: 'Без предиката' },
-        { label: 'Вернул true', isEnabledAction: () => true },
+        { labelAction: () => 'Без предиката' },
+        { labelAction: () => 'Вернул true', isEnabledAction: () => true },
       ], {
         levelIndex: 0,
         menuId: 'vc-level-0',
@@ -230,9 +230,9 @@ test.describe('пункт', () => {
       // таким возвратом. Приведение ничего не скрывает: решение принимает
       // рендерер во время выполнения, а не компилятор.
       const items = /** @type {Array<MenuItem>} */ (/** @type {unknown} */ ([
-        { label: 'Без возврата', isEnabledAction: () => {} },
-        { label: 'Строка', isEnabledAction: () => 'да' },
-        { label: 'Единица', isEnabledAction: () => 1 },
+        { labelAction: () => 'Без возврата', isEnabledAction: () => {} },
+        { labelAction: () => 'Строка', isEnabledAction: () => 'да' },
+        { labelAction: () => 'Единица', isEnabledAction: () => 1 },
       ]));
       const level = renderLevel(items, {
         levelIndex: 0,
@@ -263,8 +263,8 @@ test.describe('пункт', () => {
       const { renderLevel } = await import('../../src/renderer.js');
       const calls = [];
       renderLevel([
-        { label: 'Первый', isEnabledAction: () => { calls.push(1); return true; } },
-        { label: 'Второй' },
+        { labelAction: () => 'Первый', isEnabledAction: () => { calls.push(1); return true; } },
+        { labelAction: () => 'Второй' },
       ], {
         levelIndex: 0,
         menuId: 'vc-level-0',
@@ -424,10 +424,10 @@ test.describe('нумерация уровня', () => {
       const { renderLevel } = await import('../../src/renderer.js');
       /** @type {Array<MenuItem | SeparatorItem>} */
       const items = [
-        { label: 'Первый' },
-        { label: 'Второй' },
+        { labelAction: () => 'Первый' },
+        { labelAction: () => 'Второй' },
         { type: 'separator' },
-        { label: 'Третий' },
+        { labelAction: () => 'Третий' },
       ];
       const level = renderLevel(items, {
         levelIndex: 0,
@@ -473,7 +473,7 @@ test.describe('нумерация уровня', () => {
     const result = await page.evaluate(async () => {
       const { renderItem } = await import('../../src/renderer.js');
       const item = renderItem(
-        { label: 'Одинокий' },
+        { labelAction: () => 'Одинокий' },
         { levelIndex: 2, menuId: 'vc-level-2', actions: new Map() },
         7,
         5,
@@ -512,9 +512,9 @@ test.describe('сетка пункта', () => {
       const { renderLevel } = await import('../../src/renderer.js');
       /** @type {Array<MenuItem | SeparatorItem>} */
       const items = [
-        { label: 'Svg', icon: square },
-        { label: 'Эмодзи', icon: { type: 'emoji', value: '📄' } },
-        { label: 'Без иконки' },
+        { labelAction: () => 'Svg', iconAction: () => square },
+        { labelAction: () => 'Эмодзи', iconAction: () => ({ type: 'emoji', value: '📄' }) },
+        { labelAction: () => 'Без иконки' },
       ];
       const level = renderLevel(items, {
         levelIndex: 0,
@@ -573,8 +573,8 @@ test.describe('сетка пункта', () => {
       const { renderLevel } = await import('../../src/renderer.js');
       /** @type {Array<MenuItem | SeparatorItem>} */
       const items = [
-        { label: 'Владелец', submenu: [{ label: 'PDF' }] },
-        { label: 'Обычный' },
+        { labelAction: () => 'Владелец', submenuAction: () => [{ labelAction: () => 'PDF' }] },
+        { labelAction: () => 'Обычный' },
       ];
       const level = renderLevel(items, {
         levelIndex: 0,
@@ -696,7 +696,7 @@ test.describe('сетка пункта', () => {
   test('шеврон что-то рисует: у ::before есть ненулевая толщина рамки', async ({ page }) => {
     const result = await page.evaluate(async () => {
       const { renderLevel } = await import('../../src/renderer.js');
-      const level = renderLevel([{ label: 'Экспорт', submenu: [{ label: 'PDF' }] }], {
+      const level = renderLevel([{ labelAction: () => 'Экспорт', submenuAction: () => [{ labelAction: () => 'PDF' }] }], {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -790,8 +790,8 @@ test.describe('сетка пункта', () => {
     const result = await page.evaluate(async () => {
       const { renderLevel } = await import('../../src/renderer.js');
       const level = renderLevel([
-        { label: 'Вправо', submenu: [{ label: 'A' }] },
-        { label: 'Влево', submenu: [{ label: 'B' }] },
+        { labelAction: () => 'Вправо', submenuAction: () => [{ labelAction: () => 'A' }] },
+        { labelAction: () => 'Влево', submenuAction: () => [{ labelAction: () => 'B' }] },
       ], {
         levelIndex: 0,
         menuId: 'vc-level-0',
@@ -884,13 +884,13 @@ test.describe('сетка пункта', () => {
       // Все меню остаются в документе до конца замера: узел, не вставленный в
       // документ, не имеет габаритов, и `scrollWidth` у его лейбла совпал бы с
       // `clientWidth` — многоточие выглядело бы сработавшим, не сработав.
-      const longLevel = open('host', [{ label: long }]);
+      const longLevel = open('host', [{ labelAction: () => long }]);
       // Третье меню — короткая подпись. Оно умещается в предел целиком, и
       // поэтому отвечает на вопрос, на который равенство ниже ответить не может:
       // ширина идёт за содержимым, а предел остаётся пределом.
-      const narrowWidth = open('host-2', [{ label: narrow }]).element
+      const narrowWidth = open('host-2', [{ labelAction: () => narrow }]).element
         .getBoundingClientRect().width;
-      const shortWidth = open('host-2', [{ label: short }]).element
+      const shortWidth = open('host-2', [{ labelAction: () => short }]).element
         .getBoundingClientRect().width;
       const label = /** @type {HTMLElement} */ (
         longLevel.items[0].element.querySelector('.vc-label')
@@ -953,12 +953,12 @@ test.describe('сетка пункта', () => {
       // Ширину меню задаёт самый длинный ряд, поэтому решающий пункт — первый и
       // длиннее прочих: разница в иконке видна на нём одном.
       const withIcon = await measure([
-        { label: 'Достаточно длинная подпись пункта', icon: square },
-        { label: 'Короткая' },
+        { labelAction: () => 'Достаточно длинная подпись пункта', iconAction: () => square },
+        { labelAction: () => 'Короткая' },
       ]);
       const withoutIcon = await measure([
-        { label: 'Достаточно длинная подпись пункта' },
-        { label: 'Короткая' },
+        { labelAction: () => 'Достаточно длинная подпись пункта' },
+        { labelAction: () => 'Короткая' },
       ]);
       return { withIcon, withoutIcon, limit: window.innerWidth - 2 * padding };
     }, { square: SQUARE_SVG, padding: SAFETY_PADDING });
@@ -978,9 +978,9 @@ test.describe('ключи и коллбэки', () => {
       const { renderLevel } = await import('../../src/renderer.js');
       /** @type {Array<MenuItem | SeparatorItem>} */
       const items = [
-        { label: 'Первый', id: 'x' },
-        { label: 'Второй', id: 'x' },
-        { label: 'Третий' },
+        { labelAction: () => 'Первый', id: 'x' },
+        { labelAction: () => 'Второй', id: 'x' },
+        { labelAction: () => 'Третий' },
       ];
       const actions = new Map();
       const level = renderLevel(items, {
@@ -1019,10 +1019,10 @@ test.describe('ключи и коллбэки', () => {
       const calls = [];
       /** @type {Array<MenuItem | SeparatorItem>} */
       const items = [
-        { label: 'Первое', action: () => { calls.push('первое'); } },
-        { label: 'Второе', action: () => { calls.push('второе'); } },
+        { labelAction: () => 'Первое', action: () => { calls.push('первое'); } },
+        { labelAction: () => 'Второе', action: () => { calls.push('второе'); } },
         { type: 'separator' },
-        { label: 'Третье', action: () => { calls.push('третье'); } },
+        { labelAction: () => 'Третье', action: () => { calls.push('третье'); } },
       ];
       const actions = new Map();
       const level = renderLevel(items, {
@@ -1089,7 +1089,7 @@ test.describe('ключи и коллбэки', () => {
        * @returns {import('../../src/renderer.js').RenderedLevel}
        */
       const render = (hostId, menuId, levelIndex) => {
-        const level = renderLevel([{ label: `Пункт ${levelIndex}` }], {
+        const level = renderLevel([{ labelAction: () => `Пункт ${levelIndex}` }], {
           levelIndex,
           menuId,
           label: 'Меню файла',
@@ -1129,8 +1129,8 @@ test.describe('ключи и коллбэки', () => {
        */
       const build = (tag) => {
         return renderLevel([
-          { label: `Первый ${tag}`, action: () => { calls.push(`первый:${tag}`); } },
-          { label: `Второй ${tag}`, action: () => { calls.push(`второй:${tag}`); } },
+          { labelAction: () => `Первый ${tag}`, action: () => { calls.push(`первый:${tag}`); } },
+          { labelAction: () => `Второй ${tag}`, action: () => { calls.push(`второй:${tag}`); } },
         ], {
           // Оба экземпляра — на глубине 0: различает их только `menuId`.
           levelIndex: 0,
@@ -1314,8 +1314,8 @@ test.describe('каркас уровня', () => {
        */
       const render = (hostId, menuId, levelIndex) => {
         const level = renderLevel([
-          { label: 'Первый', submenu: [{ label: 'A' }] },
-          { label: 'Второй', submenu: [{ label: 'B' }] },
+          { labelAction: () => 'Первый', submenuAction: () => [{ labelAction: () => 'A' }] },
+          { labelAction: () => 'Второй', submenuAction: () => [{ labelAction: () => 'B' }] },
         ], {
           levelIndex,
           menuId,
@@ -1369,8 +1369,8 @@ test.describe('каркас уровня', () => {
        */
       const render = (hostId, menuId) => {
         const level = renderLevel([
-          { label: 'Первый', submenu: [{ label: 'A' }] },
-          { label: 'Второй', submenu: [{ label: 'B' }] },
+          { labelAction: () => 'Первый', submenuAction: () => [{ labelAction: () => 'A' }] },
+          { labelAction: () => 'Второй', submenuAction: () => [{ labelAction: () => 'B' }] },
         ], {
           // Глубина у обоих экземпляров одна и та же, и различает их только
           // `menuId` — из него выводится и адрес зарезервированного подменю.
@@ -1414,13 +1414,13 @@ test.describe('каркас уровня', () => {
     expect(result.collidesWithLevelId).toBe(false);
   });
 
-  test('пустое подменю не считается подменю', async ({ page }) => {
+  test('пункт без submenuAction не считается владельцем', async ({ page }) => {
     const result = await page.evaluate(async () => {
       const { renderLevel } = await import('../../src/renderer.js');
       /** @type {Array<MenuItem | SeparatorItem>} */
       const items = [
-        { label: 'Пустое', submenu: [] },
-        { label: 'Непустое', submenu: [{ label: 'A' }] },
+        { labelAction: () => 'Без подменю' },
+        { labelAction: () => 'С подменю', submenuAction: () => [{ labelAction: () => 'A' }] },
       ];
       const level = renderLevel(items, {
         levelIndex: 0,
@@ -1441,18 +1441,18 @@ test.describe('каркас уровня', () => {
           chevrons: item.element.querySelectorAll('.vc-chevron').length,
         };
       };
-      return { empty: owner(0), filled: owner(1) };
+      return { plain: owner(0), owner: owner(1) };
     });
 
     // Открывать нечего: `aria-haspopup` на пункт без подменю вводил бы в
     // заблуждение и озвучивался бы как «есть вложенное меню».
-    expect(result.empty).toEqual({
+    expect(result.plain).toEqual({
       hasSubmenu: false,
       haspopup: null,
       owns: null,
       chevrons: 0,
     });
-    expect(result.filled.hasSubmenu).toBe(true);
-    expect(result.filled.haspopup).toBe('menu');
+    expect(result.owner.hasSubmenu).toBe(true);
+    expect(result.owner.haspopup).toBe('menu');
   });
 });

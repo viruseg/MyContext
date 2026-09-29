@@ -46,7 +46,7 @@ test.beforeEach(() => {
   globalThis.matchMedia = stubMatchMedia;
 });
 
-test.describe('валидация конфигурации', () => {
+test.describe('валидация корневого состава', () => {
   test('пустой массив пунктов отклоняется', () => {
     expect(() => menuOf([])).toThrow(TypeError);
     expect(() => menuOf([])).toThrow('items');
@@ -57,122 +57,66 @@ test.describe('валидация конфигурации', () => {
     expect(() => menuOf(undefined)).toThrow('items');
   });
 
-  test('пункт без строкового label отклоняется', () => {
-    expect(() => menuOf([{}])).toThrow('items[0].label');
-    expect(() => menuOf([{ label: 7 }])).toThrow('items[0].label');
-  });
-
   test('пункт не объект отклоняется', () => {
-    // Элемент без `type` — пункт, а не разделитель, и подпись обязательна у обоих:
-    // пустой уровень или уровень из одного безымянного элемента отрисовался бы, но
-    // оказался бы недоступен. Строка вместо пункта отклоняется ещё раньше, чем
-    // проверка подписи, — и это отдельное правило, а не частный случай первого.
+    // Строка вместо пункта отклоняется раньше, чем проверка полей, — и это
+    // отдельное правило, а не частный случай первого.
     expect(() => menuOf(['разделитель'])).toThrow('items[0]: пункт должен быть объектом');
     expect(() => menuOf([null])).toThrow('items[0]: пункт должен быть объектом');
   });
 
-  test('пункт с пустым label отклоняется', () => {
-    expect(() => menuOf([{ label: '' }])).toThrow('items[0].label');
-    // Подпись из одних пробелов не подпись: она читалась бы вслух как пустая,
-    // а `trim` — единственная проверка, которая отличает её от осмысленного
-    // текста с краями.
-    expect(() => menuOf([{ label: '   ' }])).toThrow('items[0].label');
+  test('пункт без labelAction отклоняется', () => {
+    expect(() => menuOf([{}])).toThrow('items[0].labelAction');
+    expect(() => menuOf([{ labelAction: 'подпись' }])).toThrow('items[0].labelAction');
   });
 
-  test('неизвестный тип иконки отклоняется с указанием пути items[2].icon.type', () => {
-    const items = [
-      { label: 'Первый' },
-      { label: 'Второй' },
-      { label: 'Третий', icon: { type: 'значок', value: 'x' } },
-    ];
-    expect(() => menuOf(items)).toThrow(TypeError);
-    expect(() => menuOf(items)).toThrow('items[2].icon.type');
-  });
-
-  test('action не функция отклоняется', () => {
-    expect(() => menuOf([{ label: 'Первый', action: 'нажать' }])).toThrow('items[0].action');
-  });
-
-  test('isEnabledAction не функция отклоняется', () => {
-    expect(() => menuOf([{ label: 'Первый', isEnabledAction: 'да' }]))
+  test('действия пункта не функция отклоняются', () => {
+    // Проверяется форма поля, а не результат: результат предъявляет действие, и
+    // проверяется он на показе. Здесь ловится только опечатка автора — поле,
+    // которое на месте, но не тем, чем объявлено.
+    expect(() => menuOf([{ labelAction: () => 'Первый', iconAction: '📄' }]))
+      .toThrow('items[0].iconAction');
+    expect(() => menuOf([{ labelAction: () => 'Первый', submenuAction: [] }]))
+      .toThrow('items[0].submenuAction');
+    expect(() => menuOf([{ labelAction: () => 'Первый', action: 'нажать' }]))
+      .toThrow('items[0].action');
+    expect(() => menuOf([{ labelAction: () => 'Первый', isEnabledAction: 'да' }]))
       .toThrow('items[0].isEnabledAction');
   });
 
-  test('disabled отклоняется: поле заменено на isEnabledAction', () => {
-    // Отклоняется, а не игнорируется. Поле ушло из контракта, и пункт с `disabled:
-    // true` иначе молча стал бы активным: автор, перенёсший половину пунктов,
-    // получил бы кликабельные действия там, где они выключены, и узнал бы об
-    // этом по чужому симптому. Тот же довод, что и у `type` у разделителя.
-    expect(() => menuOf([{ label: 'Первый', disabled: true }])).toThrow('items[0].disabled');
+  test('version не число отклоняется', () => {
+    expect(() => menuOf([{ labelAction: () => 'Первый', version: '2' }])).toThrow('items[0].version');
+    expect(() => menuOf([{ labelAction: () => 'Первый', version: Number.NaN }]))
+      .toThrow('items[0].version');
   });
 
-  test('submenu не массив отклоняется', () => {
-    expect(() => menuOf([{ label: 'Первый', submenu: { label: 'Вложенный' } }])).toThrow(
-      'items[0].submenu',
-    );
-  });
-
-  test('ошибка во вложенном пункте указывает полный путь items[1].submenu[0].label', () => {
-    const items = [
-      { label: 'Первый' },
-      { label: 'Ветка', submenu: [{ label: 42 }] },
+  test('ушедшие поля отклоняются с указанием замены', () => {
+    // Отклоняются, а не игнорируются. Иначе оставленное автором `label` молча
+    // убрало бы подпись, `submenu` — подменю, а `disabled: true` сделало бы пункт
+    // активным, и каждая из ошибок вылезла бы там, где её не ждут. Тот же довод,
+    // что и у `type` у разделителя.
+    // Массив намеренно не типизирован как `MenuItem[]`: поля у него ушедшие из
+    // контракта, и именно их отсутствие в типе проверяется. Тип `unknown[]`
+    // снимает проверку лишних полей на самом литерале, а не отодвигает её.
+    /** @type {unknown[]} */
+    const withRemovedFields = [
+      { label: 'Первый', labelAction: () => 'Первый' },
+      { labelAction: () => 'Первый', icon: { type: 'emoji', value: 'x' } },
+      { labelAction: () => 'Первый', submenu: [] },
+      { labelAction: () => 'Первый', disabled: true },
     ];
-    expect(() => menuOf(items)).toThrow(TypeError);
-    expect(() => menuOf(items)).toThrow('items[1].submenu[0].label');
-  });
-
-  test('ошибка во вложенном подменю указывает путь до самой глубокой ветки', () => {
-    const items = [
-      {
-        label: 'Ветка',
-        submenu: [{ label: 'Вторая ветка', submenu: [{ label: 'Лист', icon: { type: 'emoji' } }] }],
-      },
-    ];
-    expect(() => menuOf(items)).toThrow('items[0].submenu[0].submenu[0].icon.value');
-  });
-
-  test('растр без alt отклоняется', () => {
-    const withoutAlt = { label: 'Картинка', icon: { type: 'raster', value: 'https://example.com/a.png' } };
-    expect(() => menuOf([withoutAlt])).toThrow('items[0].icon.alt');
-    // Пустой `alt` хуже отсутствующего: он выглядит как решение автора, а
-    // скринридер читает его как имя картинки без содержимого.
-    expect(() => menuOf([{ label: 'Картинка', icon: { type: 'raster', value: 'a.png', alt: '' } }]))
-      .toThrow('items[0].icon.alt');
-    expect(() => menuOf([{ label: 'Картинка', icon: { type: 'raster', value: 'a.png', alt: '  ' } }]))
-      .toThrow('items[0].icon.alt');
-  });
-
-  test('растр без value отклоняется', () => {
-    // Расширение сверх брифа, и вот почему. Без `value` рендерер отдаёт
-    // `isSafeRasterUrl(undefined)`, тот разбирает `undefined` как адрес текущей
-    // страницы, проходит проверку схемы и пишет в `src` строку `undefined`:
-    // картинка не рисуется, а запрос уходит за адресом, которого нет.
-    expect(() => menuOf([{ label: 'Картинка', icon: { type: 'raster', alt: 'Файл' } }]))
-      .toThrow('items[0].icon.value');
-  });
-
-  test('иконка emoji и svg без value отклоняются', () => {
-    expect(() => menuOf([{ label: 'Первый', icon: { type: 'emoji' } }])).toThrow('items[0].icon.value');
-    expect(() => menuOf([{ label: 'Первый', icon: { type: 'svg', value: '' } }]))
-      .toThrow('items[0].icon.value');
+    expect(() => menuOf([withRemovedFields[0]])).toThrow('items[0].label');
+    expect(() => menuOf([withRemovedFields[1]])).toThrow('items[0].icon');
+    expect(() => menuOf([withRemovedFields[2]])).toThrow('items[0].submenu');
+    expect(() => menuOf([withRemovedFields[3]])).toThrow('items[0].disabled');
   });
 
   test('разделитель без type отклоняется', () => {
-    // Кейс про разделитель, чей тип отличается от `separator`. Проверяется не
-    // «есть ли `type`», а «если поле объявлено, то это ровно `separator`»:
-    // без такой проверки опечатка автора тихо стала бы пунктом без подписи,
-    // и меню показало бы пустую строку вместо разделителя. Соблазн считать
-    // `type: 'divider'` разделителем отпадает по одной причине: значение
-    // пришлось бы угадывать, а лишнее поле в пункте уже означает ошибку.
-    expect(() => menuOf([{ type: 'divider', label: 'Разделитель' }])).toThrow(TypeError);
-    expect(() => menuOf([{ type: 'divider', label: 'Разделитель' }])).toThrow('items[0].type');
-  });
-
-  test('пустое подменю проходит валидацию как массив', () => {
-    // Обязательство из ревью: `submenu: []` — не владелец, но ошибка конфигурации
-    // это не ошибка. Владельцем его делает рендерер (непустой массив), и
-    // проверка непустоты здесь была бы вторым мнением об одном и том же.
-    expect(() => menuOf([{ label: 'Пункт', submenu: [] }])).not.toThrow();
+    // Проверяется не «есть ли `type`», а «если поле объявлено, то это ровно
+    // `separator`»: без такой проверки опечатка автора тихо стала бы пунктом без
+    // подписи, и меню показало бы пустую строку вместо разделителя.
+    expect(() => menuOf([{ type: 'divider', labelAction: () => 'Разделитель' }])).toThrow(TypeError);
+    expect(() => menuOf([{ type: 'divider', labelAction: () => 'Разделитель' }]))
+      .toThrow('items[0].type');
   });
 
   test('валидная конфигурация принимается', () => {
@@ -180,28 +124,42 @@ test.describe('валидация конфигурации', () => {
     const items = [
       {
         id: 'new',
-        label: 'Создать',
-        icon: { type: 'emoji', value: '📄' },
+        labelAction: () => 'Создать',
+        iconAction: () => ({ type: 'emoji', value: '📄' }),
         action: () => {},
         isEnabledAction: () => false,
-        submenu: [
-          { label: 'Документ', action: () => {} },
-          { label: 'Папку', isEnabledAction: () => false },
+        submenuAction: () => [
+          { labelAction: () => 'Документ', action: () => {} },
+          { labelAction: () => 'Папку', isEnabledAction: () => false },
         ],
+        version: 2,
       },
       { type: 'separator' },
       {
-        label: 'Значок',
-        icon: {
+        labelAction: () => 'Значок',
+        iconAction: () => ({
           type: 'svg',
           value: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"></svg>',
-        },
+        }),
       },
-      { label: 'Картинка', icon: { type: 'raster', value: 'https://example.com/a.png', alt: 'Файл' } },
-      { label: 'Без иконки и действия' },
+      {
+        labelAction: () => 'Картинка',
+        iconAction: () => ({ type: 'raster', value: 'https://example.com/a.png', alt: 'Файл' }),
+      },
+      { labelAction: () => 'Без иконки и действия' },
     ];
     expect(() => new MyContext(items, { theme: 'dark', animationDuration: 120, label: 'Файл' }))
       .not.toThrow();
     expect(() => new MyContext(items)).not.toThrow();
+  });
+
+  test('подменю конструктором не проверяется: его предъявляет submenuAction', () => {
+    // Проверять нечего: до показа подменю не существует, а на показе его проверяет
+    // рендерер, и путь до поля тогда называет уровень и позицию пункта. Здесь
+    // важно только, что негодное подменю не роняет конструктор: ошибка придёт
+    // из `open()` и укажет, что именно не так.
+    expect(() => menuOf([{ labelAction: () => 'Ветка', submenuAction: () => 'не массив' }]))
+      .not.toThrow();
+    expect(() => menuOf([{ labelAction: () => 'Пункт', submenuAction: () => [] }])).not.toThrow();
   });
 });

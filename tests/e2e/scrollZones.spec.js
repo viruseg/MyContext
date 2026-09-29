@@ -1036,7 +1036,7 @@ const SCROLL_WAIT_MS = 10000;
  */
 function longItems(prefix) {
   return Array.from({ length: 40 }, (unused, index) => {
-    return { label: `${prefix} ${index + 1}` };
+    return { labelAction: () => `${prefix} ${index + 1}` };
   });
 }
 
@@ -1044,7 +1044,7 @@ function longItems(prefix) {
 const LONG_ITEMS = longItems('Пункт');
 
 /** Короткий набор: три пункта, и список в обрез. */
-const SHORT_ITEMS = [{ label: 'Раз' }, { label: 'Два' }, { label: 'Три' }];
+const SHORT_ITEMS = [{ labelAction: () => 'Раз' }, { labelAction: () => 'Два' }, { labelAction: () => 'Три' }];
 
 /**
  * Ставит в страницу живой экземпляр `MyContext` под указанным слотом, оставляя

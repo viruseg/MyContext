@@ -126,7 +126,7 @@ const SCENARIO_TITLES = {
 const SCENARIO_SHAPE = {
   basic: { first: 'Открыть', last: 'Удалить', count: 9 },
   nested: { first: 'Обновить', last: 'Свойства', count: 3 },
-  disabled: { first: 'Доступно', last: 'Пустое подменю', count: 5 },
+  disabled: { first: 'Доступно', last: 'Доступный владелец', count: 4 },
   icons: { first: 'Эмодзи', last: 'Ещё растр', count: 6 },
   long: { first: 'Пункт 1', last: 'Пункт 40', count: 40 },
   mixed: { first: 'Новый', last: 'Последний', count: 8 },
@@ -398,7 +398,7 @@ function readItem(page, levelId, label) {
       const svg = icon instanceof SVGSVGElement ? icon : null;
       const textNode = item.querySelector('.vc-label');
       return {
-        label: String(text.textContent),
+        label: String(text === null ? '' : text.textContent),
         disabled: item.getAttribute('aria-disabled') === 'true',
         haspopup: item.getAttribute('aria-haspopup'),
         expanded: item.getAttribute('aria-expanded'),
@@ -1067,12 +1067,6 @@ test('демо: сценарий с отключёнными пунктами н
   expect(owner.haspopup, 'у отключённого владельца нет признака подменю').toBeNull();
   expect(owner.chevrons, 'у отключённого владельца нет шеврона').toBe(0);
 
-  // Пустое подменю — не подменю: владельцем не становится, и уровень под него
-  // тоже не заводится.
-  const empty = await itemOf(page, rootId, 'Пустое подменю');
-  expect(empty.owns, 'у пункта с пустым подменю нет адреса подменю').toBeNull();
-  expect(empty.chevrons, 'у пункта с пустым подменю нет шеврона').toBe(0);
-
   const enabled = await itemOf(page, rootId, 'Доступный владелец');
   expect(enabled.disabled, 'доступный владелец не отключён').toBe(false);
   expect(enabled.owns, 'у доступного владельца назван адрес подменю').not.toBeNull();
@@ -1119,7 +1113,7 @@ test('демо: сценарий с отключёнными пунктами н
   // пустому подменю, минуя разделитель.
   expect(visited[0], 'роуминг начинается с первого доступного').toBe('Доступно');
   expect(visited[1], 'роуминг идёт по доступным пунктам').toBe('Доступный владелец');
-  expect(visited[2], 'роуминг обходит отключённые и разделитель').toBe('Пустое подменю');
+  expect(visited[2], 'роуминг обходит отключённые и разделитель').toBe('Доступный владелец');
   expect(
     visited.filter((label) => {
       return label.startsWith('Отключённый');

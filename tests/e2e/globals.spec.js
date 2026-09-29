@@ -361,23 +361,23 @@ test.describe('глобальные слушатели', () => {
        */
       const sets = {
         chain: [
-          { label: 'Новый', action: () => log.push('новый') },
+          { labelAction: () => 'Новый', action: () => log.push('новый') },
           {
-            label: 'Экспорт',
-            submenu: [
-              { label: 'PDF', action: () => log.push('pdf') },
+            labelAction: () => 'Экспорт',
+            submenuAction: () => [
+              { labelAction: () => 'PDF', action: () => log.push('pdf') },
               {
-                label: 'PNG',
-                submenu: [{ label: 'Один', action: () => log.push('один') }],
+                labelAction: () => 'PNG',
+                submenuAction: () => [{ labelAction: () => 'Один', action: () => log.push('один') }],
                 action: () => log.push('png'),
               },
             ],
             action: () => log.push('экспорт'),
           },
-          { label: 'Заметки', action: () => log.push('заметки') },
+          { labelAction: () => 'Заметки', action: () => log.push('заметки') },
         ],
         long: Array.from({ length: 40 }, (unused, index) => {
-          return { label: `Пункт ${index + 1}`, action: () => log.push(`пункт ${index + 1}`) };
+          return { labelAction: () => `Пункт ${index + 1}`, action: () => log.push(`пункт ${index + 1}`) };
         }),
       };
 

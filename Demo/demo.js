@@ -111,32 +111,37 @@ function isSeparator(item) {
  * Действие пункта: дописывает его подпись в журнал кликов своего блока.
  *
  * Журнал, а не перезапись подсказки: кликов за сеанс сколько угодно, и одна
- * перезаписываемая строка показывала бы только последний. Подпись пункта идёт
+ * перезаписываемая строка показала бы только последний. Подпись пункта идёт
  * как есть — без «Выбрано:» и точки, потому что журнал и так стоит в блоке
  * сценария, и префикс повторял бы то, что видно и без него.
+ *
+ * Подпись берётся в момент клика, а не при сборке действия: подпись пункта —
+ * действие, и она меняется от показа к показу. Захваченная при сборке надпись
+ * писала бы в журнал то, что было на странице при загрузке, а не то, что автор
+ * видел в строке.
  *
  * Блок и журнал ищутся в момент клика, а не захватываются при сборке: клик,
  * которому некуда писать, обязан сказать об этом голосом, а не исчезнуть за
  * работающим меню.
  *
  * @param {string} scenarioId значение `data-scenario` у блока.
- * @param {string} label подпись пункта.
+ * @param {() => string} readLabel чтение подписи пункта в момент клика.
  * @returns {NonNullable<MenuItem['action']>}
  * @throws {Error} если блока или его журнала нет на странице.
  */
-function logIn(scenarioId, label) {
+function logIn(scenarioId, readLabel) {
   return () => {
     const block = document.querySelector(`[data-scenario="${scenarioId}"]`);
     const log = block === null ? null : block.querySelector('.demo-log');
     if (!(log instanceof HTMLElement)) {
       throw new Error(`демо: у блока «${scenarioId}» нет журнала кликов`);
     }
-    log.appendChild(textElement('li', 'demo-log__item', label));
+    log.appendChild(textElement('li', 'demo-log__item', readLabel()));
   };
 }
 
 /**
- * Глубокая копия дерева пунктов с действием на каждом пункте всех уровней.
+ * Действие на каждом пункте всех уровней, добавленное поверх описания сценария.
  *
  * Отдельный проход, а не `action` в описаниях сценариев: описания остаются
  * чистыми, и новый пункт в них сразу получает рабочий клик — расставить
@@ -144,6 +149,11 @@ function logIn(scenarioId, label) {
  * забудет. Владелец непустого подменю действие тоже получает, но клик по нему
  * его не зовёт: библиотека открывает подменю вместо этого, и обойти это из
  * демо нечем.
+ *
+ * Глубина не разворачивается заранее: `submenuAction` предъявляет состав при
+ * показе, и обёртка навешивает действия на пункты тогда, когда их действительно
+ * построят. Заранее развёрнутое дерево было бы второй копией состава, которая
+ * разошлась бы с той, что вернул `submenuAction`.
  *
  * @param {string} scenarioId значение `data-scenario` у блока.
  * @param {Array<MenuItem | SeparatorItem>} items пункты одного уровня.
@@ -154,16 +164,15 @@ function withItemActions(scenarioId, items) {
     if (isSeparator(item)) {
       return item;
     }
+    const { labelAction, submenuAction } = item;
     return {
       ...item,
-      action: logIn(scenarioId, item.label),
-      // Приведение не выдумано: разделитель попасть в подменю не может, потому
-      // что `MenuItem.submenu` объявлен как `MenuItem[]`, и на вход рекурсии
-      // приходит ровно то, чем этот тип помечен. На верхнем уровне тип смешанный,
-      // и там разделители остаются разделителями.
-      submenu: item.submenu === undefined
+      action: logIn(scenarioId, labelAction),
+      submenuAction: submenuAction === undefined
         ? undefined
-        : /** @type {MenuItem[]} */ (withItemActions(scenarioId, item.submenu)),
+        : () => {
+          return withItemActions(scenarioId, submenuAction());
+        },
     };
   });
 }

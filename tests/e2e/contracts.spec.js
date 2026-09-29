@@ -184,7 +184,7 @@ test.describe('контракты на стыке модулей', () => {
         }
         log.length = 0;
         errors.length = 0;
-        menu = new MyContext(items, options === undefined ? { label: 'Меню' } : options);
+        menu = new MyContext(items, options === undefined ? { labelAction: () => 'Меню' } : options);
         const anchor = container;
         if (anchor === null) {
           throw new Error('нет контейнера surface');
@@ -198,7 +198,7 @@ test.describe('контракты на стыке модулей', () => {
           if (set === 'selfDestroy') {
             build([
               {
-                label: 'Закрыть навсегда',
+                labelAction: () => 'Закрыть навсегда',
                 action: () => {
                   log.push('уничтожить');
                   // Обычная форма «снять с экрана по выбору»: пункт сносит то
@@ -210,20 +210,20 @@ test.describe('контракты на стыке модулей', () => {
                   }
                 },
               },
-              { label: 'Просто пункт' },
+              { labelAction: () => 'Просто пункт' },
             ]);
             return;
           }
-          build([{ label: 'Просто пункт' }]);
+          build([{ labelAction: () => 'Просто пункт' }]);
         },
         makeBadTheme() {
-          build([{ label: 'Пункт' }], { theme: 'нет-темы' });
+          build([{ labelAction: () => 'Пункт' }], { theme: 'нет-темы' });
         },
         makeNaNDuration() {
-          build([{ label: 'Пункт' }], { animationDuration: Number.NaN });
+          build([{ labelAction: () => 'Пункт' }], { animationDuration: Number.NaN });
         },
         makeEmptyLabel() {
-          build([{ label: 'Пункт' }], { label: '' });
+          build([{ labelAction: () => 'Пункт' }], { label: '' });
         },
         open(x, y) {
           if (menu === null) {

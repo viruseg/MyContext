@@ -1058,7 +1058,7 @@ test.describe('прокручиваемый список', () => {
     // `#m` не годится: в ней переполнения нет вовсе. Сорок пунктов — та же длина,
     // что и в остальных кейсах файла.
     await mountLiveMenu(page, Array.from({ length: 40 }, (unused, index) => {
-      return { label: `Пункт ${index + 1}` };
+      return { labelAction: () => `Пункт ${index + 1}` };
     }));
     await openLiveMenu(page, { x: 200, y: 200 });
 
@@ -1150,7 +1150,7 @@ test.describe('прокручиваемый список', () => {
     // их обе разом. Сорок пунктов — то же, что и в кейсе выше: короткий список
     // зон не показывает, и мерять было бы нечего.
     await mountLiveMenu(page, Array.from({ length: 40 }, (unused, index) => {
-      return { label: `Пункт ${index + 1}` };
+      return { labelAction: () => `Пункт ${index + 1}` };
     }));
     await openLiveMenu(page, { x: 200, y: 200 });
 
@@ -1664,7 +1664,7 @@ test.describe('пункты и состояния', () => {
 
     // Вживую: живое меню, клавиша навигации, и отметка обязана быть ровно одна —
     // на сфокусированном пункте, с заливкой мышиной и без кольца.
-    await mountLiveMenu(page, [{ label: 'Первый' }, { label: 'Второй' }]);
+    await mountLiveMenu(page, [{ labelAction: () => 'Первый' }, { labelAction: () => 'Второй' }]);
     await openLiveMenu(page, { x: 200, y: 200 });
     await page.keyboard.press('ArrowDown');
     const focused = await page.evaluate(() => {
@@ -1725,7 +1725,7 @@ test.describe('пункты и состояния', () => {
     // сфокусированном контейнере, `open()` и фокус элемента уровня. UA решает,
     // видим ли этот фокус, по вводу, которым он был вызван, поэтому нажатие клавиши
     // здесь настоящее, а событие отправлено из страницы.
-    await mountLiveMenu(page, [{ label: 'Первый' }]);
+    await mountLiveMenu(page, [{ labelAction: () => 'Первый' }]);
     await openLiveMenuByKeyboard(page);
     await page.waitForSelector('.vc-menu:popover-open');
     const measured = await page.evaluate(() => {
@@ -1765,8 +1765,8 @@ test.describe('пункты и состояния', () => {
     // Живое меню: отметку ставит движок роуминга, и без него наведение на
     // отключённый пункт проверялось бы на разметке, в которой отметок нет.
     await mountLiveMenu(page, [
-      { label: 'Доступно' },
-      { label: 'Глухой' },
+      { labelAction: () => 'Доступно' },
+      { labelAction: () => 'Глухой' },
     ], [1]);
     await openLiveMenu(page, { x: 200, y: 200 });
 

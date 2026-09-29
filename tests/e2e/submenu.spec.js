@@ -413,52 +413,52 @@ test.beforeEach(async ({ page }) => {
      */
     const sets = {
       tree: [
-        { label: 'Новый', action: () => log.push('новый') },
+        { labelAction: () => 'Новый', action: () => log.push('новый') },
         {
-          label: 'Экспорт',
-          submenu: [
-            { label: 'PDF', action: () => log.push('pdf') },
-            { label: 'PNG', submenu: [{ label: 'Один', submenu: [{ label: 'Глубоко' }] }] },
+          labelAction: () => 'Экспорт',
+          submenuAction: () => [
+            { labelAction: () => 'PDF', action: () => log.push('pdf') },
+            { labelAction: () => 'PNG', submenuAction: () => [{ labelAction: () => 'Один', submenuAction: () => [{ labelAction: () => 'Глубоко' }] }] },
             {
-              label: 'Скачать',
-              submenu: [
-                { label: 'Архив' },
-                { label: 'Образ' },
+              labelAction: () => 'Скачать',
+              submenuAction: () => [
+                { labelAction: () => 'Архив' },
+                { labelAction: () => 'Образ' },
               ],
               action: () => log.push('скачать'),
             },
-            { label: 'Значок Windows' },
+            { labelAction: () => 'Значок Windows' },
           ],
           action: () => log.push('экспорт'),
         },
         {
-          label: 'Глухой',
+          labelAction: () => 'Глухой',
           isEnabledAction: () => false,
-          submenu: [{ label: 'Под глухим' }],
+          submenuAction: () => [{ labelAction: () => 'Под глухим' }],
           action: () => log.push('глухой'),
         },
-        { label: 'Пустой', submenu: [], action: () => log.push('пустой') },
-        { label: 'Заметки', action: () => log.push('заметки') },
+        { labelAction: () => 'Без подменю', action: () => log.push('без подменю') },
+        { labelAction: () => 'Заметки', action: () => log.push('заметки') },
       ],
       // Два владельца на одном уровне и больше ничего. Кейс про отключённого
       // между показами владельца держит подменю второго открытым, пока курсор
       // стоит на первом, — а без второго владельца закрывать было бы нечего и
       // проверять было бы не на что.
       pair: [
-        { label: 'Первый', submenu: [{ label: 'Под первым' }] },
-        { label: 'Второй', submenu: [{ label: 'Под вторым' }] },
+        { labelAction: () => 'Первый', submenuAction: () => [{ labelAction: () => 'Под первым' }] },
+        { labelAction: () => 'Второй', submenuAction: () => [{ labelAction: () => 'Под вторым' }] },
       ],
       // Владелец с подменю, которое не помещается ни справа, ни слева и прижимается
       // к `padding`. Набор отдельный, и длинная подпись в нём нужна ровно для этого:
       // предмет кейса — геометрия показа, а не состав пунктов.
       wide: [
         {
-          label: 'Край',
-          submenu: [
-            { label: 'Первый' },
-            { label: 'Второй' },
-            { label: 'Третий' },
-            { label: 'Дальний пункт подменю, прижатого к краю вьюпорта' },
+          labelAction: () => 'Край',
+          submenuAction: () => [
+            { labelAction: () => 'Первый' },
+            { labelAction: () => 'Второй' },
+            { labelAction: () => 'Третий' },
+            { labelAction: () => 'Дальний пункт подменю, прижатого к краю вьюпорта' },
           ],
         },
       ],
@@ -466,10 +466,10 @@ test.beforeEach(async ({ page }) => {
       // В `tree` отключённый пункт есть, а разделителя нет, и наоборот; кейс о
       // невыбираемых строках ловит обе границы разом, поэтому набор свой.
       unselectable: [
-        { label: 'Живой' },
-        { label: 'Глухой', isEnabledAction: () => false },
+        { labelAction: () => 'Живой' },
+        { labelAction: () => 'Глухой', isEnabledAction: () => false },
         { type: 'separator' },
-        { label: 'Второй' },
+        { labelAction: () => 'Второй' },
       ],
     };
 
@@ -633,8 +633,8 @@ test.beforeEach(async ({ page }) => {
         // Рендер вызывается на тех же данных, что и меню: подменю непустое, и
         // единственное различие между двумя пунктами — ответ предиката.
         const items = [{
-          label: 'Владелец',
-          submenu: [{ label: 'Лист' }],
+          labelAction: () => 'Владелец',
+          submenuAction: () => [{ labelAction: () => 'Лист' }],
           isEnabledAction: () => enabled,
         }];
         const level = renderLevel(items, {
@@ -711,21 +711,21 @@ test.describe('показ подменю', () => {
     // `pointermove` по пункту, и кейс держит в проверке именно эту проводку.
     // Пункт взят не первый и не последний: от края уровня стрелка дала бы тот же
     // результат, и «отсчёт от того, что под курсором» было бы нечем доказать.
-    await hoverItem(page, 'Пустой');
+    await hoverItem(page, 'Без подменю');
     const hovered = await readMenu(page);
     // Отметка ровно одна, и она на том пункте, где курсор: два писателя выделения
     // дали бы подсветку сразу на двух пунктах.
-    expect(activeLabels(hovered), 'отмечен только пункт под курсором').toEqual(['Пустой']);
-    expect(itemOf(hovered, 'Пустой').active).toBe(true);
+    expect(activeLabels(hovered), 'отмечен только пункт под курсором').toEqual(['Без подменю']);
+    expect(itemOf(hovered, 'Без подменю').active).toBe(true);
     // Фокус ушёл за отметкой: клавиши адресуются меню по цели события, и без этого
     // стрелка уехала бы с пункта, который пользователь видит отмеченным.
-    expect(hovered.focusLabel, 'фокус на пункте под курсором').toBe('Пустой');
-    // Наведение на пункт с пустым подменю не открывает ничего: владельцем он не
+    expect(hovered.focusLabel, 'фокус на пункте под курсором').toBe('Без подменю');
+    // Наведение на пункт без submenuAction не открывает ничего: владельцем он не
     // является, и уровня за ним нет.
     expect(hovered.openCount, 'наведение ничего не открыло').toBe(1);
 
     // Клавиша приходит на пункт под курсором и считает следующий от него, а не от
-    // края: после «Пустого» в наборе идёт «Заметки», а от края стрелка дала бы
+    // края: после пункта без подменю в наборе идёт «Заметки», а от края стрелка дала бы
     // «Новый».
     await page.keyboard.press('ArrowDown');
     const afterKey = await readMenu(page);

@@ -570,8 +570,8 @@ test.beforeEach(async ({ page }) => {
      * @type {MenuItem}
      */
     const ownerItem = {
-      label: 'Владелец',
-      submenu: [{ label: 'Под владельцем' }],
+      labelAction: () => 'Владелец',
+      submenuAction: () => [{ labelAction: () => 'Под владельцем' }],
       action: () => log.push('владелец'),
     };
 
@@ -585,41 +585,41 @@ test.beforeEach(async ({ page }) => {
       // Разделитель между пунктами: у уровня без него `ArrowDown` и `ArrowUp` дали
       // бы одинаковый снимок, и «пропускает ли цикл отключённые» было бы нечем
       // отличать.
-      flat: [{ label: 'Первый' }, { type: 'separator' }, { label: 'Второй' }, { label: 'Третий' }],
-      nested: [{ label: 'Ветка', submenu: [{ label: 'Лист' }] }],
+      flat: [{ labelAction: () => 'Первый' }, { type: 'separator' }, { labelAction: () => 'Второй' }, { labelAction: () => 'Третий' }],
+      nested: [{ labelAction: () => 'Ветка', submenuAction: () => [{ labelAction: () => 'Лист' }] }],
       // Четыре пункта из Review Focus 2: без `id`, два с одинаковым и один с
       // третьим. Каждый пишет в общий журнал свою метку, и порядок журнала —
       // единственное, что отличает «свой `action`» от «чужого `action` по `id`».
       ids: [
-        { label: 'Без id', action: () => log.push('без id') },
-        { id: 'x', label: 'Первый x', action: () => log.push('первый x') },
-        { id: 'x', label: 'Второй x', action: () => log.push('второй x') },
-        { id: 'y', label: 'Y', action: () => log.push('y') },
+        { labelAction: () => 'Без id', action: () => log.push('без id') },
+        { id: 'x', labelAction: () => 'Первый x', action: () => log.push('первый x') },
+        { id: 'x', labelAction: () => 'Второй x', action: () => log.push('второй x') },
+        { id: 'y', labelAction: () => 'Y', action: () => log.push('y') },
       ],
       // Отключённый владелец стоит первым: будь он доступен, фокус встал бы на
       // него, и весь кейс проходил бы на пустом механизме. Владелец с пустым
       // подменю — контроль на «владелец ли он по разметке».
       disabled: [
         {
-          label: 'Глухой',
+          labelAction: () => 'Глухой',
           isEnabledAction: () => false,
-          submenu: [{ label: 'Под глухим' }],
+          submenuAction: () => [{ labelAction: () => 'Под глухим' }],
           action: () => log.push('глухой'),
         },
-        { label: 'Пустой', submenu: [], action: () => log.push('пустой') },
-        { label: 'Живой', submenu: [{ label: 'Под живым' }], action: () => log.push('живой') },
+        { labelAction: () => 'Без подменю', action: () => log.push('без подменю') },
+        { labelAction: () => 'Живой', submenuAction: () => [{ labelAction: () => 'Под живым' }], action: () => log.push('живой') },
       ],
       // Пункт-владелец с собственным действием и лист в одном уровне: клик по
       // владельцу открывает подменю и не зовёт его действие, клик по листу зовёт.
       // Оба пункта в одном уровне — иначе «клик по владельцу ничего не зовёт» можно
       // было бы объяснить тем, что обработчика активации нет вовсе.
-      mixed: [ownerItem, { label: 'Лист', action: () => log.push('лист') }],
+      mixed: [ownerItem, { labelAction: () => 'Лист', action: () => log.push('лист') }],
       // Первый пункт тихий, второй ломается: нажатие на обоих подряд отделяет
       // «исключение пробрасывается» от «меню закрывается».
       throwing: [
-        { label: 'Тихий', action: () => log.push('тихий') },
+        { labelAction: () => 'Тихий', action: () => log.push('тихий') },
         {
-          label: 'Ломает',
+          labelAction: () => 'Ломает',
           action: () => {
             throw new Error('действие сломано');
           },
@@ -635,7 +635,7 @@ test.beforeEach(async ({ page }) => {
       nonclosing: [
         { type: 'separator' },
         {
-          label: 'Отключённый',
+          labelAction: () => 'Отключённый',
           isEnabledAction: () => false,
           action: () => log.push('отключённый'),
         },
@@ -651,16 +651,16 @@ test.beforeEach(async ({ page }) => {
       // сериализует аргументы, а объявить её второй раз внутри пробы значило бы
       // держать одно и то же число в двух местах файла.
       reopening: [
-        { label: 'Тихий', action: () => log.push('тихий') },
+        { labelAction: () => 'Тихий', action: () => log.push('тихий') },
         {
-          label: 'Переоткрыть',
+          labelAction: () => 'Переоткрыть',
           action: () => {
             log.push('переоткрыть');
             reopenAt();
           },
         },
         {
-          label: 'Сломать после переоткрытия',
+          labelAction: () => 'Сломать после переоткрытия',
           action: () => {
             log.push('сломать после переоткрытия');
             reopenAt();

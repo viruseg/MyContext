@@ -60,7 +60,7 @@ import { expect, test } from '@playwright/test';
  * `tabindex`, `active` и `focused` — три независимые вещи, и равенство первых
  * двух при равенстве третьему и есть контракт роуминга. `haspopup`, `expanded`
  * и `owns` сняты потому, что именно они отличают владельца подменю от пункта с
- * `submenu: []`: у владельца есть все три, у не-владельца — ни одного.
+ * `submenuAction`: у владельца есть все три, у пункта без него — ни одного.
  *
  * @typedef {object} ItemState
  * @property {string | null} label подпись пункта; `null` у разделителя.
@@ -271,10 +271,10 @@ test.beforeEach(async ({ page }) => {
      * @type {Array<MenuItem | SeparatorItem>}
      */
     const cycle = [
-      { label: 'Первый' },
-      { label: 'Заблокированный', isEnabledAction: () => false },
+      { labelAction: () => 'Первый' },
+      { labelAction: () => 'Заблокированный', isEnabledAction: () => false },
       { type: 'separator' },
-      { label: 'Второй' },
+      { labelAction: () => 'Второй' },
     ];
 
     /**
@@ -285,15 +285,15 @@ test.beforeEach(async ({ page }) => {
      * @type {Array<MenuItem | SeparatorItem>}
      */
     const tail = [
-      { label: 'Первый' },
-      { label: 'Второй' },
-      { label: 'Третий' },
-      { label: 'Хвост', isEnabledAction: () => false },
+      { labelAction: () => 'Первый' },
+      { labelAction: () => 'Второй' },
+      { labelAction: () => 'Третий' },
+      { labelAction: () => 'Хвост', isEnabledAction: () => false },
       { type: 'separator' },
     ];
 
     /** @type {MenuItem[]} */
-    const deepest = [{ label: 'Самый нижний' }];
+    const deepest = [{ labelAction: () => 'Самый нижний' }];
 
     /**
      * Меню длиннее вьюпорта: `.vc-list` ограничен `max-height: calc(100dvh - 2 *
@@ -305,7 +305,7 @@ test.beforeEach(async ({ page }) => {
      * @type {Array<MenuItem | SeparatorItem>}
      */
     const long = Array.from({ length: 40 }, (unused, index) => {
-      return { label: `Пункт ${index + 1}` };
+      return { labelAction: () => `Пункт ${index + 1}` };
     });
 
     /**
@@ -317,7 +317,7 @@ test.beforeEach(async ({ page }) => {
      * @type {Array<MenuItem | SeparatorItem>}
      */
     const dead = [
-      { label: 'Глухой', isEnabledAction: () => false },
+      { labelAction: () => 'Глухой', isEnabledAction: () => false },
       { type: 'separator' },
     ];
 
@@ -331,13 +331,13 @@ test.beforeEach(async ({ page }) => {
      * @type {Array<MenuItem | SeparatorItem>}
      */
     const offLimits = [
-      { label: 'Живой' },
+      { labelAction: () => 'Живой' },
       {
-        label: 'Мёртвый владелец',
+        labelAction: () => 'Мёртвый владелец',
         isEnabledAction: () => false,
-        submenu: [{ label: 'Внутрь' }],
+        submenuAction: () => [{ labelAction: () => 'Внутрь' }],
       },
-      { label: 'Живой владелец', submenu: [{ label: 'Тоже внутрь' }] },
+      { labelAction: () => 'Живой владелец', submenuAction: () => [{ labelAction: () => 'Тоже внутрь' }] },
     ];
     /**
      * Вложенность: подменю подменю. `MenuItem[]`, а не со смешанным списком: у
@@ -347,8 +347,8 @@ test.beforeEach(async ({ page }) => {
      * @type {MenuItem[]}
      */
     const nested = [
-      { label: 'Глубже', submenu: deepest },
-      { label: 'Обычный пункт подменю' },
+      { labelAction: () => 'Глубже', submenuAction: () => deepest },
+      { labelAction: () => 'Обычный пункт подменю' },
     ];
 
     /**
@@ -359,21 +359,21 @@ test.beforeEach(async ({ page }) => {
      * @type {Array<MenuItem | SeparatorItem>}
      */
     const tree = [
-      { label: 'Открыть', action: () => { record('Открыть'); } },
+      { labelAction: () => 'Открыть', action: () => { record('Открыть'); } },
       {
-        label: 'Экспорт',
-        submenu: [
-          { label: 'PDF', action: () => { record('PDF'); } },
-          { label: 'PNG' },
+        labelAction: () => 'Экспорт',
+        submenuAction: () => [
+          { labelAction: () => 'PDF', action: () => { record('PDF'); } },
+          { labelAction: () => 'PNG' },
         ],
       },
-      { label: 'Печать', submenu: nested },
-      // У пункта есть `submenu`, и он пуст: такой пункт владельцем не является и
+      { labelAction: () => 'Печать', submenuAction: () => nested },
+      // У пункта `submenuAction` нет вовсе: такой пункт владельцем не является и
       // активируется как обычный. С коллбэком, чтобы отличить активацию от
-      // открытия пустого подменя по одному только счётчику вызовов.
-      { label: 'Пустое подменю', submenu: [], action: () => { record('Пустое подменю'); } },
+      // открытия подменя по одному только счётчику вызовов.
+      { labelAction: () => 'Без подменю', action: () => { record('Без подменю'); } },
       { type: 'separator' },
-      { label: 'Выход', action: () => { record('Выход'); } },
+      { labelAction: () => 'Выход', action: () => { record('Выход'); } },
     ];
 
     /** @type {Record<string, Array<MenuItem | SeparatorItem>>} */
@@ -453,8 +453,8 @@ test.beforeEach(async ({ page }) => {
         if (!owner.hasSubmenu) {
           continue;
         }
-        const submenu = item.submenu;
-        if (submenu === undefined || submenu.length === 0) {
+        const submenu = item.submenuAction === undefined ? null : item.submenuAction();
+        if (submenu === null) {
           continue;
         }
         const child = openedLayer().ensureLevel(submenu, entry, levelIndex + 1, owner);
@@ -914,7 +914,7 @@ test.beforeEach(async ({ page }) => {
         /** @type {string | null} */
         let message = null;
         try {
-          openedLayer().ensureLevel([{ label: 'Лист' }], entry, 1, owner);
+          openedLayer().ensureLevel([{ labelAction: () => 'Лист' }], entry, 1, owner);
         } catch (error) {
           message = error instanceof Error ? error.message : String(error);
         }
@@ -1340,7 +1340,7 @@ test.describe('роуминг-фокус', () => {
       ['Открыть', '-1', false],
       ['Экспорт', '0', true],
       ['Печать', '-1', false],
-      ['Пустое подменю', '-1', false],
+      ['Без подменю', '-1', false],
       [null, null, false],
       ['Выход', '-1', false],
     ]);
@@ -1366,7 +1366,7 @@ test.describe('роуминг-фокус', () => {
     // и «мышь перебивает клавиатуру» было бы нечем доказать.
     expect(result.steps[0].levels.root.activeIndex, 'под курсором третий').toBe(2);
     expect(result.steps[1].levels.root.activeIndex, 'стрелка дала четвёртого').toBe(3);
-    expect(result.after.levels.root.focusLabel).toBe('Пустое подменю');
+    expect(result.after.levels.root.focusLabel).toBe('Без подменю');
     expect(result.after.levels.root.activeMarks).toBe(1);
     // Отдельного правила «считать от того, что под курсором» в движке нет и не
     // требуется: активным всегда стоит последний, кого тронули, — мышью он или
@@ -2061,13 +2061,13 @@ test.describe('активация', () => {
     ]);
   });
 
-  test('подменю: [] не делает пункт владельцем: Enter активирует его', async ({ page }) => {
+  test('пункт без submenuAction не владелец: Enter активирует его', async ({ page }) => {
     const result = await runScenario(page, {
       set: 'tree',
       paths: { root: [], sub: [1] },
       steps: [
         // Четыре шага вниз по доступным пунктам: «Открыть», «Экспорт», «Печать»,
-        // «Пустое подменю». Разделитель между ними и последний «Выход» в счёт не
+        // «Без подменю». Разделитель между ними и последний «Выход» в счёт не
         // идут, и открытое меню выделения не имеет, поэтому шагов именно четыре.
         { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowDown' },
@@ -2079,23 +2079,23 @@ test.describe('активация', () => {
     });
 
     expect(focusTrail(result.steps)).toEqual([
-      'Открыть', 'Экспорт', 'Печать', 'Пустое подменю', 'Пустое подменю', 'Пустое подменю',
+      'Открыть', 'Экспорт', 'Печать', 'Без подменю', 'Без подменю', 'Без подменю',
     ]);
     // Пункт с пустым `submenu` не владелец: `ArrowRight` не открыл ничего, а
     // `Enter` активировал его.
-    expect(result.after.actions).toEqual(['Пустое подменю']);
-    expect(result.after.clicks).toEqual(['Пустое подменю']);
+    expect(result.after.actions).toEqual(['Без подменю']);
+    expect(result.after.clicks).toEqual(['Без подменю']);
     expect(result.after.calls.openSubmenu).toBe(0);
     // Пункт без подменю активируется, и закрывает его обработчик активации: журнал
     // тот же, что у `Enter` на обычном пункте, а `closeAll` движка не зовётся.
     expect(result.after.calls.closeAll).toBe(0);
-    expect(result.after.calls.order).toEqual(['action:Пустое подменю', 'close:activation']);
+    expect(result.after.calls.order).toEqual(['action:Без подменю', 'close:activation']);
     expect(result.after.levels.root.open).toBe(false);
     // Признаков владельца у пункта нет ни одного: ни `aria-haspopup`, ни
     // `aria-owns`, ни `aria-expanded`, ни `hasSubmenu`. Это решение рендерера, и
     // обязано совпадать с решением слоя и движка.
     expect(result.after.levels.root.items[3]).toEqual({
-      label: 'Пустое подменю',
+      label: 'Без подменю',
       role: 'menuitem',
       tabindex: '0',
       active: true,

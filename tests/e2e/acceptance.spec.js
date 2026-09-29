@@ -326,62 +326,62 @@ test.beforeEach(async ({ page }) => {
       const sets = {
         grid: [
           {
-            label: 'Ветка',
-            submenu: [
-              { label: 'Лист' },
-              { label: 'Побег' },
+            labelAction: () => 'Ветка',
+            submenuAction: () => [
+              { labelAction: () => 'Лист' },
+              { labelAction: () => 'Побег' },
             ],
           },
-          { label: 'Соседний' },
+          { labelAction: () => 'Соседний' },
           { type: 'separator' },
-          { label: 'Хвост' },
+          { labelAction: () => 'Хвост' },
         ],
         deep: [
           {
-            label: 'Открыть',
-            submenu: [
+            labelAction: () => 'Открыть',
+            submenuAction: () => [
               {
-                label: 'Недавние',
-                submenu: [
+                labelAction: () => 'Недавние',
+                submenuAction: () => [
                   {
-                    label: 'Проект',
-                    submenu: [
-                      { label: 'Готово' },
-                      { label: 'Черновик' },
+                    labelAction: () => 'Проект',
+                    submenuAction: () => [
+                      { labelAction: () => 'Готово' },
+                      { labelAction: () => 'Черновик' },
                     ],
                   },
-                  { label: 'Архив' },
+                  { labelAction: () => 'Архив' },
                 ],
               },
-              { label: 'Избранное' },
+              { labelAction: () => 'Избранное' },
             ],
           },
-          { label: 'Копировать', action: () => log.push('копировать') },
+          { labelAction: () => 'Копировать', action: () => log.push('копировать') },
           { type: 'separator' },
-          { label: 'Удалить', action: () => log.push('удалить') },
+          { labelAction: () => 'Удалить', action: () => log.push('удалить') },
         ],
         // Первый пункт — владелец, второй обычный: диагональ идёт через него, и
         // пока он без подменю, движение не спутает показ нового уровня с
         // сохранением прежнего.
         diagonal: [
           {
-            label: 'Ветка',
-            submenu: [
-              { label: 'Лист' },
-              { label: 'Побег' },
+            labelAction: () => 'Ветка',
+            submenuAction: () => [
+              { labelAction: () => 'Лист' },
+              { labelAction: () => 'Побег' },
             ],
           },
-          { label: 'Соседний' },
-          { label: 'Соседний два' },
+          { labelAction: () => 'Соседний' },
+          { labelAction: () => 'Соседний два' },
         ],
         icons: [
-          { label: 'Эмодзи', icon: { type: 'emoji', value: '📄' } },
-          { label: 'Вектор', icon: { type: 'svg', value: svgSource } },
-          { label: 'Растр', icon: { type: 'raster', value: rasterSource, alt: 'Образец' } },
-          { label: 'Без иконки' },
-          { label: 'Отключён', isEnabledAction: () => false },
+          { labelAction: () => 'Эмодзи', iconAction: () => ({ type: 'emoji', value: '📄' }) },
+          { labelAction: () => 'Вектор', iconAction: () => ({ type: 'svg', value: svgSource }) },
+          { labelAction: () => 'Растр', iconAction: () => ({ type: 'raster', value: rasterSource, alt: 'Образец' }) },
+          { labelAction: () => 'Без иконки' },
+          { labelAction: () => 'Отключён', isEnabledAction: () => false },
           { type: 'separator' },
-          { label: 'Тоже без иконки' },
+          { labelAction: () => 'Тоже без иконки' },
         ],
       };
 
@@ -604,7 +604,7 @@ test.describe('приёмка по критериям готовности', () 
       // Экземпляр строится и открывается прямо здесь: так проверяется не только
       // то, что файл разобрался, но и что вся цепочка импортов внутри него
       // (иконки, рендерер, слой, клавиатура, hover intent) доступна без сборки.
-      const menu = new module.MyContext([{ label: 'Пункт' }], { label: 'Меню без сборки' });
+      const menu = new module.MyContext([{ labelAction: () => 'Пункт' }], { label: 'Меню без сборки' });
       menu.open({ x: 40, y: 40 });
       const shown = document.querySelectorAll('.vc-menu:popover-open').length;
       const label = document.querySelector('.vc-menu:popover-open .vc-label');
