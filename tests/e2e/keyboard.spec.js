@@ -474,6 +474,29 @@ test.beforeEach(async ({ page }) => {
       order: [],
     };
 
+    /**
+     * Открытые уровни от корня к текущему: повторяет `#chain` в `MyContext`.
+     * Ответ на «какой уровень текущий» читается из неё, и без неё фикстура
+     * отвечала бы на вопрос о подменю, которого никто не открывал.
+     *
+     * @type {LevelEntry[]}
+     */
+    const chain = [];
+
+    /**
+     * Открытый уровень, заведённый перед своим показом: так цепочка остаётся
+     * источником правды о том, что показано, а не о том, что заведено.
+     *
+     * @param {LevelEntry} entry
+     * @returns {void}
+     */
+    function showInChain(entry) {
+      const parent = entry.parent;
+      const at = parent === null ? 0 : chain.indexOf(parent) + 1;
+      chain.length = at;
+      chain.push(entry);
+    }
+
     // Хост — «MyContext-подобная» часть фикстуры: он владеет слоем, картой
     // активов и элементом-владельцем, и только он знает, что значит «закрыть
     // всё» или «вернуть фокус».
@@ -492,28 +515,33 @@ test.beforeEach(async ({ page }) => {
         calls.order.push('closeAll');
         calls.closeAll += 1;
         openedLayer().hideAll();
+        chain.length = 0;
       },
       openSubmenu(entry) {
         calls.order.push(`openSubmenu:${entry.element.id}`);
         calls.openSubmenu += 1;
         calls.openSubmenuIds.push(entry.element.id);
         openedLayer().showSubmenu(entry);
+        showInChain(entry);
         keyboard.registerLevel(entry, { focus: false });
       },
-      closeCurrentLevel() {
+      closeCurrentLevel(entry) {
         calls.order.push('closeCurrentLevel');
         calls.closeCurrentLevel += 1;
-        // «Текущий» уровень — тот, где стоит фокус: по нему движок и ходит.
-        const active = document.activeElement;
-        const menu = active === null ? null : active.closest('.vc-menu');
-        if (menu === null) {
-          return;
-        }
-        const entry = byElement.get(/** @type {HTMLElement} */ (menu));
-        if (entry === undefined) {
-          return;
-        }
         openedLayer().hide(entry);
+        // Вместе с уровнем уходит вся ветка ниже него: пока подменю открыто из
+        // закрытого, следующая открытая цепочка была бы с указанием на скрытое.
+        const at = chain.indexOf(entry);
+        if (at >= 0) {
+          chain.length = at;
+        }
+      },
+      currentLevel(entry) {
+        // Последний элемент цепочки — самый глубокий показанный уровень, и он же
+        // самый глубокий потомок любого своего предка. Уровня в цепочке нет, когда
+        // он гаснет: клавиша в него ещё приходит, а текущим он быть не может.
+        const deepest = chain[chain.length - 1];
+        return deepest !== undefined && chain.includes(entry) ? deepest : entry;
       },
       focusOwner() {
         calls.order.push('focusOwner');
@@ -893,6 +921,7 @@ test.beforeEach(async ({ page }) => {
           buildTree(root, items, 0);
         }
         openedLayer().showRoot(root, { x: 60, y: 60 });
+        showInChain(root);
         keyboard.registerLevel(root, { focus: true });
       },
       reshow(index, enabled) {
@@ -909,6 +938,7 @@ test.beforeEach(async ({ page }) => {
         item.isEnabledAction = () => enabled;
         const entry = openedLayer().ensureLevel(items, null, 0, null);
         openedLayer().showRoot(entry, { x: 60, y: 60 });
+        showInChain(entry);
         keyboard.registerLevel(entry, { focus: true });
       },
       ensureSubmenu(index) {
@@ -1469,11 +1499,11 @@ test.describe('роуминг-фокус', () => {
     // иначе была бы недостижимой: наведение помечает владельца и оставляло бы фокус
     // в подменю.
     expect(result.steps[3].focus.label, 'фокус на владельце').toBe('Экспорт');
-    // И клавиша после этого едет в корневой уровень, а не в подменю: уровень берётся
-    // из цели события, и целью стал владелец.
-    expect(result.after.levels.root.activeIndex, 'стрелка увела отметку корня').toBe(2);
-    expect(result.after.levels.sub.activeIndex, 'подменю не тронуто').toBe(0);
-    expect(result.after.focus.label).toBe('Печать');
+    // И клавиша после этого едет в подменю, а не в корневой уровень: фокус стоит
+    // на владельце, но смотрит пользователь на подменю, и оно открыто последним.
+    expect(result.after.levels.root.activeIndex, 'отметка владельца на месте').toBe(1);
+    expect(result.after.levels.sub.activeIndex, 'стрелка увела отметку подменю').toBe(1);
+    expect(result.after.focus.label).toBe('PNG');
   });
 
   test('клавиатура перебивает мышь', async ({ page }) => {
@@ -1739,33 +1769,166 @@ test.describe('переходы между уровнями', () => {
     expect(result.snapshot.levels.root.activeIndex).toBe(0);
   });
 
-  test('уровень берётся из цели события, а не из последнего тронутого уровня', async ({ page }) => {
+  test('стрелка после мышиного открытия идёт в подменю, а не в родительский уровень', async ({ page }) => {
     const result = await runScenario(page, {
       set: 'tree',
       paths: { root: [], sub: [1] },
       steps: [
-        // Последний тронутый движком уровень — подменю, и фокус в нём.
+        // Курсор встал на владельца, и его подменю открылось по наведению: фокус
+        // показ не переносит, поэтому он остался на владельце, то есть в
+        // родительском уровне.
+        { command: 'hover', at: { path: [], index: 1 } },
+        { command: 'show-submenu', at: { path: [], index: 1 } },
+        { command: 'read' },
+        { command: 'press', key: 'ArrowDown' },
+      ],
+    });
+
+    // Снимок до нажатия: подменю открыто, фокус в родителе, отметок в подменю нет.
+    expect(result.steps[2].levels.sub.open).toBe(true);
+    expect(result.steps[2].levels.sub.activeIndex).toBe(-1);
+    expect(result.steps[2].levels.root.focusLabel).toBe('Экспорт');
+    // Движение произошло в подменю — оно открыто последним и потому главнее, — а не
+    // в том уровне, откуда пришла клавиша.
+    expect(result.after.levels.sub.activeIndex).toBe(0);
+    expect(result.after.levels.sub.focusLabel).toBe('PDF');
+    expect(result.after.focus.label).toBe('PDF');
+    // Родительский уровень не тронут: у владельца осталась отметка раскрытия, а
+    // сравниваются именно отметки, потому что фокус уровня меняется оттого, что его
+    // получил сосед.
+    expect(marksOf(result.after.levels.root)).toEqual(marksOf(result.steps[2].levels.root));
+    expect(result.after.levels.root.activeIndex).toBe(1);
+    // Ничего не открывалось заново: подменю уже было показано.
+    expect(result.after.calls.openSubmenu).toBe(1);
+  });
+
+  test('Escape после мышиного открытия закрывает подменю, а не всё меню', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'tree',
+      paths: { root: [], sub: [1] },
+      steps: [
+        { command: 'hover', at: { path: [], index: 1 } },
+        { command: 'show-submenu', at: { path: [], index: 1 } },
+        { command: 'read' },
+        { command: 'press', key: 'Escape' },
+      ],
+    });
+
+    // Уход закрывает тот уровень, который пользователь смотрит последним, а не тот,
+    // где стоит фокус: иначе открытое подменю осталось бы висеть поверх пункта,
+    // который уже не выбран.
+    expect(result.after.calls.closeCurrentLevel).toBe(1);
+    expect(result.after.calls.closeAll).toBe(0);
+    expect(result.after.levels.sub.open).toBe(false);
+    expect(result.after.levels.root.open).toBe(true);
+    // Возврат фокуса на владельца: он и так был активен, но отметку раскрытия
+    // закрытый уровень снял.
+    expect(result.after.focus.label).toBe('Экспорт');
+    expect(result.after.levels.root.activeIndex).toBe(1);
+    expect(result.after.levels.root.items[1].expanded).toBe(null);
+  });
+
+  test('ArrowLeft после мышиного открытия закрывает подменю и возвращает фокус владельцу', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'tree',
+      paths: { root: [], sub: [1] },
+      steps: [
+        { command: 'hover', at: { path: [], index: 1 } },
+        { command: 'show-submenu', at: { path: [], index: 1 } },
+        { command: 'press', key: 'ArrowLeft' },
+      ],
+    });
+
+    expect(result.after.calls.closeCurrentLevel).toBe(1);
+    expect(result.after.calls.closeAll).toBe(0);
+    expect(result.after.calls.order).toEqual([
+      `openSubmenu:${result.before.levels.sub.id}`,
+      'closeCurrentLevel',
+    ]);
+    expect(result.after.levels.sub.open).toBe(false);
+    expect(result.after.levels.root.open).toBe(true);
+    // Роуминг продолжается от владельца: отметка на нём не растворилась вместе с
+    // подменю.
+    expect(result.after.levels.root.activeIndex).toBe(1);
+    expect(result.after.levels.root.tabStops).toBe(1);
+    expect(result.after.focus.label).toBe('Экспорт');
+  });
+
+  test('ArrowRight после мышиного открытия смотрит на активный пункт своего уровня', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'tree',
+      paths: { root: [], sub: [1] },
+      steps: [
+        { command: 'hover', at: { path: [], index: 1 } },
+        { command: 'show-submenu', at: { path: [], index: 1 } },
+        { command: 'press', key: 'ArrowRight' },
+      ],
+    });
+
+    // Раскрытие отвечает на вопрос «что выделено», а выделение стоит на владельце
+    // родительского уровня: `ArrowRight` переносит фокус в уже открытое подменю.
+    expect(result.after.levels.sub.focusLabel).toBe('PDF');
+    expect(result.after.levels.sub.activeIndex).toBe(0);
+    expect(result.after.focus.label).toBe('PDF');
+    // Показ повторный, но это показ того же подменю: `ArrowRight` на владельце
+    // открывает его, а не спускается в уже открытое.
+    expect(result.after.calls.openSubmenu).toBe(2);
+    expect(result.after.calls.order).toEqual([
+      `openSubmenu:${result.before.levels.sub.id}`,
+      `openSubmenu:${result.before.levels.sub.id}`,
+    ]);
+  });
+
+  test('Enter после мышиного открытия смотрит на активный пункт своего уровня', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'tree',
+      paths: { root: [], sub: [1] },
+      steps: [
+        { command: 'hover', at: { path: [], index: 1 } },
+        { command: 'show-submenu', at: { path: [], index: 1 } },
+        { command: 'press', key: 'Enter' },
+      ],
+    });
+
+    // То же и для активации: она работает по активному пункту уровня, из которого
+    // пришла клавиша, а не по текущему уровню подменю без единого пункта.
+    expect(result.after.levels.sub.focusLabel).toBe('PDF');
+    expect(result.after.focus.label).toBe('PDF');
+    expect(result.after.calls.openSubmenu).toBe(2);
+    // Активация не наступила: у владельца непустого подменю активация означает
+    // открытие, а не вызов действия.
+    expect(result.after.actions).toEqual([]);
+  });
+
+  test('перемещение уходит в самый глубокий открытый уровень, а не в тот, из которого пришла клавиша', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'tree',
+      paths: { root: [], sub: [1] },
+      steps: [
         { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowDown' },
         { command: 'press', key: 'ArrowRight' },
         { command: 'read' },
         // Клавиша приходит в пункт корневого уровня — в тот самый, который остался
-        // активным после открытия подменю.
+        // активным после открытия подменю, — а двигаться обязана там, куда
+        // пользователь смотрит.
         { command: 'press', key: 'ArrowDown', at: { path: [], index: 1 } },
       ],
     });
 
-    // Движение произошло в корневом уровне: активным там стал следующий пункт.
-    expect(result.after.levels.root.activeIndex).toBe(2);
-    expect(result.after.levels.root.focusLabel).toBe('Печать');
-    expect(result.after.focus.label).toBe('Печать');
+    // Движение произошло в подменю: оно открыто последним, и оно главнее.
+    expect(result.after.levels.sub.activeIndex).toBe(1);
+    expect(result.after.levels.sub.focusLabel).toBe('PNG');
+    expect(result.after.focus.label).toBe('PNG');
     // Снимок до движения действительно видел фокус в подменю, иначе сравнение
     // ниже было бы сравнением уровня с самим собой.
     expect(result.steps[3].levels.sub.focusLabel).toBe('PDF');
-    // Подменю не тронуто: его отметки те же, а фокус ушёл — и сравниваются именно
-    // отметки, потому что фокус уровня меняется оттого, что его получил сосед.
-    expect(marksOf(result.after.levels.sub)).toEqual(marksOf(result.steps[3].levels.sub));
-    expect(result.after.levels.sub.activeIndex).toBe(0);
+    // Родительский уровень не тронут: у владельца осталась отметка раскрытия, а
+    // фокус ушёл — и сравниваются именно отметки, потому что фокус уровня
+    // меняется оттого, что его получил сосед.
+    expect(marksOf(result.after.levels.root)).toEqual(marksOf(result.steps[3].levels.root));
+    expect(result.after.levels.root.activeIndex).toBe(1);
+    // Ничего не открывалось и не закрывалось: уровень сменился сам собой.
     expect(result.after.calls.order).toEqual([`openSubmenu:${result.before.levels.sub.id}`]);
   });
 
