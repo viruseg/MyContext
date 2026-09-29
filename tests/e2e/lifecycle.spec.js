@@ -923,7 +923,7 @@ test.describe('жизненный цикл MyContext', () => {
     expect(afterClick.actionsSize, 'уровень так и не появился').toBe(4);
 
     // Клик по владельцу с непустым подменю открывает подменю, а его действие не
-    // зовёт: пустой журнал здесь — не «обработчика нет», а правило владельца.
+    // зовёт: журнал без строк здесь — не «обработчика нет», а правило владельца.
     await itemByLabel(page, 'Живой').click();
     const afterOwner = await readMenu(page);
     expect(afterOwner.log, 'действие владельца не вызвано').toEqual([]);
@@ -939,9 +939,9 @@ test.describe('жизненный цикл MyContext', () => {
     // и кликабелен, — и кейс прошёл бы, доказав обратное своему комментарию.
     expect((await readMenu(page)).openCount, 'меню живо, подменю открыто').toBe(2);
 
-    await itemByLabel(page, 'Пустой').click();
+    await itemByLabel(page, 'Без подменю').click();
     const afterLeaf = await readMenu(page);
-    expect(afterLeaf.log).toEqual(['пустой']);
+    expect(afterLeaf.log).toEqual(['без подменю']);
     expect(afterLeaf.openCount, 'меню закрылось после действия').toBe(0);
   });
 
@@ -961,8 +961,8 @@ test.describe('жизненный цикл MyContext', () => {
     // `ArrowRight` и не сможет открыть его подменю.
     await page.keyboard.press('ArrowDown');
     const atEmpty = await readMenu(page);
-    expect(atEmpty.focusLabel, 'фокус прошёл мимо отключённого').toBe('Пустой');
-    expect(activeLabels(atEmpty)).toEqual([`${atEmpty.levels[0].id}:Пустой`]);
+    expect(atEmpty.focusLabel, 'фокус прошёл мимо отключённого').toBe('Без подменю');
+    expect(activeLabels(atEmpty)).toEqual([`${atEmpty.levels[0].id}:Без подменю`]);
 
     // Доступный владелец с непустым подменю — последний в наборе, и до него доходят
     // клавишей: `End` доводит активный пункт до последнего доступного.
@@ -995,7 +995,7 @@ test.describe('жизненный цикл MyContext', () => {
     }
     const levelId = before.levels[0].id;
     expect([...new Set(walked)].sort(), 'активными становились только доступные')
-      .toEqual([`${levelId}:Живой`, `${levelId}:Пустой`].sort());
+      .toEqual([`${levelId}:Живой`, `${levelId}:Без подменю`].sort());
     expect((await readMenu(page)).openCount, 'обход не открыл подменю отключённого').toBe(1);
   });
 
@@ -1631,7 +1631,7 @@ test.describe('жизненный цикл MyContext', () => {
 
     const before = await readMenu(page);
     const empty = before.levels[0].items[1];
-    expect(empty.label).toBe('Пустой');
+    expect(empty.label).toBe('Без подменю');
     expect(empty.owns, 'у пустого подменю нет `aria-owns`').toBeNull();
     expect(empty.chevron, 'у пустого подменю нет шеврона').toBeNull();
     expect(empty.haspopup, 'у пустого подменю нет `aria-haspopup`').toBeNull();
@@ -1642,12 +1642,12 @@ test.describe('жизненный цикл MyContext', () => {
     // в движке, и `Enter` дойдёт до обработчика.
     await page.keyboard.press('Home');
     const atEmpty = await readMenu(page);
-    expect(atEmpty.focusLabel, 'фокус на владельце пустого подменю').toBe('Пустой');
+    expect(atEmpty.focusLabel, 'фокус на владельце пустого подменю').toBe('Без подменю');
 
     await page.keyboard.press('Enter');
     const after = await readMenu(page);
     // `Enter` активирует пункт, а не открывает пустое подменю, и закрывает меню.
-    expect(after.log, 'пункт активирован').toEqual(['пустой']);
+    expect(after.log, 'пункт активирован').toEqual(['без подменю']);
     // Заведённого, но не показанного уровня в разметке нет вовсе — он отцепленный
     // узел, — поэтому «уровень не заведён» проверяется по карте действий: три ключа
     // корня и один ключ подменю доступного владельца, ни одного от пустого.
@@ -1745,11 +1745,11 @@ test.describe('жизненный цикл MyContext', () => {
     });
     const opened = await rightClickAndRead(page);
 
-    // Доступных пунктов осталось два: «Пустой» и «Глухой» ушли, «Живой» добавлен
-    // к отключённым. Кольцо идёт по порядку, и `End` обязан встать на «Пустой».
+    // Доступных пунктов осталось два: «Без подменю» и «Глухой» ушли, «Живой» добавлен
+    // к отключённым. Кольцо идёт по порядку, и `End` обязан встать на «Без подменю».
     await page.keyboard.press('End');
     const atEnd = await readMenu(page);
-    expect(atEnd.focusLabel, 'последний доступный — «Пустой»').toBe('Пустой');
+    expect(atEnd.focusLabel, 'последний доступный — «Без подменю»').toBe('Без подменю');
 
     // Клик по отключённому не действие: иначе у автора не было бы способа
     // выключить действие, смысл которого изменился. `force` обязателен: Playwright

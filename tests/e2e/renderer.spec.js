@@ -129,7 +129,7 @@ test.describe('пункт', () => {
         key: item.key,
         focusable: item.focusable,
         hasSubmenu: item.hasSubmenu,
-        labelAction: () => item.element.querySelector('.vc-label')?.textContent,
+        label: item.element.querySelector('.vc-label')?.textContent,
         // Шеврон есть только у владельцев подменю, поэтому у первого пункта его
         // нет даже при зарезервированной колонке.
         children: Array.from(item.element.children, (child) => {
@@ -148,7 +148,7 @@ test.describe('пункт', () => {
       key: 'vc-level-0:0',
       focusable: true,
       hasSubmenu: false,
-      labelAction: () => 'Открыть',
+      label: 'Открыть',
       children: ['vc-icon-slot', 'vc-label'],
     });
   });
@@ -1154,7 +1154,7 @@ test.describe('ключи и коллбэки', () => {
        */
       const labelOf = (key) => {
         const found = key === null ? undefined : actions.get(key);
-        return found === undefined ? null : found.label;
+        return found === undefined ? null : found.labelAction();
       };
       return {
         firstKeys: first.items.map((entry) => {

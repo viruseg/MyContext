@@ -737,21 +737,21 @@ async function readItemBoxes(page) {
  * Фикстура `#m` прячется, а не удаляется: её оформление проверяют остальные кейсы
  * файла, и живое меню в том же Top Layer перекрыло бы её собой.
  *
- * Предикат доступности не передаётся пунктами: `page.evaluate` не сериализует
- * функцию в аргумент, поэтому недоступные пункты перечисляются индексами, а
- * `isEnabledAction` вешается уже в странице.
+ * Пункты и предикат доступности в страницу не передаются: `page.evaluate` не
+ * сериализует функции в аргумент, поэтому едет форма — число пунктов и индексы
+ * недоступных, — а подписи и `isEnabledAction` заводятся уже на месте.
  *
  * @param {import('@playwright/test').Page} page
- * @param {import('../../src/renderer.js').MenuItem[]} items
- * @param {number[]} [unavailable] индексы пунктов, чей предикат ответит `false`.
+ * @param {{ count: number, dead?: number[] }} form форма набора: сколько пунктов и
+ *   какие из них недоступны.
  * @returns {Promise<void>}
  */
-async function mountLiveMenu(page, items, unavailable = []) {
+async function mountLiveMenu(page, form) {
   // `reduce` убирает и входной переход `scale`, и отложенное закрытие: под ним
   // показ синхронен, то есть рамки пунктов, снятые сразу после `open()`, суть
   // рамки показанного меню.
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.evaluate(async ({ entries, dead }) => {
+  await page.evaluate(async ({ count, dead }) => {
     const { MyContext } = await import('../../src/MyContext.js');
     const fixture = document.getElementById('m');
     if (fixture instanceof HTMLElement) {
@@ -761,18 +761,20 @@ async function mountLiveMenu(page, items, unavailable = []) {
     trigger.type = 'button';
     trigger.id = 'live-trigger';
     document.body.appendChild(trigger);
-    const menu = new MyContext(dead.reduce((list, index) => {
-      const entry = list[index];
-      if (entry !== undefined) {
-        entry.isEnabledAction = () => false;
-      }
-      return list;
-    }, entries), { label: 'Меню пробы' });
+    const entries = Array.from({ length: count }, (unused, index) => {
+      return {
+        labelAction: () => `Пункт ${index + 1}`,
+        isEnabledAction: () => {
+          return !dead.includes(index);
+        },
+      };
+    });
+    const menu = new MyContext(entries, { label: 'Меню пробы' });
     menu.attach(trigger);
     trigger.focus();
     const scope = /** @type {{ __live?: LiveMenu }} */ (/** @type {unknown} */ (globalThis));
     scope.__live = { menu, trigger };
-  }, { entries: items, dead: unavailable });
+  }, { count: form.count, dead: form.dead ?? [] });
 }
 
 /**
@@ -1057,9 +1059,7 @@ test.describe('прокручиваемый список', () => {
     // Живая часть: показанный уровень длиннее рамки, и полосы у него нет. Фикстура
     // `#m` не годится: в ней переполнения нет вовсе. Сорок пунктов — та же длина,
     // что и в остальных кейсах файла.
-    await mountLiveMenu(page, Array.from({ length: 40 }, (unused, index) => {
-      return { labelAction: () => `Пункт ${index + 1}` };
-    }));
+    await mountLiveMenu(page, { count: 40 });
     await openLiveMenu(page, { x: 200, y: 200 });
 
     const measured = await page.evaluate(() => {
@@ -1149,9 +1149,7 @@ test.describe('прокручиваемый список', () => {
     // Живая часть: обе зоны — настоящие флекс-пункты уровня, и атрибут включает
     // их обе разом. Сорок пунктов — то же, что и в кейсе выше: короткий список
     // зон не показывает, и мерять было бы нечего.
-    await mountLiveMenu(page, Array.from({ length: 40 }, (unused, index) => {
-      return { labelAction: () => `Пункт ${index + 1}` };
-    }));
+    await mountLiveMenu(page, { count: 40 });
     await openLiveMenu(page, { x: 200, y: 200 });
 
     // Показ — состояние слоя, а не рук кейса: признак поставил слой на живом
@@ -1664,7 +1662,7 @@ test.describe('пункты и состояния', () => {
 
     // Вживую: живое меню, клавиша навигации, и отметка обязана быть ровно одна —
     // на сфокусированном пункте, с заливкой мышиной и без кольца.
-    await mountLiveMenu(page, [{ labelAction: () => 'Первый' }, { labelAction: () => 'Второй' }]);
+    await mountLiveMenu(page, { count: 2 });
     await openLiveMenu(page, { x: 200, y: 200 });
     await page.keyboard.press('ArrowDown');
     const focused = await page.evaluate(() => {
@@ -1725,7 +1723,7 @@ test.describe('пункты и состояния', () => {
     // сфокусированном контейнере, `open()` и фокус элемента уровня. UA решает,
     // видим ли этот фокус, по вводу, которым он был вызван, поэтому нажатие клавиши
     // здесь настоящее, а событие отправлено из страницы.
-    await mountLiveMenu(page, [{ labelAction: () => 'Первый' }]);
+    await mountLiveMenu(page, { count: 1 });
     await openLiveMenuByKeyboard(page);
     await page.waitForSelector('.vc-menu:popover-open');
     const measured = await page.evaluate(() => {
@@ -1764,10 +1762,7 @@ test.describe('пункты и состояния', () => {
   test('отключённый пункт не получает заливки при наведении', async ({ page }) => {
     // Живое меню: отметку ставит движок роуминга, и без него наведение на
     // отключённый пункт проверялось бы на разметке, в которой отметок нет.
-    await mountLiveMenu(page, [
-      { labelAction: () => 'Доступно' },
-      { labelAction: () => 'Глухой' },
-    ], [1]);
+    await mountLiveMenu(page, { count: 2, dead: [1] });
     await openLiveMenu(page, { x: 200, y: 200 });
 
     /**

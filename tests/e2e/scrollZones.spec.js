@@ -1027,24 +1027,18 @@ const SETTLE_MS = DEFAULT_ANIMATION_DURATION * 3;
 const SCROLL_WAIT_MS = 10000;
 
 /**
- * Длинный набор пунктов: сорок штук, то есть заведомо больше любой рамки меню.
- * Префикс различает экземпляры — им помечены подписи, а имя уровня берётся из
- * конструктора, так что страница различает меню самостоятельно.
+ * Описание набора пунктов, а не сам набор.
  *
- * @param {string} prefix начало подписи пункта.
- * @returns {import('../../src/renderer.js').MenuItem[]}
+ * Пункты заводятся в странице: подпись пункта — функция, а `page.evaluate` не
+ * везёт функции в аргумент. Вместо набора едет его форма, а страница собирает
+ * пункты сама.
+ *
+ * @typedef {object} ItemShape
+ * @property {'long' | 'short'} kind длина набора.
+ * @property {string} prefix начало подписи пункта. Различает экземпляры: им
+ *   помечены подписи, а имя уровня берётся из конструктора, так что страница
+ *   различает меню самостоятельно.
  */
-function longItems(prefix) {
-  return Array.from({ length: 40 }, (unused, index) => {
-    return { labelAction: () => `${prefix} ${index + 1}` };
-  });
-}
-
-/** Длинный набор первого слота. */
-const LONG_ITEMS = longItems('Пункт');
-
-/** Короткий набор: три пункта, и список в обрез. */
-const SHORT_ITEMS = [{ labelAction: () => 'Раз' }, { labelAction: () => 'Два' }, { labelAction: () => 'Три' }];
 
 /**
  * Ставит в страницу живой экземпляр `MyContext` под указанным слотом, оставляя
@@ -1060,13 +1054,21 @@ const SHORT_ITEMS = [{ labelAction: () => 'Раз' }, { labelAction: () => 'Дв
  *
  * @param {import('@playwright/test').Page} page
  * @param {LiveSlot} slot
- * @param {import('../../src/renderer.js').MenuItem[]} items
+ * @param {ItemShape} shape форма набора.
  * @returns {Promise<void>}
  */
-async function mountLiveMenu(page, slot, items) {
+async function mountLiveMenu(page, slot, shape) {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.evaluate(async (input) => {
     const { MyContext } = await import('../../src/MyContext.js');
+    /** @type {import('../../src/renderer.js').MenuItem[]} */
+    const items = input.shape.kind === 'short'
+      ? ['Раз', 'Два', 'Три'].map((text) => {
+        return { labelAction: () => text };
+      })
+      : Array.from({ length: 40 }, (unused, index) => {
+        return { labelAction: () => `${input.shape.prefix} ${index + 1}` };
+      });
     const host = document.createElement('div');
     host.id = `live-host-${input.slot}`;
     host.style.cssText = input.host;
@@ -1075,14 +1077,14 @@ async function mountLiveMenu(page, slot, items) {
     trigger.id = `live-trigger-${input.slot}`;
     host.appendChild(trigger);
     document.body.appendChild(host);
-    const menu = new MyContext(input.items, { label: input.label });
+    const menu = new MyContext(items, { label: input.label });
     menu.attach(trigger);
     trigger.focus();
     const scope = /** @type {{ __live?: LiveMenus }} */ (/** @type {unknown} */ (globalThis));
     const menus = scope.__live ?? {};
     menus[input.slot] = { menu, trigger };
     scope.__live = menus;
-  }, { slot, items, host: LIVE_HOSTS[slot], label: LIVE_LABELS[slot] });
+  }, { slot, shape, host: LIVE_HOSTS[slot], label: LIVE_LABELS[slot] });
 }
 
 /**
@@ -1289,7 +1291,7 @@ test.describe('живое меню', () => {
   test.use({ viewport: LIVE_VIEWPORT });
 
   test('у длинного уровня обе зоны на месте, у короткого скрыты', async ({ page }) => {
-    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await mountLiveMenu(page, 'first', { kind: 'long', prefix: 'Пункт' });
     await openLiveMenu(page, 'first', LIVE_POINTS.first);
     const longId = await liveLevelIdOf(page, 'first');
     const long = await readLive(page, longId);
@@ -1299,7 +1301,7 @@ test.describe('живое меню', () => {
     // поповеров нашлось бы два, а разбирать, чей это уровень, пришлось бы по
     // порядку показа. Заодно видно, что решение о прокрутке — per уровень, а не
     // per меню.
-    await mountLiveMenu(page, 'second', SHORT_ITEMS);
+    await mountLiveMenu(page, 'second', { kind: 'short', prefix: 'Пункт' });
     await openLiveMenu(page, 'second', LIVE_POINTS.second);
     const shortId = await liveLevelIdOf(page, 'second');
     const short = await readLive(page, shortId);
@@ -1323,7 +1325,7 @@ test.describe('живое меню', () => {
   });
 
   test('зоны гаснут по мере прокрутки в обоих направлениях', async ({ page }) => {
-    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await mountLiveMenu(page, 'first', { kind: 'long', prefix: 'Пункт' });
     await openLiveMenu(page, 'first', LIVE_POINTS.first);
     const levelId = await liveLevelIdOf(page, 'first');
 
@@ -1347,7 +1349,7 @@ test.describe('живое меню', () => {
   });
 
   test('наведение на нижнюю зону прокручивает список вниз до упора', async ({ page }) => {
-    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await mountLiveMenu(page, 'first', { kind: 'long', prefix: 'Пункт' });
     await openLiveMenu(page, 'first', LIVE_POINTS.first);
     const levelId = await liveLevelIdOf(page, 'first');
     const before = await readLive(page, levelId);
@@ -1373,7 +1375,7 @@ test.describe('живое меню', () => {
   });
 
   test('наведение на верхнюю зону прокручивает список вверх до упора', async ({ page }) => {
-    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await mountLiveMenu(page, 'first', { kind: 'long', prefix: 'Пункт' });
     await openLiveMenu(page, 'first', LIVE_POINTS.first);
     const levelId = await liveLevelIdOf(page, 'first');
     await placeLiveList(page, levelId, 'end');
@@ -1395,7 +1397,7 @@ test.describe('живое меню', () => {
   });
 
   test('наведение на заблокированную зону список не двигает', async ({ page }) => {
-    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await mountLiveMenu(page, 'first', { kind: 'long', prefix: 'Пункт' });
     await openLiveMenu(page, 'first', LIVE_POINTS.first);
     const levelId = await liveLevelIdOf(page, 'first');
     const before = await readLive(page, levelId);
@@ -1419,7 +1421,7 @@ test.describe('живое меню', () => {
   });
 
   test('колесо над списком прокручивает список и переносит состояние зон', async ({ page }) => {
-    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await mountLiveMenu(page, 'first', { kind: 'long', prefix: 'Пункт' });
     await openLiveMenu(page, 'first', LIVE_POINTS.first);
     const levelId = await liveLevelIdOf(page, 'first');
 
@@ -1442,7 +1444,7 @@ test.describe('живое меню', () => {
   });
 
   test('колесо над зоной прокручивает страницу и закрывает меню', async ({ page }) => {
-    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await mountLiveMenu(page, 'first', { kind: 'long', prefix: 'Пункт' });
     await openLiveMenu(page, 'first', LIVE_POINTS.first);
     const levelId = await liveLevelIdOf(page, 'first');
     const before = await page.evaluate(() => globalThis.scrollY);
@@ -1481,7 +1483,7 @@ test.describe('живое меню', () => {
   });
 
   test('вход в зону снимает выделение пункта', async ({ page }) => {
-    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await mountLiveMenu(page, 'first', { kind: 'long', prefix: 'Пункт' });
     await openLiveMenu(page, 'first', LIVE_POINTS.first);
     const levelId = await liveLevelIdOf(page, 'first');
 
@@ -1500,7 +1502,7 @@ test.describe('живое меню', () => {
   });
 
   test('стрелка вниз из зоны выбирает первый пункт, стрелка вверх — последний', async ({ page }) => {
-    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await mountLiveMenu(page, 'first', { kind: 'long', prefix: 'Пункт' });
     await openLiveMenu(page, 'first', LIVE_POINTS.first);
     const levelId = await liveLevelIdOf(page, 'first');
     // Верхняя зона у начала списка: она заблокирована, и наведение на неё не
@@ -1532,7 +1534,7 @@ test.describe('живое меню', () => {
   });
 
   test('End долистывает список и гасит нижнюю зону', async ({ page }) => {
-    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await mountLiveMenu(page, 'first', { kind: 'long', prefix: 'Пункт' });
     await openLiveMenu(page, 'first', LIVE_POINTS.first);
     const levelId = await liveLevelIdOf(page, 'first');
     const before = await readLive(page, levelId);
@@ -1554,7 +1556,7 @@ test.describe('живое меню', () => {
   });
 
   test('Escape посреди автоскролла останавливает цикл', async ({ page }) => {
-    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await mountLiveMenu(page, 'first', { kind: 'long', prefix: 'Пункт' });
     await openLiveMenu(page, 'first', LIVE_POINTS.first);
     const levelId = await liveLevelIdOf(page, 'first');
 
@@ -1581,9 +1583,9 @@ test.describe('живое меню', () => {
   });
 
   test('наведение на зону одного меню не двигает список другого', async ({ page }) => {
-    await mountLiveMenu(page, 'first', LONG_ITEMS);
+    await mountLiveMenu(page, 'first', { kind: 'long', prefix: 'Пункт' });
     await openLiveMenu(page, 'first', LIVE_POINTS.first);
-    await mountLiveMenu(page, 'second', longItems('Второй'));
+    await mountLiveMenu(page, 'second', { kind: 'long', prefix: 'Второй' });
     await openLiveMenu(page, 'second', LIVE_POINTS.second);
     const firstId = await liveLevelIdOf(page, 'first');
     const secondId = await liveLevelIdOf(page, 'second');
