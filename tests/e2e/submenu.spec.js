@@ -101,6 +101,10 @@ import { OPEN_GRACE_MS, SAFETY_PADDING, SUBMENU_OFFSET } from '../../src/constan
  *   `isEnabledAction` у пункта набора последнего `make`: автор выключает пункт
  *   между показами, и решение обязано дойти до уже построенного уровня.
  * @property {(enabled: boolean) => OwnerProbe} ownersOf
+ * @property {() => string[]} toggles переключения Top Layer по уровням в виде
+ *   «`id` уровня:`newState`». Снимок `toggle` различает «меню переехало» и «меню
+ *   на мгновение исчезло и вернулось»: конечное состояние у обоих одинаково, а
+ *   второе и есть мигание, невидимое ни в одном снимке разметки.
  */
 
 /**
@@ -445,6 +449,17 @@ test.beforeEach(async ({ page }) => {
       errors.push(String(event.message));
     });
 
+    // Журнал входа и выхода уровней из Top Layer. Слушатель в capture на документе,
+    // а не всплывающий: `toggle` адресован самому уровню, и журнал должен увидеть
+    // его независимо от того, всплывает ли событие.
+    /** @type {string[]} */
+    const toggles = [];
+    document.addEventListener('toggle', (event) => {
+      const target = event.target;
+      const row = 'newState' in event ? String(/** @type {{ newState: unknown }} */ (event).newState) : '?';
+      toggles.push(`${target instanceof Element ? target.id : '?'}:${row}`);
+    }, true);
+
     /** @type {InstanceType<typeof MyContext> | null} */
     let menu = null;
 
@@ -592,6 +607,9 @@ test.beforeEach(async ({ page }) => {
         // Предикат вешается на живом объекте набора: автор выключает пункт между
         // показами, и решение обязано дойти до уже построенного уровня.
         item.isEnabledAction = () => enabled;
+      },
+      toggles() {
+        return toggles.slice();
       },
       ownersOf(enabled) {
         // Рендер вызывается на тех же данных, что и меню: подменю непустое, и
@@ -842,9 +860,11 @@ test.describe('правило соседа', () => {
       expect(snapshot.openCount, `открыты корень и подменю в точке ${point.x}:${point.y}`).toBe(2);
       expect(snapshot.errors, 'ошибок страницы нет').toEqual([]);
     }
-    // Отметка роуминга после ухода курсора с дерева снимается — это отдельное
-    // правило, — но подменю от неё не зависит и остаётся на месте.
-    expect(activeLabels(await readMenu(page)), 'выделение сброшено уходом с дерева').toEqual([]);
+    // Уход курсора снимает отметку последнего открытого уровня, а не всей цепочки.
+    // Здесь отмечен только корень, и отметка на владельце переживает уход: она
+    // означает «подменю раскрыто», а не «курсор стоит на этом пункте». Подменю от
+    // неё не зависит и остаётся на месте.
+    expect(activeLabels(await readMenu(page)), 'у владельца отметка раскрытия осталась').toEqual(['Экспорт']);
     expect(expandedLabels(await readMenu(page)), 'владелец всё ещё развёрнут').toEqual(['Экспорт']);
   });
 
@@ -872,13 +892,21 @@ test.describe('правило соседа', () => {
     }, submenuId);
     expect(zoneVisible, 'нижняя зона показана').toBe('flex');
 
-    // Зона прокрутки — часть меню, и курсор на ней не выбирает ничего.
+    // Зона прокрутки — часть меню, и курсор на ней не выбирает ничего. Сначала
+    // на пункте подменю, чтобы сбросу на зоне было что снимать: зона принадлежит
+    // своему уровню, и отметка чужого уровня под сброс не попадает.
+    await hoverItem(page, 'Пункт 20');
+    const onItem = await readMenu(page);
+    expect(activeLabels(onItem).sort(), 'отмечены владелец и пункт подменю')
+      .toEqual(['Длинное', 'Пункт 20']);
     await hoverNode(page, `#${submenuId} .vc-scroll-zone-down`);
     await page.clock.fastForward(3000);
     const onZone = await readMenu(page);
     expect(isOpen(onZone, submenuId), 'подменю цело на зоне прокрутки').toBe(true);
-    // Выделение на зоне снимается — так и было, — и это не влияет на подменю.
-    expect(activeLabels(onZone), 'выделение на зоне снято').toEqual([]);
+    // Отметка пункта подменю снята: подсветкой горел бы тот, кого никто не выбирал.
+    // Отметка владельца на корне осталась — она означает «подменю раскрыто», и по
+    // ней видно, чьё подменю открыто. На подменю это не влияет.
+    expect(activeLabels(onZone), 'снята только отметка своего уровня').toEqual(['Длинное']);
 
     // Поля каркаса между зоной и рамкой: там нет ни пункта, ни зоны.
     const frame = await page.evaluate((id) => {
@@ -895,6 +923,55 @@ test.describe('правило соседа', () => {
     expect(isOpen(onFrame, submenuId), 'подменю цело на полях каркаса').toBe(true);
     expect(onFrame.openCount, 'открыты корень и подменю').toBe(2);
     expect(onFrame.errors, 'ошибок страницы нет').toEqual([]);
+  });
+
+  test('возврат курсора на владельца открытого подменю не мигает подменю', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const submenuId = /** @type {string} */ (await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Экспорт');
+    }));
+    expect(submenuId, 'адрес подменю «Экспорта» назван').not.toBeNull();
+
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    await hoverItem(page, 'PDF');
+    const opened = await readMenu(page);
+    expect(isOpen(opened, submenuId), 'подменю открыто').toBe(true);
+    expect(activeLabels(opened).sort(), 'отмечены владелец и пункт подменю')
+      .toEqual(['PDF', 'Экспорт']);
+    // Отметка с момента показа подменю: дальше она обязана не меняться. Журнал
+    // Top Layer, а не снимок разметки: мигание — это выход и вход подменю между
+    // двумя кадрами, и в снимке после него видно ровно то же самое состояние.
+    const before = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.toggles();
+    });
+
+    // Возврат на владельца собственного открытого подменю: состояние не меняется,
+    // поэтому планировать показ нечего. Без этого входа показ планировался бы
+    // заново, и через `OPEN_GRACE_MS` `#openSubmenu` обрезал бы цепочку до корня —
+    // то есть спрятал бы подменю, ради которого курсор и вернулся, и показал его
+    // снова.
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS * 2);
+    const after = await readMenu(page);
+    const toggles = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.toggles();
+    });
+    expect(toggles, 'уровень не уходил из Top Layer и не возвращался').toEqual(before);
+    expect(isOpen(after, submenuId), 'подменю то же самое и открыто').toBe(true);
+    expect(after.openCount, 'открыты корень и подменю').toBe(2);
+    // Подсветка внутри подменю переживает возврат на владельца: активным пунктом
+    // корня он так и остался, и его подменю — тоже.
+    expect(activeLabels(after).sort(), 'отметки не тронуты').toEqual(['PDF', 'Экспорт']);
+    // Фокус, наоборот, уходит владельцу: он встаёт на курсор, и без этого клавиши
+    // поехали бы по подменю, которое пользователь покинул.
+    expect(after.focusLabel, 'фокус на владельце').toBe('Экспорт');
+    expect(expandedLabels(after), 'владелец развёрнут').toEqual(['Экспорт']);
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
   });
 
   test('возврат курсора на владельца, чьё подменю закрыто Escape, открывает его заново', async ({ page }) => {

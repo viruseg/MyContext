@@ -818,10 +818,13 @@ test.beforeEach(async ({ page }) => {
         };
       }
       if (step.command === 'leave-tree') {
-        // Курсор ушёл с дерева меню: единственное место полного сброса. Фокус после
-        // него стоит на элементе корневого уровня, поэтому следующая клавиша
-        // адресуется меню, а не странице.
-        keyboard.clearActive(openedRoot());
+        // Курсор ушёл с дерева меню: единственное место сброса по уходу. Сбрасывается
+        // тот уровень, который стоит последним в цепочке, — уход курсора не трогает
+        // отметки владельцев раскрытых подменю над ним, — и фокус после сброса
+        // стоит на элементе этого уровня, поэтому следующая клавиша адресуется меню,
+        // а не странице.
+        const at = step.at ?? { path: [], index: 0 };
+        keyboard.clearActive(levelOf(at.path));
         return {
           command: step.command,
           key: null,
@@ -1401,7 +1404,7 @@ test.describe('роуминг-фокус', () => {
     expect(result.after.levels.root.focusLabel).toBe('Открыть');
   });
 
-  test('сброс выделения касается всех уровней, а не только корневого', async ({ page }) => {
+  test('сброс выделения касается последнего открытого уровня, а не всей цепочки', async ({ page }) => {
     const result = await runScenario(page, {
       set: 'tree',
       paths: { root: [], sub: [1] },
@@ -1412,28 +1415,30 @@ test.describe('роуминг-фокус', () => {
         // наведение на него вышло бы no-op, а отметку в подменю поставил бы шаг
         // клавиатуры, а не мышь.
         { command: 'hover', at: { path: [1], index: 1 } },
-        { command: 'leave-tree' },
+        { command: 'leave-tree', at: { path: [1], index: 0 } },
       ],
     });
 
     // Показ подменю отметку владельца не снимает, а наведение в подменю ставит свою
     // поверх отметки, оставшейся от `ArrowRight`: перед уходом курсора отмечены оба
-    // уровня, и сброс обязан снять обе отметки. Снимок `steps[2]` снят после
-    // наведения, то есть до ухода: у шага своя отметка снимается уже после того,
-    // как он отработал.
+    // уровня. Снимок `steps[2]` снят после наведения, то есть до ухода: у шага своя
+    // отметка снимается уже после того, как он отработал.
     expect(result.steps[2].levels.root.activeMarks, 'до сброса корень отмечен').toBe(1);
     expect(result.steps[2].levels.root.activeIndex, 'корень отмечен на владельце').toBe(1);
     expect(result.steps[2].levels.sub.activeMarks, 'до сброса подменю отмечено').toBe(1);
     // `focusLabel` у корня тут `null`, и это верно: фокус в подменю, и подписью пункта
     // корень не обзаведён. Отметку корня показывает `activeIndex`.
     expect(result.steps[2].levels.sub.focusLabel, 'подменю отмечено наведением').toBe('PNG');
-    expect(result.after.levels.root.activeMarks).toBe(0);
-    expect(result.after.levels.root.activeIndex).toBe(-1);
-    expect(result.after.levels.sub.activeMarks).toBe(0);
+    // Сброс достаёт последний уровень цепочки: его отметка означала «курсор стоит
+    // на этом пункте» и без курсора ничего не значит. Отметка владельца на корне
+    // остаётся — она означает «подменю раскрыто», и по ней видно путь.
+    expect(result.after.levels.sub.activeMarks, 'подменю без отметки').toBe(0);
     expect(result.after.levels.sub.activeIndex).toBe(-1);
     expect(result.after.levels.sub.tabStops).toBe(0);
-    // Фокус после сброса стоит на элементе корневого уровня, а не на глубине: показ
-    // подменю фокус не переносит, и возвращать его туда незачем.
+    expect(result.after.levels.root.activeMarks, 'корень остался отмечен на владельце').toBe(1);
+    expect(result.after.levels.root.activeIndex, 'отметка корня не тронута').toBe(1);
+    // Фокус встаёт на элемент сброшенного уровня: меню обязано отвечать на клавиши,
+    // а по цели события это уровень, где стоял фокус, — подменю, а не корень.
     expect(result.after.focus.label, 'фокус не на пункте').toBe(null);
     expect(result.after.focus.inMenu).toBe(true);
   });
