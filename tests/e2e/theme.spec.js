@@ -1142,7 +1142,7 @@ test.describe('прокручиваемый список', () => {
     expect(glyph, 'глиф зоны — срезанный угол').toContain('border-right: 1.5px solid currentColor');
     expect(glyph, 'глиф зоны — срезанный угол').toContain('border-bottom: 1.5px solid currentColor');
     expect(readRule(css, '.vc-scroll-zone-up::before'), 'верхняя зона смотрит вверх')
-      .toContain('transform: rotate(-90deg)');
+      .toContain('transform: rotate(225deg)');
     expect(readRule(css, '.vc-scroll-zone-down::before'), 'нижняя зона смотрит вниз')
       .toContain('transform: rotate(45deg)');
 
