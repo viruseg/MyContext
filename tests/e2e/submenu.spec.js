@@ -137,11 +137,6 @@ const PAGE_HTML = `<!doctype html>
 </html>`;
 
 const VIEWPORT = { width: 1000, height: 700 };
-/**
- * Узкий вьюпорт кейса о прижатом к краю подменю: подменю набора `wide` не помещается
- * в него ни справа, ни слева и прижимается к `padding`.
- */
-const NARROW_VIEWPORT = { width: 600, height: 700 };
 
 /**
  * Точки правого клика. Левая нужна, чтобы подменю помещалось справа, правая —
@@ -156,12 +151,6 @@ const OPEN_MIDDLE = { x: 260, y: 120 };
  * заново сюда.
  */
 const OPEN_FAR = { x: 620, y: 560 };
-/**
- * Точка правого клика для набора `wide`: по ней корень встаёт так, что его
- * подменю не помещается ни справа, ни слева. Рассчитана на вьюпорт 600 px, который
- * ставит сам кейс.
- */
-const OPEN_WIDE = { x: 300, y: 300 };
 /**
  * Мгновение, на котором замирают часы. Фиксированное, а не системное «сейчас»:
  * одинаковое во всех прогонах, и рядом с ним виден каждый прыжок времени.
@@ -425,20 +414,6 @@ test.beforeEach(async ({ page }) => {
       pair: [
         { labelAction: () => 'Первый', submenuAction: () => [{ labelAction: () => 'Под первым' }] },
         { labelAction: () => 'Второй', submenuAction: () => [{ labelAction: () => 'Под вторым' }] },
-      ],
-      // Владелец с подменю, которое не помещается ни справа, ни слева и прижимается
-      // к `padding`. Набор отдельный, и длинная подпись в нём нужна ровно для этого:
-      // предмет кейса — геометрия показа, а не состав пунктов.
-      wide: [
-        {
-          labelAction: () => 'Край',
-          submenuAction: () => [
-            { labelAction: () => 'Первый' },
-            { labelAction: () => 'Второй' },
-            { labelAction: () => 'Третий' },
-            { labelAction: () => 'Дальний пункт подменю, прижатого к краю вьюпорта' },
-          ],
-        },
       ],
       // Обе невыбираемые строки на одном уровне: разделитель и отключённый пункт.
       // В `tree` отключённый пункт есть, а разделителя нет, и наоборот; кейс о
@@ -704,9 +679,9 @@ test.describe('правило соседа', () => {
     expect(innerIds.download, 'адрес подменю «Скачать» назван').not.toBeNull();
 
     // Цепочка из трёх уровней, чтобы было видно, что уносится вся ветка: переход
-    // на соседа внутри подменю «Экспорта» закрывает подменье «PNG» и открывает
-    // подменю «Скачать», а сам уровень «Экспорта» остаётся — он не подменю
-    // «Экспорта», а родитель перехода.
+    // на соседа внутри подменю «Экспорта» закрывает подменю «PNG» и открывает
+    // подменю «Скачать», а уровень «Экспорта» остаётся — он не закрываемый, а
+    // родитель перехода.
     await hoverItem(page, 'PNG');
     await page.clock.fastForward(OPEN_GRACE_MS);
     expect((await readMenu(page)).openCount, 'открыты корень и два подменю').toBe(3);
@@ -795,6 +770,24 @@ test.describe('правило соседа', () => {
     // Контроль премиссы: отключённый владелец не помечается развёрнутым.
     expect(itemOf(opened, 'Первый').expanded, 'отметки развёрнутости нет').toBeNull();
 
+    // Премисса наведения: `pointermove` по отключённому пункту доходит до уровня и
+    // не отмечает его, как и любой другой невыбираемый, — значит точка действительно
+    // лежит на пункте, а не пролетела мимо. Без этой проверки кейс прошёл бы и на
+    // уровне, где наведение не достаёт до пункта вовсе, и «не закрыло» ничего бы не
+    // значило.
+    const landed = await page.evaluate(() => {
+      const item = Array.from(document.querySelectorAll('.vc-item')).find((node) => {
+        return node.querySelector('.vc-label')?.textContent === 'Первый';
+      });
+      if (item === undefined) {
+        throw new Error('пункта «Первый» нет в разметке');
+      }
+      const rect = item.getBoundingClientRect();
+      return { active: item.hasAttribute('data-active'), height: rect.height };
+    });
+    expect(landed.height, 'пункт виден и имеет высоту').toBeGreaterThan(1);
+    expect(landed.active, 'отключённый пункт не отмечен роумингом').toBe(false);
+
     await hoverItem(page, 'Первый');
     // Втрое больше прежнего срока закрытия: таймера нет, и ждать тут нечего.
     await page.clock.fastForward(3000);
@@ -822,11 +815,13 @@ test.describe('правило соседа', () => {
     expect(opened.openCount, 'открыты корень и подменю').toBe(2);
     expect(activeLabels(opened), 'владелец отмечен').toEqual(['Экспорт']);
 
-    // Четыре точки по очереди, все — вне меню и все без намерения что-либо
-    // выбрать: пустота страницы под меню, пустота страницы над ним, угол вьюпорта
-    // в стороне от обоих уровней и сам привязанный контейнер. Ни одна из них не
-    // должна увести подменю: единственное событие, которое его закрывает, —
-    // вход в соседний пункт того же уровня.
+    // Три точки по очереди, все — вне меню и все без намерения что-либо
+    // выбрать: пустота страницы под меню, пустота страницы над ним и угол вьюпорта
+    // в стороне от обоих уровней. Ни одна из них не должна увести подменю:
+    // единственное событие, которое его закрывает, — вход в соседний пункт того же
+    // уровня. Привязанный контейнер отдельной точкой не проверяется: `#surface`
+    // занимает весь вьюпорт, и любая из трёх точек лежит на нём — покрытие есть,
+    // просто отдельным наведением оно не отличить от прочих.
     const voidBelow = await page.evaluate((id) => {
       const level = document.getElementById(id);
       if (level === null) {
@@ -1436,6 +1431,57 @@ test.describe('показ подменю', () => {
     const after = await readMenu(page);
     expect(after.openCount, 'всё закрыто').toBe(0);
     expect(expandedLabels(after), 'отметок развёрнутости не осталось').toEqual([]);
+  });
+
+  test('Escape убирает уровень вместе со всем, что открыто из него глубже', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const ids = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown } */ (globalThis));
+      return { export: scope.__mc.submenuIdOf('Экспорт') };
+    });
+    expect(ids.export, 'адрес подменю «Экспорта» назван').not.toBeNull();
+
+    // Цепочка из четырёх уровней, причём фокус ведёт мышь, а не клавиатура: показ
+    // подменю мышью фокус из родительского уровня не уводит, и последнее наведение
+    // оставляет фокус в самом глубоком показанном уровне.
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const inner = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown } */ (globalThis));
+      return { png: scope.__mc.submenuIdOf('PNG') };
+    });
+    expect(inner.png, 'адрес подменю «PNG» назван').not.toBeNull();
+    await hoverItem(page, 'PNG');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const deep = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown } */ (globalThis));
+      return { one: scope.__mc.submenuIdOf('Один') };
+    });
+    expect(deep.one, 'адрес подменю «Один» назван').not.toBeNull();
+    await hoverItem(page, 'Один');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const opened = await readMenu(page);
+    expect(opened.openCount, 'открыты четыре уровня').toBe(4);
+    // Фокус на пункте «Один» — то есть в уровне «PNG», пока его собственное подменю
+    // уже показано. Показ мышью фокус глубже не уводит, и это ровно то состояние,
+    // в котором «Escape» закрывает не самый глубокий показанный уровень.
+    expect(opened.focusLabel, 'фокус в уровне «PNG» при показанном «Один»').toBe('Один');
+
+    // `Escape` закрывает уровень, где стоит фокус, — «PNG», — и обязан унести всё,
+    // что открыто из него: подменю «Один» глубже и иначе осталось бы висеть поверх
+    // пункта, который уже не выбран. Раньше его подбирал уход курсора, и состояние
+    // было латентным; закрытия по курсору больше нет, и висящий уровень не закрыли
+    // бы ни `Escape` (фокус на нём не стоит), ни переходы по соседям (его уровня
+    // нет в цепочке, а значит нет и его владельца).
+    await page.keyboard.press('Escape');
+    const after = await readMenu(page);
+    expect(isOpen(after, /** @type {string} */ (deep.one)), 'подменю «Один» ушло вместе с «PNG»').toBe(false);
+    expect(isOpen(after, /** @type {string} */ (inner.png)), 'подменю «PNG» закрыто').toBe(false);
+    expect(isOpen(after, /** @type {string} */ (ids.export)), 'подменю «Экспорта» осталось').toBe(true);
+    expect(after.openCount, 'остались корень и подменю «Экспорта»').toBe(2);
+    expect(expandedLabels(after), 'развёрнут только «Экспорт»').toEqual(['Экспорт']);
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
   });
 
   test('отключённый пункт-владелец не открывает подменю ни одним способом', async ({ page }) => {
