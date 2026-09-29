@@ -205,3 +205,26 @@ test.describe('валидация опции autoHideDistance', () => {
     expect(() => menuWithOptions({ autoHideDistance: 0.5 })).not.toThrow();
   });
 });
+
+test.describe('валидация опции pressAndHold', () => {
+  test('неизвестное значение отклоняется', () => {
+    // Негодное значение молча превратилось бы в «удержание не настроено», то
+    // есть в прежнее поведение: автор задал бы жест, а меню открывалось бы по
+    // правому клику, и винить было бы нечего. Как и с `theme`, значение должно
+    // называть кнопку, а не «истину».
+    expect(() => menuWithOptions({ pressAndHold: true })).toThrow(TypeError);
+    expect(() => menuWithOptions({ pressAndHold: true })).toThrow('options.pressAndHold');
+    expect(() => menuWithOptions({ pressAndHold: 'up' })).toThrow('options.pressAndHold');
+    expect(() => menuWithOptions({ pressAndHold: 0 })).toThrow('options.pressAndHold');
+    expect(() => menuWithOptions({ pressAndHold: null })).toThrow('options.pressAndHold');
+  });
+
+  test('все кнопки и выключенное состояние принимаются', () => {
+    // `'none'` — это старое поведение, а не отсутствие опции: значение в списке
+    // явно, и автор может вернуть меню к правому клику одним полем.
+    for (const mode of ['none', 'left', 'right', 'middle', 'any']) {
+      expect(() => menuWithOptions({ pressAndHold: mode })).not.toThrow();
+    }
+    expect(() => menuWithOptions({})).not.toThrow();
+  });
+});

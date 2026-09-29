@@ -1,4 +1,4 @@
-import { DEFAULT_ANIMATION_DURATION, DEFAULT_AUTO_HIDE_DISTANCE, DEFAULT_MENU_LABEL } from './constants.js';
+import { DEFAULT_ANIMATION_DURATION, DEFAULT_AUTO_HIDE_DISTANCE, DEFAULT_MENU_LABEL, DEFAULT_PRESS_AND_HOLD, PRESS_AND_HOLD_MODES } from './constants.js';
 import { nearestRectDistance } from './geometry.js';
 import { createHoverIntent } from './hoverIntent.js';
 import { createKeyboard } from './keyboard.js';
@@ -20,6 +20,15 @@ import { assertItems } from './renderer.js';
  * @typedef {import('./keyboard.js').KeyboardController} KeyboardController
  * @typedef {import('./keyboard.js').KeyboardHost} KeyboardHost
  * @typedef {import('./hoverIntent.js').HoverIntentController} HoverIntentController
+ * @typedef {import('./constants.js').PressAndHoldMode} PressAndHoldMode
+ */
+
+/**
+ * Вооружённое удержание: чем именно нажато и каким указателем.
+ *
+ * @typedef {object} ArmedPress
+ * @property {number} button номер кнопки, которой вооружён жест.
+ * @property {number} pointerId указатель, которым она нажата.
  */
 
 /**
@@ -40,6 +49,14 @@ import { assertItems } from './renderer.js';
  *   цепочки, то есть уход в сторону закрывает меню, а уход в сторону открытого
  *   подменю — нет. Требуется конечное неотрицательное число: `NaN` в сравнении
  *   ложен всегда, и правило молча превратилось бы в «не скрываться никогда».
+ * @property {PressAndHoldMode} [pressAndHold] чем меню открывается и когда
+ *   закрывается, `DEFAULT_PRESS_AND_HOLD` по умолчанию. `'none'` — прежнее
+ *   поведение: показ по правому клику, закрытие как угодно. Любое другое значение
+ *   переводит меню на жизненный цикл удержания: нажатие показывает его в точке
+ *   нажатия, отпускание закрывает, и отпускание над доступным пунктом исполняет его
+ *   действие. Значение называет кнопку, а не включает жест, — см.
+ *   [`pressAndHold`](README.md#pressandhold). Действует всё время жизни меню, и
+ *   программный `open()` под ним не меняется.
  */
 
 const ITEM_SELECTOR = '.vc-item';
@@ -49,9 +66,49 @@ const ITEMS_PATH = 'items';
 const CHAIN_ROOT_INDEX = 0;
 const PRIMARY_MOUSE_BUTTON = 0;
 const MIDDLE_MOUSE_BUTTON = 1;
+const RIGHT_MOUSE_BUTTON = 2;
 const DESTROYED_MESSAGE = 'MyContext: экземпляр уничтожен';
 const POPOVER_REQUIREMENT =
   'MyContext: браузер не поддерживает Popover API — нет HTMLElement.prototype.showPopover';
+
+/**
+ * Название режима удержания.
+ *
+ * @param {unknown} value
+ * @returns {value is PressAndHoldMode}
+ */
+function isPressAndHoldMode(value) {
+  // `some` со сравнением, а не `includes`: проверяется значение, пришедшее от
+  // автора и типизированное как `unknown`, а `includes` требует уже готового
+  // элемента списка и такой аргумент отверг бы на уровне типов.
+  return PRESS_AND_HOLD_MODES.some((mode) => mode === value);
+}
+
+/**
+ * Номер кнопки, которую называет режим `pressAndHold`, либо `null`, если он
+ * кнопку не называет.
+ *
+ * `'none'` — не удержание вовсе, `'any'` — любая кнопка, и оба отвечают `null`:
+ * решение о том, вооружать ли жест, принимает вызывающий, а не эта функция. Смешивать
+ * два ответа в один тип значило бы вязать проверку `=== PRIMARY_MOUSE_BUTTON` с
+ * вопросом «выключено ли», и каждый второй вызов получал бы проверку на два
+ * значения.
+ *
+ * @param {PressAndHoldMode} mode
+ * @returns {number | null}
+ */
+function pressButtonOf(mode) {
+  switch (mode) {
+    case 'left':
+      return PRIMARY_MOUSE_BUTTON;
+    case 'right':
+      return RIGHT_MOUSE_BUTTON;
+    case 'middle':
+      return MIDDLE_MOUSE_BUTTON;
+    default:
+      return null;
+  }
+}
 
 /**
  * @param {unknown} value
@@ -432,6 +489,19 @@ export class MyContext {
   #destroyed = false;
 
   /**
+   * Вооружённое удержание: кнопка нажата, меню открыто, и отпускание разрешит этот
+   * жест. `null` — либо режим выключен, либо жест уже разрешён, либо меню закрыто
+   * раньше, чем кнопку отпустили.
+   *
+   * Снимается в `#closeMenu`, а не в каждом обработчике закрытия: `Escape`,
+   * скролл, `resize`, уход вкладки, потеря фокуса и автоскрытие обязаны гасить
+   * жест одинаково, а перечислять их здесь означало бы со временем забыть один.
+   *
+   * @type {ArmedPress | null}
+   */
+  #armedPress = null;
+
+  /**
    * Единственный обработчик активации: один на элемент уровня, ни одного на
    * пункте. Ссылка на стрелку неизменна, поэтому `removeEventListener` снимает
    * именно тот обработчик, который был навешан.
@@ -464,7 +534,7 @@ export class MyContext {
     // Ключ есть у пункта и отсутствует у разделителя, а доступность отсекла и его,
     // и отключённый пункт: клик по отключённому не действие, и закрывать им меню
     // нечем.
-    if (rendered === null || rendered.key === null) {
+    if (rendered === null) {
       return;
     }
     // Владелец непустого подменю по клику открывает подменю, а своё действие не
@@ -475,6 +545,27 @@ export class MyContext {
       // Открытие подменю — тот же путь, что и по наведению: одно тело, один
       // `ensureLevel` и одно место, где показанный уровень отдаётся движку.
       this.#showSubmenuFor(rendered);
+      return;
+    }
+    this.#runItemAction(rendered, event);
+  };
+
+  /**
+   * Действие пункта и закрытие меню после него — одно тело на клик и на отпускание
+   * кнопки. Разделены они по одной причине: обе точки обязаны вести себя одинаково,
+   * а отличаются они только тем, что лежит под курсором, — то есть тем, что уже
+   * разобрано до вызова.
+   *
+   * @param {RenderedItem} rendered доступный пункт без подменю.
+   * @param {MouseEvent | PointerEvent} event событие, которым действие вызвано.
+   * @returns {void}
+   */
+  #runItemAction(rendered, event) {
+    // Ключ есть у пункта и отсутствует у разделителя. Проверка стоит здесь, а не в
+    // вызывающих, потому что только здесь ключ читается: доступность уже отсекла
+    // разделитель и отключённый пункт, и оставлена как защита от будущего
+    // рендерера — пункт без ключа нечем заменить в карте действий.
+    if (rendered.key === null) {
       return;
     }
     const item = this.#actions.get(rendered.key);
@@ -503,7 +594,7 @@ export class MyContext {
         this.close();
       }
     }
-  };
+  }
 
   /**
    * @type {(event: KeyboardEvent) => void}
@@ -703,6 +794,16 @@ export class MyContext {
   };
 
   /**
+   * `contextmenu` на привязанном контейнере.
+   *
+   * Системное меню браузера гасится всегда, в том числе под `pressAndHold`: иначе
+   * при `right` или `any` отпускание правой кнопкой поднимало бы его поверх
+   * только что показанного меню.
+   *
+   * Показ же зовёт только под `'none'`. Удержание — единственный способ открыть
+   * меню при включённой опции, и второй путь открыл бы его снова в момент
+   * отпускания, то есть действие отработало бы, а следом вернулось бы пустое меню.
+   *
    * @type {(event: MouseEvent) => void}
    */
   #onContextMenu = (event) => {
@@ -710,6 +811,9 @@ export class MyContext {
       return;
     }
     event.preventDefault();
+    if (this.#options.pressAndHold !== 'none') {
+      return;
+    }
     this.open({ x: event.clientX, y: event.clientY });
   };
 
@@ -829,9 +933,25 @@ export class MyContext {
   }
 
   /**
-   * Левый клик вне дерева меню, контейнер включая: клик по странице — это уход из
+   * Нажатие кнопкой на странице. Три решения принимаются здесь и в этом порядке.
+   *
+   * **Вторая пресса во время удержания закрывает меню, и только его.** Кнопку той
+   * же дважды без отпускания не нажать, зато можно нажать другую — и она должна
+   * закрыть меню независимо от того, где пришлась: под рукой может оказаться и
+   * страница, и само меню. Нажатие, вооружившее жест, и нажатие, его прервавшее,
+   * разбираются здесь же, а не в контейнере: разнеси их по двум обработчикам — и
+   * capture-фаза документа отработает раньше, так что прерывание успеет закрыть
+   * меню, а та же пресса затем откроет его заново в той же точке.
+   *
+   * **Нажатие, вооружающее жест, гасит событие по умолчанию.** Иначе протяжка
+   * курсора к пункту выделяет текст под ним, а на перетаскиваемом содержимом ещё и
+   * начинает нативный drag мимо меню. Фокусу вреда нет: в режиме удержания нажатие
+   * по контейнеру всё равно открывает меню и уводит фокус в него, так что подавление
+   * не отнимает у страницы ничего, чего нажатие и не отдавало.
+   *
+   * **Левый клик вне дерева меню, контейнер включая: клик по странице — это уход из
    * меню, и оставлять его висеть после клика по своему же контейнеру значило бы
-   * требовать от пользователя правого клика для закрытия.
+   * требовать от пользователя правого клика для закрытия.**
    *
    * Контейнер исключался из зоны закрытия ради правого клика: тот приходит
    * `pointerdown` раньше `contextmenu`, и меню сперва снесло бы себя, а потом
@@ -842,13 +962,136 @@ export class MyContext {
    * @type {(event: PointerEvent) => void}
    */
   #onGlobalPointerDown = (event) => {
-    if (this.#destroyed || event.button !== PRIMARY_MOUSE_BUTTON) {
+    if (this.#destroyed) {
+      return;
+    }
+    if (this.#armedPress !== null) {
+      this.#closeMenu({ returnFocus: false });
+      return;
+    }
+    if (this.#armsPress(event)) {
+      event.preventDefault();
+      this.#armedPress = { button: event.button, pointerId: event.pointerId };
+      this.open({ x: event.clientX, y: event.clientY });
+      return;
+    }
+    if (event.button !== PRIMARY_MOUSE_BUTTON) {
       return;
     }
     if (this.#isInsideMenu(event.target)) {
       return;
     }
     this.#closeMenu({ returnFocus: false });
+  };
+
+  /**
+   * Вооружает ли это нажатие жест удержания.
+   *
+   * Три условия обязательны вместе. Кнопка должна быть той, что названа опцией, —
+   * при `'any'` подходит любая. Нажатие должно прийтись на привязанный контейнер:
+   * вне него привязки нет, и меню нечего показывать. Нажатие не должно прийтись на
+   * само меню: показывать новое меню поверх старого по нажатию внутри старого —
+   * это рецикл, а жест нажатия внутри уже открытого меню должен быть проигнорирован.
+   *
+   * @param {PointerEvent} event
+   * @returns {boolean}
+   */
+  #armsPress(event) {
+    const mode = this.#options.pressAndHold;
+    if (mode === 'none' || this.#isInsideMenu(event.target)) {
+      return false;
+    }
+    const button = pressButtonOf(mode);
+    if (button !== null && event.button !== button) {
+      return false;
+    }
+    return this.#isInsideAnchor(event.target);
+  }
+
+  /**
+   * Отпускание кнопки и отмена нажатия — два конца одного жеста.
+   *
+   * `pointerup` приходит к дереву меню раньше `click`, и этим пользуется разбор:
+   * `click` по пункту при отпускании над ним не возникнет вовсе, потому что
+   * нажатие было на странице, а не на пункте, — и `#onLevelClick` остаётся путём
+   * для меню, показанного правым кликом.
+   *
+   * `pointercancel` разбирается тем же кодом и по той же причине: нажатие, отменённое
+   * браузером, не приносит `pointerup`, а меню без жеста повисло бы до следующего
+   * касания.
+   *
+   * Чужой указатель и чужая кнопка игнорируются: пока кнопка нажата, отпустить может
+   * и второй палец, и это не конец жеста.
+   *
+   * @type {(event: PointerEvent) => void}
+   */
+  #onGlobalPointerRelease = (event) => {
+    if (this.#destroyed || this.#armedPress === null) {
+      return;
+    }
+    const press = this.#armedPress;
+    if (press.pointerId !== event.pointerId || press.button !== event.button) {
+      return;
+    }
+    // Снятие здесь, а не в `#closeMenu`: путь «меню уже закрыто» тоже обязан
+    // разоружить жест, иначе отпускание без меню вооружило бы следующее нажатие
+    // не тем же, а уже не состоявшимся.
+    this.#closeMenu({ returnFocus: false });
+    if (!this.#isInsideMenu(event.target)) {
+      return;
+    }
+    this.#activateUnderPointer(event);
+  };
+
+  /**
+   * Что лежит под курсором в момент отпускания.
+   *
+   * Пункт ищется от цели события, а не от активного пункта уровня: отметка могла
+   * остаться от предыдущего наведения, и по ней отпускание исполнило бы не то
+   * действие, над которым палец и стоит.
+   *
+   * Отличаются три случая, и различать их нужно именно здесь: доступный пункт
+   * исполняется, а всё остальное — разделитель, отключённый пункт, поля каркаса,
+   * зона прокрутки, владелец подменю — закрывает меню молча. Владелец отнесён к
+   * молчащим не потому, что нечего делать, а потому, что его действие на отпускании
+   * не вызывается: подменю на отпускании не раскрывается, как и на клике владелец
+   * не зовёт своё.
+   *
+   * @param {PointerEvent} event отпускание, цель которого — внутри меню.
+   * @returns {void}
+   */
+  #activateUnderPointer(event) {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const element = target.closest(ITEM_SELECTOR);
+    const levelElement = target.closest(MENU_SELECTOR);
+    if (element === null || !(levelElement instanceof HTMLElement)) {
+      return;
+    }
+    const entry = this.#levels.get(levelElement);
+    if (entry === undefined) {
+      return;
+    }
+    const rendered = this.#focusableIn(entry, element);
+    if (rendered === null || rendered.hasSubmenu) {
+      return;
+    }
+    this.#runItemAction(rendered, event);
+  }
+
+  /**
+   * Нативный перетаскиваемый объект под вооружённым жестом. Меню в этот момент
+   * показано, и тащить мимо него страницу незачем: жест идёт по меню.
+   *
+   * @type {(event: Event) => void}
+   */
+  #onGlobalDragStart = (event) => {
+    if (this.#destroyed || this.#armedPress === null) {
+      return;
+    }
+    event.preventDefault();
   };
 
   /**
@@ -1061,6 +1304,7 @@ export class MyContext {
       animationDuration: options.animationDuration ?? DEFAULT_ANIMATION_DURATION,
       label: options.label ?? DEFAULT_MENU_LABEL,
       autoHideDistance: options.autoHideDistance ?? DEFAULT_AUTO_HIDE_DISTANCE,
+      pressAndHold: options.pressAndHold ?? DEFAULT_PRESS_AND_HOLD,
     };
     this.#actions = new Map();
     this.#levels = new Map();
@@ -1329,6 +1573,10 @@ export class MyContext {
    */
   #closeMenu({ returnFocus }) {
     this.#cancelReopen();
+    // Жест снимается здесь, а не в каждом вызывающем: закрытие и вооружённое
+    // удержание — две стороны одного состояния меню, и закрытие обязано гасить
+    // жест всегда, включая автоскрытие и потерю фокуса окна.
+    this.#armedPress = null;
     this.#layer.hideAll();
     this.#forgetPlacement();
     if (returnFocus) {
@@ -1850,6 +2098,21 @@ export class MyContext {
         passive: true,
       },
     ];
+    // Отпускание, отмена нажатия и начало перетаскивания относятся только к
+    // удержанию: при выключенной опции жеста не существует, и три обработчика вхолостую
+    // смотрели бы на страницу. Назначение выбирается конструктором и не меняется,
+    // так что условие одно и то же при каждом `attach`.
+    if (this.#options.pressAndHold !== 'none') {
+      handlers.push(
+        { target: document, type: 'pointerup', handler: asListener(this.#onGlobalPointerRelease) },
+        {
+          target: document,
+          type: 'pointercancel',
+          handler: asListener(this.#onGlobalPointerRelease),
+        },
+        { target: document, type: 'dragstart', handler: asListener(this.#onGlobalDragStart) },
+      );
+    }
     for (const entry of handlers) {
       // `AddEventListenerOptions`, а не `EventListenerOptions`: у второго нет поля
       // `passive`, и подписка без `preventDefault` через него не выражается.
@@ -1901,7 +2164,7 @@ export class MyContext {
     if (!isRecord(options)) {
       throw new TypeError(`${path}: опции должны быть объектом`);
     }
-    const { theme, animationDuration, label, autoHideDistance } = options;
+    const { theme, animationDuration, label, autoHideDistance, pressAndHold } = options;
     if (theme !== undefined && theme !== 'auto' && theme !== 'light' && theme !== 'dark') {
       throw new TypeError(
         `${path}.theme: неизвестная тема «${String(theme)}», ожидается auto, light или dark`,
@@ -1939,6 +2202,17 @@ export class MyContext {
       if (autoHideDistance < 0) {
         throw new TypeError(`${path}.autoHideDistance: расстояние не может быть отрицательным`);
       }
+    }
+    // Кнопка удержания проверяется по списку значений, а не по форме: любое
+    // негодное значение молча превратилось бы в «удержание не настроено», то
+    // есть в прежнее поведение, и автор задал бы жест, а меню открывалось бы по
+    // правому клику. Имя кнопки читается из сообщения, поэтому список — источник
+    // правды, а не текст рядом с ним.
+    if (pressAndHold !== undefined && !isPressAndHoldMode(pressAndHold)) {
+      throw new TypeError(
+        `${path}.pressAndHold: неизвестный режим «${String(pressAndHold)}», `
+        + `ожидается ${PRESS_AND_HOLD_MODES.join(', ')}`,
+      );
     }
   }
 
