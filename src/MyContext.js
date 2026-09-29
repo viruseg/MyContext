@@ -816,6 +816,50 @@ export class MyContext {
   };
 
   /**
+   * Потеря фокуса окном. Меню показывают для текущего окна, и уход фокуса из него —
+   * такой же уход из меню, как клик по странице или прокрутка: оставленное поверх
+   * чужого окна меню пользователю не нужно, а вернуть фокус некуда и незачем.
+   *
+   * Возврат фокуса запрещён по существу, а не по осторожности: фокус ушёл из
+   * документа по воле браузера, и он либо в другом документе, либо на строке
+   * браузера. Отбирать его обратно значило бы вырвать его у чужого окна на
+   * каждом переключении.
+   *
+   * **Проверка `hasFocus` обязательна, и без неё обработчик врёт.** `blur` приходит
+   * не только когда пользователь ушёл: окно теряет фокус и возвращает его внутри
+   * одного щелчка по самой странице, а под управлением браузера это происходит на
+   * каждом вводе. Уже в таком случае документ снова в фокусе, и `hasFocus` на
+   * `blur` истинно — в отличие от ухода к строке браузера или в другое приложение,
+   * где он ложен. Без проверки меню закрывалось бы на каждом щелчке внутри
+   * страницы, то есть перестало бы открываться вовсе.
+   *
+   * @type {() => void}
+   */
+  #onGlobalBlur = () => {
+    if (this.#destroyed || document.hasFocus()) {
+      return;
+    }
+    this.#closeMenu({ returnFocus: false });
+  };
+
+  /**
+   * Уход вкладки в фон. Событие приходит и при возврате, поэтому состояние читается:
+   * на `hidden === false` страница снова видна, и меню трогать нечего.
+   *
+   * Двойного закрытия при `blur` плюс `visibilitychange` не будет: `#closeMenu`
+   * идемпотентна — `layer.hideAll()` на закрытых уровнях безопасна, а
+   * `#forgetPlacement()` снимает висящие задачи и обнуляет цепочку.
+   *
+   * @type {() => void}
+   */
+  #onVisibilityChange = () => {
+    if (this.#destroyed || !document.hidden) {
+      return;
+    }
+    this.#closeMenu({ returnFocus: false });
+  };
+
+  /**
    * @param {EventTarget | null} target
    * @returns {boolean} цель внутри элемента любого уровня меню.
    */
@@ -1629,6 +1673,17 @@ export class MyContext {
       // расхождение по `passive` подписку не оставляет.
       { target: window, type: 'scroll', handler: asListener(this.#onGlobalScroll), passive: true },
       { target: window, type: 'resize', handler: asListener(this.#onGlobalResize) },
+      // Потеря фокуса окном и уход вкладки в фон закрывают меню по тому же правилу,
+      // что скролл и `resize`: без возврата фокуса, потому что фокус ушёл из
+      // документа по воле браузера. `passive: true` обязателен и здесь — обработчики
+      // не зовут `preventDefault`, и браузеру незачем их ждать.
+      { target: window, type: 'blur', handler: asListener(this.#onGlobalBlur), passive: true },
+      {
+        target: document,
+        type: 'visibilitychange',
+        handler: asListener(this.#onVisibilityChange),
+        passive: true,
+      },
     ];
     for (const entry of handlers) {
       // `AddEventListenerOptions`, а не `EventListenerOptions`: у второго нет поля

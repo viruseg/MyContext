@@ -887,7 +887,11 @@ test.describe('правило соседа', () => {
 
     // Поля каркаса между зоной и рамкой: там нет ни пункта, ни зоны.
     const frame = await page.evaluate((id) => {
-      const rect = document.getElementById(id).getBoundingClientRect();
+      const element = document.getElementById(id);
+      if (element === null) {
+        throw new Error('подменю показано, но узла нет');
+      }
+      const rect = element.getBoundingClientRect();
       return { x: rect.left + 2, y: rect.top + rect.height - 3 };
     }, submenuId);
     await moveTo(page, frame);

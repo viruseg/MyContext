@@ -1876,4 +1876,88 @@ test.describe('жизненный цикл MyContext', () => {
     expect(after.levels[0].rect.top, 'меню в третьей точке по вертикали')
       .toBeCloseTo(450 + CURSOR_OFFSET, 2);
   });
+  test('blur окна при уже возвращённом фокусе меню не закрывает', async ({ page }) => {
+    // Окно теряет фокус и возвращает его внутри одного щелчка по самой странице, и
+    // браузер под управлением делает это на каждом вводе. Меню обязано отличать такой
+    // `blur` от ухода в другое приложение: иначе оно закрывалось бы на каждом щелчке
+    // внутри страницы, то есть не открывалось бы вовсе и правый клик по контейнеру
+    // не работал бы ни разу. Различает их `document.hasFocus()`: при возвращённом
+    // фокусе он истинен, а после ухода к строке браузера или в другое приложение —
+    // ложен.
+    await makeMenu(page, 'nested', 'workspace');
+    await rightClickAndRead(page);
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
+    expect((await readMenu(page)).openCount, 'открыты корень и подменю').toBe(2);
+    // Премисса: документ в фокусе, иначе проверялось бы не различение, а уход.
+    expect(await page.evaluate(() => document.hasFocus()), 'документ в фокусе').toBe(true);
+
+    await page.evaluate(() => {
+      globalThis.dispatchEvent(new Event('blur'));
+    });
+
+    const after = await readMenu(page);
+    expect(after.openCount, 'меню осталось открытым').toBe(2);
+    expect(after.errors, 'страница без ошибок').toEqual([]);
+  });
+  test('visibilitychange при уходе вкладки в фон закрывает меню, при возврате — нет', async ({ page }) => {
+    await makeMenu(page, 'nested', 'workspace');
+    await rightClickAndRead(page);
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
+    expect((await readMenu(page)).openCount, 'открыты корень и подменю').toBe(2);
+
+    // `hidden` — только для чтения, и подменить его можно `defineProperty`. Событие
+    // приходит и при возвращении вкладки, поэтому обработчик обязан читать
+    // состояние: закрывать на `visible` было бы закрытием на входе.
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+
+    const hidden = await readMenu(page);
+    expect(hidden.openCount, 'меню закрыто').toBe(0);
+    // Фокус не на показанном уровне: скрытый поповер остаётся в разметке, и проверка
+    // на «внутри дерева» ничего бы не сказала.
+    const levelIds = hidden.levels.map((level) => level.id);
+    expect(levelIds, 'фокус не на уровне меню').not.toContain(hidden.focusOwnerId);
+    expect(hidden.errors, 'страница без ошибок').toEqual([]);
+
+    // Возврат на ту же вкладку меню не воскрешает: закрытие состоялось, и
+    // воскресить его может только явный показ.
+    await rightClickAndRead(page);
+    expect((await readMenu(page)).openCount, 'меню открыто заново').toBe(1);
+
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    // Пауза вместо чтения сразу: закрытие по `hidden` отложенным не бывает, и
+    // ожидание лишь доказывает, что обработчик на `visible` молчит.
+    await page.waitForTimeout(200);
+
+    const visible = await readMenu(page);
+    expect(visible.openCount, 'возврат вкладки меню не тронул').toBe(1);
+    expect(visible.errors, 'страница без ошибок').toEqual([]);
+  });
+
+  test('blur при непривязанном экземпляре не приводит к ошибке', async ({ page }) => {
+    // Глобальные слушатели заводятся в `attach`, и без привязки их нет вовсе.
+    // Кейс фиксирует, что добавление `blur` в таблицу слушателей не вынесло
+    // подписку куда-то ещё: обработчик закрытия на закрытом экземпляре молчал бы
+    // и без `#destroyed`, а вот несуществующий слушатель отвечал бы ошибкой.
+    await makeMenu(page, 'nested', null);
+    // Без привязки правый клик по контейнеру меню не открывает — слушателя на
+    // контейнере нет, — поэтому показ программный.
+    await openMenu(page, WORKSPACE_POINT.x, WORKSPACE_POINT.y);
+    expect((await readMenu(page)).openCount, 'меню открыто без привязки').toBe(1);
+
+    await page.evaluate(() => {
+      globalThis.dispatchEvent(new Event('blur'));
+    });
+
+    const after = await readMenu(page);
+    expect(after.openCount, 'меню осталось открытым').toBe(1);
+    expect(after.errors, 'страница без ошибок').toEqual([]);
+  });
 });
