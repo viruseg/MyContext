@@ -159,7 +159,7 @@ function readErrors(page) {
 }
 
 test.beforeEach(async ({ page }) => {
-await page.setViewportSize(VIEWPORT);
+  await page.setViewportSize(VIEWPORT);
   // `goto` обязателен перед `setContent`: без него у документа нет адреса, и ни
   // ссылка на таблицу стилей, ни динамический импорт не разрешились бы.
   await page.goto('/');
@@ -175,9 +175,10 @@ await page.setViewportSize(VIEWPORT);
   );
   await page.emulateMedia({ reducedMotion: 'reduce' });
 
-  const { MyContext } = await import('../../src/index.js');
+  await page.evaluate(async () => {
+    const { MyContext } = await import('../../src/index.js');
 
-  /** @type {string[]} */
+    /** @type {string[]} */
   const log = [];
   /** @type {string[]} */
   const errors = [];
@@ -459,12 +460,13 @@ await page.setViewportSize(VIEWPORT);
       };
     },
   };
+  });
 });
 
 test.describe('контракты на стыке модулей', () => {
   test('действие, уничтожившее экземпляр, не роняет обработчик клавиш', async ({ page }) => {
-  await makeMenu(page, 'selfDestroy');
-  await openAt(page, OPEN_POINT);
+    await makeMenu(page, 'selfDestroy');
+    await openAt(page, OPEN_POINT);
   const opened = await readMenu(page);
   expect(opened.openCount, 'меню открыто').toBe(1);
 
