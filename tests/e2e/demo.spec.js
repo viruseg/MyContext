@@ -124,7 +124,17 @@ import { OPEN_GRACE_MS, SAFETY_PADDING } from '../../src/constants.js';
 
 const VIEWPORT = { width: 1280, height: 800 };
 
-const SCENARIO_IDS = ['basic', 'nested', 'disabled', 'icons', 'long', 'autohide', 'mixed'];
+const SCENARIO_IDS = [
+  'basic',
+  'nested',
+  'disabled',
+  'icons',
+  'long',
+  'autohide',
+  'press',
+  'press-left',
+  'mixed',
+];
 
 /** @type {Record<string, string>} */
 const SCENARIO_TITLES = {
@@ -134,6 +144,8 @@ const SCENARIO_TITLES = {
   icons: 'Иконки',
   long: 'Длинный список',
   autohide: 'Автоскрытие',
+  press: 'Удержание кнопки',
+  'press-left': 'Удержание левой кнопки',
   mixed: 'Всё вместе',
 };
 
@@ -145,8 +157,19 @@ const SCENARIO_SHAPE = {
   icons: { first: 'Эмодзи', last: 'Ещё растр', count: 6 },
   long: { first: 'Пункт 1', last: 'Пункт 40', count: 40 },
   autohide: { first: 'Открыть', last: 'Удалить', count: 4 },
+  press: { first: 'Новый', last: 'Отключённый пункт', count: 4 },
+  'press-left': { first: 'Новый', last: 'Отключённый пункт', count: 4 },
   mixed: { first: 'Новый', last: 'Последний', count: 7 },
 };
+
+/**
+ * Блоки, открываемые удержанием, и кнопка, которой они открываются. Прочие
+ * сценарии открываются правым кликом, и список этот — единственное место, где
+ * известно, чем именно открывается каждый блок.
+ *
+ * @type {Record<string, 'left' | 'right'>}
+ */
+const HELD_SCENARIOS = { press: 'right', 'press-left': 'left' };
 
 /** Порядок подключения таблиц стилей, который требует бриф. */
 const STYLESHEET_ORDER = ['./styles/mycontext.css', './Demo/demo.css'];
@@ -176,6 +199,15 @@ const AUTO_HIDE_HINT =
   'Правый клик открывает меню, уход курсора за пределы порога его прячет. '
   + 'Подменю длиннее корня: уход в сторону подменю — не уход из меню.';
 
+const PRESS_HOLD_HINT =
+  'Зажмите любую кнопку — меню откроется под курсором и закроется на отпускании. '
+  + 'Отпустите над пунктом — сработает его действие, над разделителем, отключённым '
+  + 'пунктом или просто мимо меню — просто закроется.';
+
+const PRESS_LEFT_HINT =
+  'То же меню, но открывает только левая кнопка: правый клик не открывает ничего, '
+  + 'и системное меню браузера остаётся его делом.';
+
 /**
  * Ожидаемая подсказка каждого блока. Таблица, а не условие по `id` в кейсе: подсказка
  * объявлена в описании сценария, и сверять её надо со всем списком, иначе
@@ -190,6 +222,8 @@ const SCENARIO_HINTS = {
   icons: HINT,
   long: HINT,
   autohide: AUTO_HIDE_HINT,
+  press: PRESS_HOLD_HINT,
+  'press-left': PRESS_LEFT_HINT,
   mixed: HINT,
 };
 
@@ -353,13 +387,54 @@ function waitForSubmenu(page, levelId, label) {
 async function openScenario(page, id) {
   const point = await rightClickPointIn(page, id);
   await page.mouse.click(point.x, point.y, { button: 'right' });
+  return openedRootId(page);
+}
+
+/**
+ * Сценарий на удержании: кнопка остаётся нажатой, а меню — показанным.
+ *
+ * Отдельный открыватель, а не флаг у `openScenario`, потому что там кнопка
+ * отпускается сразу же, а меню на удержании живёт ровно до отпускания: клик
+ * правой кнопкой открыл бы его и тут же закрыл, и кейс получил бы ноль открытых
+ * уровней. Возврат тот же — `id` единственного открытого уровня.
+ *
+ * @param {Page} page
+ * @param {string} id идентификатор сценария.
+ * @param {'left' | 'right'} button кнопка, которой блок открывается.
+ * @returns {Promise<string>}
+ */
+async function holdScenario(page, id, button) {
+  const point = await rightClickPointIn(page, id);
+  await page.mouse.move(point.x, point.y);
+  await page.mouse.down({ button });
+  return openedRootId(page);
+}
+
+/**
+ * Отпускание нажатой кнопки в стороне от меню: удержание закрывает его само, и
+ * кнопка с этого момента свободна для следующего блока.
+ *
+ * @param {Page} page
+ * @param {'left' | 'right'} button
+ * @returns {Promise<void>}
+ */
+async function releaseHeld(page, button) {
+  await page.mouse.move(VIEWPORT.width - 8, VIEWPORT.height - 8);
+  await page.mouse.up({ button });
+}
+
+/**
+ * @param {Page} page
+ * @returns {Promise<string>}
+ */
+function openedRootId(page) {
   return page.evaluate(() => {
     const open = Array.from(document.querySelectorAll('.vc-menu')).filter((level) => {
       return level.matches(':popover-open');
     });
     const root = open[0];
     if (open.length !== 1 || !(root instanceof HTMLElement)) {
-      throw new Error(`после правого клика открыто уровней: ${open.length}, ожидался один`);
+      throw new Error(`после открытия открыто уровней: ${open.length}, ожидался один`);
     }
     return root.id;
   });
@@ -1334,7 +1409,8 @@ test('демо: у каждого сценария свой независимы
   const rootIds = [];
 
   for (const id of SCENARIO_IDS) {
-    const rootId = await openScenario(page, id);
+    const held = HELD_SCENARIOS[id];
+    const rootId = held === undefined ? await openScenario(page, id) : await holdScenario(page, id, held);
     // `openScenario` уже отказал бы, если бы открытых уровней оказалось не один, но
     // утверждение остаётся: иначе «своё меню у каждого» читалось бы по снимку с
     // наложением.
@@ -1352,6 +1428,9 @@ test('демо: у каждого сценария свой независимы
     expect(level.labels[0], `первый пункт сценария «${id}»`).toBe(shape.first);
     expect(level.labels[shape.count - 1], `последний пункт сценария «${id}»`).toBe(shape.last);
     rootIds.push(rootId);
+    if (held !== undefined) {
+      await releaseHeld(page, held);
+    }
   }
 
   // Разных `id` ровно столько же, сколько блоков, — столько же разных слоёв, а
@@ -1466,4 +1545,34 @@ test('демо: блок с автоскрытием прячет меню по 
     (await readMenu(page)).openCount,
     'меню обычного блока уход курсора не тронул: порога у него нет',
   ).toBe(1);
+});
+
+test('демо: блок на удержании пишет в журнал по отпусканию, обычный — по клику', async ({ page }) => {
+  // Как и с автоскрытием, проверяется блок, а не правило: кейсы правила живут в
+  // `tests/e2e/pressAndHold.spec.js`. Здесь важно, что демо передал опцию тому
+  // экземпляру, кому она нужна, и что оба блока ведут журнал одинаково.
+  const rootId = await holdScenario(page, 'press', 'right');
+  const point = await centreOf(page, rootId, 'Новый');
+  await page.mouse.move(point.x, point.y);
+  await page.mouse.up({ button: 'right' });
+
+  expect(await logLines(page, 'press'), 'отпускание над пунктом пишет подпись').toEqual(['Новый']);
+  expect((await readMenu(page)).openCount, 'меню закрылось отпусканием').toBe(0);
+
+  const ordinaryId = await openScenario(page, 'basic');
+  await clickItem(page, ordinaryId, 'Открыть');
+  expect(await logLines(page, 'basic'), 'обычный блок пишет по клику').toEqual(['Открыть']);
+});
+
+test('демо: блок на левой кнопке не открывается правым кликом', async ({ page }) => {
+  // Различие читается только рядом с блоком на любой кнопке: без него кейс
+  // доказал бы лишь то, что меню закрыто, а не то, что правая кнопка не
+  // открывает ничего вовсе.
+  const point = await rightClickPointIn(page, 'press-left');
+  await page.mouse.click(point.x, point.y, { button: 'right' });
+  expect((await readMenu(page)).openCount, 'правый клик блок не открыл').toBe(0);
+
+  const rootId = await holdScenario(page, 'press-left', 'left');
+  expect(rootId, 'левая кнопка блок открыла').not.toBe('');
+  await releaseHeld(page, 'left');
 });

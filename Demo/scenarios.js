@@ -41,6 +41,9 @@
  * @property {number} [autoHideDistance] порог автоскрытия для меню сценария, px.
  *   `undefined` — обычное поведение, то есть меню держится, пока его не закрыли
  *   явно.
+ * @property {import('../src/constants.js').PressAndHoldMode} [pressAndHold] режим
+ *   удержания для меню сценария. `undefined` — прежнее поведение, то есть показ по
+ *   правому клику.
  * @property {Array<MenuItem | SeparatorItem>} items пункты корневого уровня.
  */
 
@@ -244,6 +247,63 @@ export const scenarios = [
       { labelAction: () => 'Закладка', iconAction: () => ({ type: 'emoji', value: '🔖' }) },
       separator(),
       { labelAction: () => 'Удалить' },
+    ],
+  },
+  {
+    // Меню на удержании кнопки. Подменю и разделитель здесь не украшение: без
+    // подменю не было бы случая «отпустить над пунктом второго уровня», а без
+    // разделителя и отключённого пункта — случая «отпустить, но ничего не
+    // исполнить». Оба разбираются на отпускании, и оба молчат.
+    //
+    // Второй блок отличается от первого только кнопкой: под `left` правая
+    // вообще не открывает меню, а под `any` достаётся ему и системное меню
+    // браузера не поднимается. Одна строка опции, а поведение читается иначе —
+    // поэтому оба и стоят рядом.
+    id: 'press',
+    title: 'Удержание кнопки',
+    hint: 'Зажмите любую кнопку — меню откроется под курсором и закроется на отпускании. Отпустите над пунктом — сработает его действие, над разделителем, отключённым пунктом или просто мимо меню — просто закроется.',
+    pressAndHold: 'any',
+    items: [
+      { labelAction: () => 'Новый', iconAction: () => ({ type: 'emoji', value: '➕' }) },
+      {
+        labelAction: () => 'Экспорт',
+        iconAction: () => ({ type: 'svg', value: PRINT_SVG }),
+        submenuAction: () => [
+          { labelAction: () => 'В PDF' },
+          { labelAction: () => 'В текст' },
+          {
+            labelAction: () => 'В изображение',
+            submenuAction: () => [{ labelAction: () => 'PNG' }, { labelAction: () => 'JPEG' }],
+          },
+        ],
+      },
+      { labelAction: () => 'Закладка', iconAction: () => ({ type: 'emoji', value: '🔖' }) },
+      separator(),
+      { labelAction: () => 'Отключённый пункт', isEnabledAction: () => false },
+    ],
+  },
+  {
+    id: 'press-left',
+    title: 'Удержание левой кнопки',
+    hint: 'То же меню, но открывает только левая кнопка: правый клик не открывает ничего, и системное меню браузера остаётся его делом.',
+    pressAndHold: 'left',
+    items: [
+      { labelAction: () => 'Новый', iconAction: () => ({ type: 'emoji', value: '➕' }) },
+      {
+        labelAction: () => 'Экспорт',
+        iconAction: () => ({ type: 'svg', value: PRINT_SVG }),
+        submenuAction: () => [
+          { labelAction: () => 'В PDF' },
+          { labelAction: () => 'В текст' },
+          {
+            labelAction: () => 'В изображение',
+            submenuAction: () => [{ labelAction: () => 'PNG' }, { labelAction: () => 'JPEG' }],
+          },
+        ],
+      },
+      { labelAction: () => 'Закладка', iconAction: () => ({ type: 'emoji', value: '🔖' }) },
+      separator(),
+      { labelAction: () => 'Отключённый пункт', isEnabledAction: () => false },
     ],
   },
   {

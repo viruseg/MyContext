@@ -1,5 +1,5 @@
 import { MyContext } from '../src/index.js';
-import { DEFAULT_AUTO_HIDE_DISTANCE } from '../src/constants.js';
+import { DEFAULT_AUTO_HIDE_DISTANCE, DEFAULT_PRESS_AND_HOLD } from '../src/constants.js';
 import { scenarios } from './scenarios.js';
 
 /**
@@ -220,6 +220,7 @@ function buildScenario(scenario, block) {
     theme: 'auto',
     label: scenario.title,
     autoHideDistance: scenario.autoHideDistance ?? DEFAULT_AUTO_HIDE_DISTANCE,
+    pressAndHold: scenario.pressAndHold ?? DEFAULT_PRESS_AND_HOLD,
   });
   menu.attach(block);
   return menu;
