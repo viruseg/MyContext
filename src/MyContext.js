@@ -57,6 +57,31 @@ import { assertItems } from './renderer.js';
  *   действие. Значение называет кнопку, а не включает жест, — см.
  *   [`pressAndHold`](README.md#pressandhold). Действует всё время жизни меню, и
  *   программный `open()` под ним не меняется.
+ * @property {(event: PointerEvent) => boolean} [isArmableAction] предикат, решающий,
+ *   вооружать ли нажатие жест удержания. Зовется на каждом нажатии подходящей
+ *   кнопки до показа меню и получает живой `PointerEvent` нажатия, а ответ не из
+ *   `true` оставляет меню закрытым. Смысл в том, что автор узнаёт цель нажатия
+ *   раньше показа: подписи и доступность пунктов читаются при показе, и без
+ *   предиката они отвечали бы на предыдущий показ. Осмысленна только при
+ *   `pressAndHold`, отличном от `'none'`: при `'none'` жеста нажатия нет, и опция
+ *   молчала бы. Исключение из предиката не гасится и уходит из обработчика
+ *   нажатия. См. [`isArmableAction`](README.md#isarmableaction).
+ */
+
+/**
+ * Опции экземпляра: то же, что задал автор, но с подставленными дефолтами.
+ *
+ * Отдельный тип от `Required<MyContextOptions>` — из-за предиката: дефолта у него
+ * нет, и подставлять нечего, а `Required` объявил бы его обязательным и заставил
+ * бы конструктор выдумывать значение вместо того, чтобы хранить `undefined`.
+ *
+ * @typedef {object} ResolvedOptions
+ * @property {'auto' | 'light' | 'dark'} theme
+ * @property {number} animationDuration
+ * @property {string} label
+ * @property {number} autoHideDistance
+ * @property {PressAndHoldMode} pressAndHold
+ * @property {((event: PointerEvent) => boolean) | undefined} isArmableAction
  */
 
 const ITEM_SELECTOR = '.vc-item';
@@ -333,7 +358,7 @@ export class MyContext {
   /** @type {Array<MenuItem | SeparatorItem>} */
   #items;
 
-  /** @type {Required<MyContextOptions>} опции с подставленными дефолтами. */
+  /** @type {ResolvedOptions} опции с подставленными дефолтами. */
   #options;
 
   /** @type {MenuLayer} */
@@ -987,11 +1012,18 @@ export class MyContext {
   /**
    * Вооружает ли это нажатие жест удержания.
    *
-   * Три условия обязательны вместе. Кнопка должна быть той, что названа опцией, —
+   * Четыре условия обязательны вместе. Кнопка должна быть той, что названа опцией, —
    * при `'any'` подходит любая. Нажатие должно прийтись на привязанный контейнер:
    * вне него привязки нет, и меню нечего показывать. Нажатие не должно прийтись на
    * само меню: показывать новое меню поверх старого по нажатию внутри старого —
    * это рецикл, а жест нажатия внутри уже открытого меню должен быть проигнорирован.
+   * Наконец, предикат `isArmableAction` должен разрешить нажатие: ответ не из `true`
+   * означает, что автору нечего показать по этому нажатию.
+   *
+   * **Предикат проверяется последним, а не первым.** Он решает по цели нажатия, и
+   * пока цель не отсеяна, спрашивать автора незачем: по нажатию мимо меню и вне
+   * привязанного контейнера ответ одинаков, и лишний вызов только достал бы
+   * автора вопросом, на который у него нет ответа.
    *
    * @param {PointerEvent} event
    * @returns {boolean}
@@ -1005,7 +1037,27 @@ export class MyContext {
     if (button !== null && event.button !== button) {
       return false;
     }
-    return this.#isInsideAnchor(event.target);
+    if (!this.#isInsideAnchor(event.target)) {
+      return false;
+    }
+    return this.#isArmable(event);
+  }
+
+  /**
+   * Разрешает ли предикат автора вооружить нажатие.
+   *
+   * Без опции ответ безусловен: предиката нет, значит и спросить некого, а жест
+   * остаётся прежним. Сравнение строгое, `=== true`, — как у `isEnabledAction`:
+   * предикат, не ответивший на заданный вопрос, не отвечал на него.
+   *
+   * @param {PointerEvent} event нажатие, ради которого спрашивают.
+   * @returns {boolean}
+   */
+  #isArmable(event) {
+    if (this.#options.isArmableAction === undefined) {
+      return true;
+    }
+    return this.#options.isArmableAction(event) === true;
   }
 
   /**
@@ -1305,6 +1357,7 @@ export class MyContext {
       label: options.label ?? DEFAULT_MENU_LABEL,
       autoHideDistance: options.autoHideDistance ?? DEFAULT_AUTO_HIDE_DISTANCE,
       pressAndHold: options.pressAndHold ?? DEFAULT_PRESS_AND_HOLD,
+      isArmableAction: options.isArmableAction,
     };
     this.#actions = new Map();
     this.#levels = new Map();
@@ -2164,7 +2217,14 @@ export class MyContext {
     if (!isRecord(options)) {
       throw new TypeError(`${path}: опции должны быть объектом`);
     }
-    const { theme, animationDuration, label, autoHideDistance, pressAndHold } = options;
+    const {
+      theme,
+      animationDuration,
+      label,
+      autoHideDistance,
+      pressAndHold,
+      isArmableAction,
+    } = options;
     if (theme !== undefined && theme !== 'auto' && theme !== 'light' && theme !== 'dark') {
       throw new TypeError(
         `${path}.theme: неизвестная тема «${String(theme)}», ожидается auto, light или dark`,
@@ -2213,6 +2273,13 @@ export class MyContext {
         `${path}.pressAndHold: неизвестный режим «${String(pressAndHold)}», `
         + `ожидается ${PRESS_AND_HOLD_MODES.join(', ')}`,
       );
+    }
+    // Предикат проверяется по форме, а не по имени: нефункция молча превратилась бы
+    // в «спросить некого» — то есть в прежнее поведение, и автор задал бы запрет,
+    // а меню открывалось бы всё равно. Ответ не из `true` разбирает сам предикат, и
+    // проверять его форму здесь нельзя: до нажатия она неизвестна.
+    if (isArmableAction !== undefined && typeof isArmableAction !== 'function') {
+      throw new TypeError(`${path}.isArmableAction: предикат должен быть функцией`);
     }
   }
 

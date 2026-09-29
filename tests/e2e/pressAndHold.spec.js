@@ -45,6 +45,18 @@ import { OPEN_GRACE_MS } from '../../src/constants.js';
  * @property {boolean} focusInMenu стоит ли фокус в дереве уровней меню.
  * @property {string[]} calls подписи пунктов, чьи действия отработали.
  * @property {string[]} errors сообщения необработанных ошибок страницы.
+ * @property {ArmCall[]} armCalls что предикат `isArmableAction` видел при каждом вызове.
+ * @property {string[]} labels подписи показанных пунктов корня, по порядку.
+ */
+
+/**
+ * @typedef {object} ArmCall
+ * @property {number} x `clientX` нажатия, как их увидел предикат.
+ * @property {number} y `clientY` нажатия, как их увидел предикат.
+ * @property {number} button кнопка нажатия, как её увидел предикат.
+ * @property {string | null} targetId `data-id` цели нажатия либо `null`.
+ * @property {number} levelsOpen сколько уровней было показано в момент вызова.
+ * @property {string[]} labelsThen подписи корня, прочитанные к этому моменту.
  */
 
 /**
@@ -53,6 +65,9 @@ import { OPEN_GRACE_MS } from '../../src/constants.js';
  * @property {number} autoHideDistance
  * @property {string | null} containerId
  * @property {boolean} longRoot составить ли корень из шестидесяти пунктов.
+ * @property {'allow' | 'deny' | 'throw' | null} [isArmable] ответ предиката
+ *   `isArmableAction`; `null` и отсутствие поля — опция не задана вовсе.
+ * @property {string} [targetId] `data-id` элемента, на котором проходит нажатие.
  */
 
 /**
@@ -61,7 +76,6 @@ import { OPEN_GRACE_MS } from '../../src/constants.js';
  * @property {(x: number, y: number) => void} open
  * @property {() => Snapshot} read
  */
-
 /**
  * @typedef {object} Point
  * @property {number} x
@@ -78,7 +92,10 @@ const PAGE_HTML = `<!doctype html>
   </head>
   <body style="background: rgb(255, 255, 255)">
     <div id="surface" tabindex="-1"
-         style="position: fixed; left: 0; top: 0; width: 100%; height: 100%; background: rgb(240, 240, 240)"></div>
+         style="position: fixed; left: 0; top: 0; width: 100%; height: 100%; background: rgb(240, 240, 240)">
+      <div id="target" data-id="photo-1"
+           style="position: absolute; left: 600px; top: 60px; width: 200px; height: 120px; background: rgb(200, 200, 200)"></div>
+    </div>
   </body>
 </html>`;
 
@@ -92,6 +109,16 @@ const PRESS_POINT = { x: 260, y: 120 };
 
 /** Точка пустоты страницы далеко от меню. */
 const EMPTY_POINT = { x: 880, y: 620 };
+
+/**
+ * Точка на элементе `#target` — единственном, у кого есть `data-id`. Нажатие по
+ * пустоте страницы годилось бы проверить предикат, но не проверило бы, что цель
+ * нажатия до него доходит.
+ *
+ * Элемент стоит в стороне от `PRESS_POINT`: накрытая им точка нажатия меняла бы
+ * цель прежних кейсов, а фикстура не должна влиять на то, что проверяют не она.
+ */
+const TARGET_POINT = { x: 700, y: 120 };
 
 const CLOCK_FROZEN_AT = new Date('2024-12-10T09:00:00Z');
 const CLOCK_START_AT = new Date(CLOCK_FROZEN_AT.getTime() - 3_600_000);
@@ -332,6 +359,8 @@ test.beforeEach(async ({ page }) => {
     const calls = [];
     /** @type {string[]} */
     const errors = [];
+    /** @type {ArmCall[]} */
+    const armCalls = [];
     globalThis.addEventListener('error', (event) => {
       errors.push(String(event.message));
     });
@@ -395,11 +424,36 @@ test.beforeEach(async ({ page }) => {
         }
         calls.length = 0;
         errors.length = 0;
-        menu = new MyContext(input.longRoot ? longItems() : standardItems(), {
+        armCalls.length = 0;
+        /** @type {MyContextOptions} */
+        const options = {
           label: 'Меню пробы',
           pressAndHold: /** @type {MyContextOptions['pressAndHold']} */ (input.pressAndHold),
           autoHideDistance: input.autoHideDistance,
-        });
+        };
+        // Проверка на строку, а не на `!== null`: у кейсов, опцию не задававших,
+        // поле отсутствует, то есть это `undefined`, и проверка на `null` пропустила
+        // бы его — предикат встал бы и запрещал все прежние кейсы разом.
+        if (typeof input.isArmable === 'string') {
+          options.isArmableAction = (event) => {
+            const target = event.target;
+            const labelsNow = Array.from(document.querySelectorAll('.vc-menu .vc-item .vc-label'))
+              .map((node) => String(node.textContent));
+            armCalls.push({
+              x: event.clientX,
+              y: event.clientY,
+              button: event.button,
+              targetId: target instanceof HTMLElement ? target.dataset.id ?? null : null,
+              levelsOpen: document.querySelectorAll('.vc-menu').length,
+              labelsThen: labelsNow,
+            });
+            if (input.isArmable === 'throw') {
+              throw new Error('предикат автора упал');
+            }
+            return input.isArmable === 'allow';
+          };
+        }
+        menu = new MyContext(input.longRoot ? longItems() : standardItems(), options);
         const container = input.containerId === null ? null : document.getElementById(input.containerId);
         if (container instanceof HTMLElement) {
           menu.attach(container);
@@ -433,6 +487,9 @@ test.beforeEach(async ({ page }) => {
           focusInMenu: active !== null && active.closest('.vc-menu') !== null,
           calls: calls.slice(),
           errors: errors.slice(),
+          armCalls: armCalls.slice(),
+          labels: Array.from(document.querySelectorAll('.vc-menu .vc-item .vc-label'))
+            .map((node) => String(node.textContent)),
         };
       },
     });
@@ -729,5 +786,102 @@ test.describe('удержание с автоскрытием', () => {
     const after = await readMenu(page);
     expect(after.calls, 'действие пункта подменю отработало').toEqual(['PDF']);
     expect(after.openCount, 'меню закрылось').toBe(0);
+  });
+});
+
+test.describe('isArmableAction', () => {
+  /**
+   * @param {import('@playwright/test').Page} page
+   * @param {'allow' | 'deny' | 'throw' | null} isArmable
+   * @param {string} [pressAndHold]
+   * @returns {Promise<void>}
+   */
+  async function withArmable(page, isArmable, pressAndHold = 'right') {
+    await makeMenu(page, { pressAndHold, autoHideDistance: 0, containerId: 'surface', longRoot: false, isArmable });
+  }
+
+  test('отказ предиката не показывает меню и не вооружает жест', async ({ page }) => {
+    await withArmable(page, 'deny');
+    await pressAt(page, TARGET_POINT, 'right');
+    const armed = await readMenu(page);
+    expect(armed.openCount, 'меню не показано').toBe(0);
+    expect(armed.armCalls.length, 'предикат звался').toBe(1);
+
+    // Отказ не должен оставить жест вооруженным: иначе отпускание над пунктом
+    // исполнило бы действие меню, которого на экране нет.
+    await releaseAt(page, TARGET_POINT, 'right');
+    const after = await readMenu(page);
+    expect(after.calls, 'действие не исполнилось').toEqual([]);
+    expect(after.openCount, 'меню не появилось').toBe(0);
+  });
+
+  test('разрешение предиката показывает меню обычным порядком', async ({ page }) => {
+    await withArmable(page, 'allow');
+    await pressAt(page, TARGET_POINT, 'right');
+    expect((await readMenu(page)).openCount, 'меню показано').toBe(1);
+    await releaseAt(page, TARGET_POINT, 'right');
+    expect((await readMenu(page)).openCount, 'меню закрылось').toBe(0);
+  });
+
+  test('предикат видит нажатие до того, как меню показано', async ({ page }) => {
+    // Ключевой союз опции с показом: предикат решает по нажатию, а подписи пунктов
+    // читаются при показе. Если бы предикат звался позже, автор не успевал бы узнать
+    // id жатого элемента — и меню нарисовалось бы по предыдущему.
+    await withArmable(page, 'allow');
+    await pressAt(page, TARGET_POINT, 'right');
+    const shown = await readMenu(page);
+    const [call] = shown.armCalls;
+    expect(call.levelsOpen, 'на момент вызова меню ещё не было').toBe(0);
+    expect(call.labelsThen, 'подписи корня ещё не построены').toEqual([]);
+    expect(shown.openCount, 'меню показано').toBe(1);
+    expect(shown.labels, 'подписи корня есть').toEqual(['Новый', 'Экспорт', 'Заметки']);
+  });
+
+  test('предикат получает живое событие нажатия с целью и точкой', async ({ page }) => {
+    await withArmable(page, 'allow');
+    await pressAt(page, TARGET_POINT, 'right');
+    const [call] = (await readMenu(page)).armCalls;
+    expect(call.x, 'clientX нажатия').toBe(TARGET_POINT.x);
+    expect(call.y, 'clientY нажатия').toBe(TARGET_POINT.y);
+    expect(call.button, 'кнопка нажатия').toBe(2);
+    expect(call.targetId, 'цель нажатия доступна предикату').toBe('photo-1');
+  });
+
+  test('исключение предиката не гасится и не открывает меню', async ({ page }) => {
+    // Как и любое другое действие автора, исключение уходит наружу: молчаливое
+    // отсутствие меню выглядело бы как «здесь нечего открывать».
+    await withArmable(page, 'throw');
+    await pressAt(page, TARGET_POINT, 'right');
+    const after = await readMenu(page);
+    expect(after.openCount, 'меню не показано').toBe(0);
+    expect(after.errors.join(' '), 'ошибка предиката дошла до страницы')
+      .toContain('предикат автора упал');
+  });
+
+  test('без удержания предикат не зовётся', async ({ page }) => {
+    // У `'none'` жеста нажатия нет вовсе, и опция молчала бы: автор задал бы запрет,
+    // а меню всё равно открывалось бы правым кликом.
+    await withArmable(page, 'deny', 'none');
+    await page.mouse.click(TARGET_POINT.x, TARGET_POINT.y, { button: 'right' });
+    const after = await readMenu(page);
+    expect(after.armCalls.length, 'предикат не звался').toBe(0);
+    expect(after.openCount, 'правый клик открыл меню').toBe(1);
+  });
+
+  test('опция не проходит проверку не как функция', async ({ page }) => {
+    const message = await page.evaluate(async () => {
+      const { MyContext } = await import('../../src/index.js');
+      // Негодная опция задаётся намеренно, и тип `MyContextOptions` её не описывает,
+      // поэтому сборка объекта идёт мимо него — иначе проверялось бы само объявление
+      // типа, а не проверка конструктора.
+      const options = { pressAndHold: 'right', isArmableAction: true };
+      try {
+        new MyContext([{ labelAction: () => 'Пункт' }], /** @type {never} */ (options));
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+      return null;
+    });
+    expect(message, 'конструктор отверг негодную опцию').toContain('isArmableAction');
   });
 });
