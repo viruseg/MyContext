@@ -284,15 +284,17 @@ test.describe('опция выключена по умолчанию', () => {
     // Отдельный экземпляр без поля вовсе: иначе кейс проверял бы только то, что
     // ноль и отсутствие поля кодируются одинаково, но не то, что отсутствие поля
     // вообще не включает проверку. Расстояние здесь заведомо заведомое.
+    //
+    // Экземпляр нигде не сохраняется и это не утечка: `attach` вешает на
+    // контейнер слушатели, ссылающиеся на него, и до снятия тех слушателей он
+    // жив сам по себе. Проба `__mc` в этом кейсе не нужна вовсе.
     await page.evaluate(async () => {
       const { MyContext } = await import('../../src/index.js');
-      const scope = /** @type {{ __mcBare?: MyContext }} */ (/** @type {unknown} */ (globalThis));
       const container = document.getElementById('surface');
       const bare = new MyContext([{ labelAction: () => 'Пункт' }], { label: 'Меню пробы' });
       if (container instanceof HTMLElement) {
         bare.attach(container);
       }
-      scope.__mcBare = bare;
     });
     await openAt(page, OPEN_POINT);
     const away = beyondRect((await readMenu(page)).rects[0], { x: 400, y: 300 });
