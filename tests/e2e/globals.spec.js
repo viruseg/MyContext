@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { CLOSE_GRACE_MS, OPEN_GRACE_MS } from '../../src/constants.js';
+import { OPEN_GRACE_MS } from '../../src/constants.js';
 
 /**
  * Кейсы глобальных слушателей: клики, клавиши, скролл, `resize` и движение курсора
@@ -614,14 +614,14 @@ test.describe('глобальные слушатели', () => {
     expect(after.errors, 'страница без ошибок').toEqual([]);
   });
 
-  test('уход курсора в пустоту страницы закрывает только подменю', async ({ page }) => {
+  test('уход курсора в пустоту страницы не закрывает подменю', async ({ page }) => {
     await makeMenu(page, 'first', 'chain', 'surface');
     await openAt(page, 'first', SURFACE_POINT);
 
     // Цепочка из трёх уровней через клавиатуру: наведение здесь не годится, его
-    // задержка сделала бы кейс зависимым от часов дважды, а здесь проверяется
-    // закрытие, а не показ. Показ меню выделения не оставляет, поэтому до первого
-    // пункта и до «Экспорта» идут два шага вниз, а внутри подменю — один, до «PNG».
+    // задержка сделала бы кейс зависимым от часов. Показ меню выделения не
+    // оставляет, поэтому до первого пункта и до «Экспорта» идут два шага вниз,
+    // а внутри подменю — один, до «PNG».
     const exportId = await submenuIdOf(page, 'Экспорт');
     await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowDown');
@@ -635,123 +635,25 @@ test.describe('глобальные слушатели', () => {
     expect(isOpen(opened, /** @type {string} */ (exportId)), 'уровень «Экспорт» показан').toBe(true);
     expect(isOpen(opened, /** @type {string} */ (pngId)), 'уровень «PNG» показан').toBe(true);
     // Уровни перечислены в порядке документа, а показан раньше всех корень: его
-    // `id` снимается здесь, чтобы закрытие проверялось поимённо, а не по счёту.
+    // `id` снимается здесь, чтобы состояние проверялось поимённо, а не по счёту.
     const rootId = opened.levels[0].id;
 
     await page.mouse.move(VOID_POINT.x, VOID_POINT.y);
-    // До истечения задержки закрытия каскад стоит: без этого утверждения кейс
-    // прошёл бы на мгновенном закрытии, а задержка — часть контракта.
-    const midway = await readMenu(page);
-    expect(midway.openCount, 'до задержки закрытия каскад цел').toBe(3);
-
-    await page.clock.fastForward(CLOSE_GRACE_MS);
+    // Втрое больше прежнего срока закрытия подменю: такого таймера больше нет, и
+    // ожидание здесь доказывает именно это — подменю не гаснет само по себе.
+    await page.clock.fastForward(3000);
 
     const after = await readMenu(page);
-    // Один сигнал закрытия уносит весь каскад подменю: «сигналов столько, сколько
-    // движений мышью» здесь означало бы, что остановившийся курсор оставляет
-    // подменю висеть, и убрать его больше нечем.
-    expect(after.openCount, 'за один сигнал ушёл весь каскад подменю').toBe(1);
-    // Поимённо по всем троим, а не одним счётом: счётчик прошёл бы и на
-    // реализации, которая закрыла не те уровни.
-    expect(isOpen(after, /** @type {string} */ (pngId)), 'глубочайший закрыт').toBe(false);
-    expect(isOpen(after, /** @type {string} */ (exportId)), 'средний закрыт тем же сигналом').toBe(false);
-    // Корень переживает: у него нет владельца, и закрывать ему нечего. Меню,
-    // открытое в нативном стиле, не следует за курсором, и уход курсора в пустоту
-    // страницы не означает намерения убрать его с экрана.
-    expect(isOpen(after, rootId), 'корень остался в Top Layer').toBe(true);
+    // Ни один уровень не уходит. Закрытия по уходу курсора не существует: подменю
+    // принадлежит активному пункту уровня, а он остался прежним, и увести его
+    // может только переход на соседний пункт либо клик, `Escape` и уход со
+    // страницы — то есть ровно те события, что перечислены отдельно.
+    expect(after.openCount, 'каскад подменю цел').toBe(3);
+    expect(isOpen(after, /** @type {string} */ (pngId)), 'глубочайший на месте').toBe(true);
+    expect(isOpen(after, /** @type {string} */ (exportId)), 'средний на месте').toBe(true);
+    expect(isOpen(after, rootId), 'корень на месте').toBe(true);
     expect(after.errors, 'страница без ошибок').toEqual([]);
   });
-
-  test('переоткрытие не сносит свежий каскад уходом, спланированным прежним', async ({ page }) => {
-    await makeMenu(page, 'first', 'chain', 'surface');
-    await openAt(page, 'first', SURFACE_POINT);
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowRight');
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowRight');
-    expect((await readMenu(page)).openCount, 'открыты корень и два подменю').toBe(3);
-
-    // Курсор уходит в пустоту, и таймер закрытия намеренно не доводится: решение
-    // принято, но ещё не исполнено, и именно оно опасно для следующей постановки.
-    await page.mouse.move(VOID_POINT.x, VOID_POINT.y);
-    const planned = await readMenu(page);
-    expect(planned.openCount, 'до таймера прежний каскад цел').toBe(3);
-
-    // Меню открывается заново в другой точке. Последняя известная точка курсора
-    // относится к прежней постановке, где она была вне всего, — и по ней сносить
-    // свежий каскад нельзя.
-    await openAt(page, 'first', REOPEN_POINT);
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowRight');
-    const reopened = await readMenu(page);
-    expect(reopened.openCount, 'новый каскад показан').toBe(2);
-
-    await page.clock.fastForward(CLOSE_GRACE_MS * 3);
-
-    const after = await readMenu(page);
-    expect(after.openCount, 'свежий каскад уцелел').toBe(2);
-    expect(after.errors, 'страница без ошибок').toEqual([]);
-  });
-
-  test('возврат курсора в дерево закрывает один уровень, а не каскад', async ({ page }) => {
-    await makeMenu(page, 'first', 'chain', 'surface');
-    await openAt(page, 'first', SURFACE_POINT);
-    // Показ не отмечает пунктов, и до «Экспорта» — два шага вниз.
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowRight');
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowRight');
-    const opened = await readMenu(page);
-    expect(opened.openCount, 'открыты корень и два подменю').toBe(3);
-
-    // Уход в пустоту планирует закрытие, и возврат курсора в дерево его не
-    // отменяет: точка «PDF» лежит в подменю «Экспорта», а безопасная область
-    // считается от самого глубокого уровня, то есть от подменю «PNG». Отменяет
-    // закрытие только возврат внутрь того уровня, для которого оно считается, —
-    // поэтому за один сигнал уходит подменю «PNG» и только оно: дальше точка
-    // внутри «Экспорта», и цикл закрытия встаёт.
-    await page.mouse.move(VOID_POINT.x, VOID_POINT.y);
-    const back = await centreOf(page, 'PDF');
-    await page.mouse.move(back.x, back.y);
-    await page.clock.fastForward(CLOSE_GRACE_MS);
-
-    const after = await readMenu(page);
-    // Возврат на пункт подменю «Экспорта» оставляет корень и «Экспорт», и уводит
-    // «PNG» — самый глубокий уровень. Каскад целиком здесь означал бы, что меню
-    // исчезло под курсором.
-    expect(after.openCount, 'закрыт ровно один уровень').toBe(2);
-  });
-
-  test('уход курсора на контейнер закрывает каскад подменю, корень остаётся', async ({ page }) => {
-    await makeMenu(page, 'first', 'chain', 'surface');
-    await openAt(page, 'first', SURFACE_POINT);
-    // Показ не отмечает пунктов, и до «Экспорта» — два шага вниз.
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowRight');
-    const opened = await readMenu(page);
-    expect(opened.openCount, 'открыты корень и подменю').toBe(2);
-    const rootId = opened.levels[0].id;
-
-    // Контейнер — точка страницы, не занятая поповером: меню открыто в центре
-    // `#surface` и закрывает середину, а сверху остаётся свободная полоса. Курсор
-    // уходит движением, а не кликом: клик внутри контейнера закрывает меню целиком
-    // (соседний кейс), и проверялся бы не уход курсора, а клик.
-    await page.mouse.move(30, 70);
-    await page.clock.fastForward(CLOSE_GRACE_MS * 3);
-
-    const after = await readMenu(page);
-    // Подменю обязано закрыться само: точка вне безопасной области, а планировать
-    // закрытие больше некому — событие не достаётся ни одному уровню. Разницы
-    // между «курсор ушёл с подменю» и «курсор ушёл с дерева» нет вовсе; здесь глубина
-    // два, и за один сигнал уходит всё, кроме корня.
-    expect(after.openCount, 'подменю закрылось, корень остался').toBe(1);
-    expect(isOpen(after, rootId), 'корень остался в Top Layer').toBe(true);
-  });
-
   test('клик по контейнеру закрывает меню целиком', async ({ page }) => {
     await makeMenu(page, 'first', 'chain', 'surface');
     await openAt(page, 'first', SURFACE_POINT);
@@ -836,23 +738,26 @@ test.describe('глобальные слушатели', () => {
     expect(marked.activeLabels.sort(), 'отмечены оба уровня').toEqual(['PDF', 'Экспорт']);
 
     // Курсор уходит на контейнер: это страница, а не меню, и выделение обязано
-    // сброситься целиком, хотя корень остаётся открытым, а подменю закроется по
-    // своей задержке. Клика тут нет — иначе фокус ушёл бы на контейнер, и сброс
+    // сброситься целиком. Уровни при этом остаются на месте — сброс выделения и
+    // закрытие подменю решают разные задачи, и сброс не должен влечь за собой
+    // второе. Клика тут нет — иначе фокус ушёл бы на контейнер, и сброс
     // выделения нельзя было бы отличить от обычного ухода фокуса.
     await page.mouse.move(30, 70);
     const gone = await readMenu(page);
     expect(gone.activeLabels, 'выделение сброшено').toEqual([]);
-    expect(gone.openCount, 'до задержки закрытия оба уровня на месте').toBe(2);
+    expect(gone.openCount, 'оба уровня на месте').toBe(2);
     // Фокус вернулся на элемент корневого уровня, а не на контейнер: меню обязано
     // снова отвечать на клавиши, и первая же стрелка после ухода курсора даёт
     // крайний пункт. Уровни перечислены в порядке документа, и корень — первый.
     expect(gone.focusOwnerId, 'фокус на элементе корневого уровня').toBe(gone.levels[0].id);
     expect(gone.errors, 'страница без ошибок').toEqual([]);
 
-    await page.clock.fastForward(CLOSE_GRACE_MS * 3);
+    // Втрое больше прежнего срока закрытия подменю: таймера закрытия не осталось,
+    // и подменю, оставшееся после ухода курсора, обязано пережить ожидание.
+    await page.clock.fastForward(3000);
     const after = await readMenu(page);
-    expect(after.openCount, 'подменю закрылось, корень остался').toBe(1);
-    expect(after.activeLabels, 'выделение не вернулось вместе с подменю').toEqual([]);
+    expect(after.openCount, 'подменю не закрылось уходом курсора').toBe(2);
+    expect(after.activeLabels, 'выделение не вернулось само').toEqual([]);
     // Возврат фокуса в меню после сброса — не пустое утверждение: сначала
     // выделение было, и без сброса фокус остался бы на пункте под курсором.
     await page.keyboard.press('ArrowDown');

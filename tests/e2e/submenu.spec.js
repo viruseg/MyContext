@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { CLOSE_GRACE_MS, OPEN_GRACE_MS, SAFETY_PADDING, SUBMENU_OFFSET } from '../../src/constants.js';
+import { OPEN_GRACE_MS, SAFETY_PADDING, SUBMENU_OFFSET } from '../../src/constants.js';
 
 /**
  * Кейсы показа подменю против настоящей страницы: курсор водит настоящий ввод
@@ -24,11 +24,17 @@ import { CLOSE_GRACE_MS, OPEN_GRACE_MS, SAFETY_PADDING, SUBMENU_OFFSET } from '.
  * предмет половины кейсов. Наконец, `locator`-ожидания внутри замороженных часов
  * опираются на кадры браузера, которых при остановленном времени не бывает.
  *
- * **`reducedMotion: 'reduce'` убирает отложенное закрытие.** Слой под `reduce`
+ * **`reducedMotion: 'reduce'` убирает отложенное закрытие уровня.** Слой под `reduce`
  * вызывает `hidePopover()` сразу, а не через `animationDuration`, поэтому
  * «подменю закрылось» читается в том же снимке, в котором оно закрылось, и ни
- * один кейс не ждёт анимацию. Задержка закрытия подменю при этом остаётся
+ * один кейс не ждёт анимацию. Задержка открытия подменю при этом остаётся
  * настоящей — она у `hoverIntent`, а не у слоя, и её кейсы гоняют часами.
+ *
+ * **Закрытия подменю по уходу курсора не существует вовсе.** Состояние подменю
+ * принадлежит активному пункту родительского уровня: переход на соседний пункт
+ * закрывает прежнее подменю, а уход курсора в нейтральную область — нет. Поэтому
+ * часы здесь двигают только вперёд, а «ничего не произошло» проверяется ожиданием
+ * втрое больше прежнего срока закрытия: таймера, который мог бы сработать, нет.
  */
 
 /**
@@ -136,8 +142,6 @@ const VIEWPORT = { width: 1000, height: 700 };
  * в него ни справа, ни слева и прижимается к `padding`.
  */
 const NARROW_VIEWPORT = { width: 600, height: 700 };
-/** Насколько точка у края пункта отстоит от него самого, px. */
-const EDGE_INSET = 2;
 
 /**
  * Точки правого клика. Левая нужна, чтобы подменю помещалось справа, правая —
@@ -262,32 +266,6 @@ async function hoverNode(page, selector) {
   // Середина по вертикали у разделителя в один пиксель: промах на полпикселя ушёл бы
   // мимо него на соседний пункт, и кейс проверял бы не то.
   await page.mouse.move(found.left + found.width / 2, found.top + found.height / 2);
-}
-
-/**
- * Точка у правого края пункта — того края, который смотрит в сторону подменю. Ровно
- * центр для таких проверок не годится: он отстоит от обращённой границы пункта
- * почти на половину строки, и кейс прошёл бы при расширении безопасной области в
- * сторону владельца хоть на `SAFE_AREA_BUFFER`. Отступ от самого края — потому что
- * край и есть граница попадания.
- *
- * Только для владельца, раскрывшегося вправо: подменю, открытое влево, лежит за левым
- * краем пункта, и точка у правого края проверяла бы совсем другую область. Оба зовущих
- * кейса открывают меню в середине вьюпорта, где подменю помещается справа, — при флипе
- * оба молча перестали бы ловить мутацию.
- *
- * @param {import('@playwright/test').Page} page
- * @param {string} label
- * @returns {Promise<{ x: number, y: number }>}
- */
-async function facingEdgeOf(page, label) {
-  const rect = await page.evaluate((name) => {
-    const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
-    return scope.__mc.rectOf(name);
-  }, label);
-  expect(rect, `пункт «${label}» есть в разметке`).not.toBeNull();
-  const found = /** @type {MenuRect} */ (rect);
-  return { x: found.right - EDGE_INSET, y: found.top + found.height / 2 };
 }
 
 /**
@@ -660,6 +638,163 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+test.describe('правило соседа', () => {
+  test('переход на соседнего пункта без подменю закрывает подменю', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const exportId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Экспорт');
+    });
+    expect(exportId, 'адрес подменю «Экспорта» назван').not.toBeNull();
+    const submenuId = /** @type {string} */ (exportId);
+
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    // Контроль состояния: «закрылось» ниже имеет смысл, только если до перехода
+    // подменю было открыто.
+    expect(isOpen(await readMenu(page), submenuId), 'подменю открыто').toBe(true);
+
+    // «Новый» — сосед «Экспорта» в корне, и подменю у него нет. Переход на него и
+    // есть то единственное событие, которое уводит подменю: часы стоят, и ни
+    // миллиметра времени не прошло, то есть закрытие мгновенное.
+    await hoverItem(page, 'Новый');
+
+    const after = await readMenu(page);
+    expect(isOpen(after, submenuId), 'подменю закрылось').toBe(false);
+    expect(after.openCount, 'остался корень').toBe(1);
+    expect(expandedLabels(after), 'отметка развёрнутости снята').toEqual([]);
+    // Активным остался ровно сосед: состояние уровня перешло на него целиком, и
+    // уехавший владелец подсветки не удерживает.
+    expect(activeLabels(after), 'активен сосед, а не прежний владелец').toEqual(['Новый']);
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
+  });
+
+  test('переход на соседнего владельца закрывает прежнее и открывает новое', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const exportId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Экспорт');
+    });
+    expect(exportId, 'адрес подменю «Экспорта» назван').not.toBeNull();
+    const submenuId = /** @type {string} */ (exportId);
+
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const innerIds = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return {
+        png: scope.__mc.submenuIdOf('PNG'),
+        download: scope.__mc.submenuIdOf('Скачать'),
+      };
+    });
+    expect(innerIds.png, 'адрес подменю «PNG» назван').not.toBeNull();
+    expect(innerIds.download, 'адрес подменю «Скачать» назван').not.toBeNull();
+
+    // Цепочка из трёх уровней, чтобы было видно, что уносится вся ветка: переход
+    // на соседа внутри подменю «Экспорта» закрывает подменье «PNG» и открывает
+    // подменю «Скачать», а сам уровень «Экспорта» остаётся — он не подменю
+    // «Экспорта», а родитель перехода.
+    await hoverItem(page, 'PNG');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    expect((await readMenu(page)).openCount, 'открыты корень и два подменю').toBe(3);
+
+    await hoverItem(page, 'Скачать');
+    // Мгновенная часть перехода: прежнее подменю ушло, новое ещё не открыто —
+    // до него 250 мс. Оба состояния различимы, потому что часы стоят.
+    const midway = await readMenu(page);
+    expect(isOpen(midway, /** @type {string} */ (innerIds.png)), 'подменю «PNG» закрыто сразу').toBe(false);
+    expect(
+      isOpen(midway, /** @type {string} */ (innerIds.download)),
+      'подменю «Скачать» ещё не открыто',
+    ).toBe(false);
+    expect(isOpen(midway, submenuId), 'уровень «Экспорта» остался открытым').toBe(true);
+
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const after = await readMenu(page);
+    expect(isOpen(after, /** @type {string} */ (innerIds.download)), 'подменю нового владельца открыто')
+      .toBe(true);
+    expect(after.openCount, 'открыты корень, «Экспорт» и «Скачать»').toBe(3);
+    expect(expandedLabels(after).sort(), 'развёрнуты «Экспорт» и «Скачать»')
+      .toEqual(['Скачать', 'Экспорт']);
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
+  });
+
+  test('переход на соседа в корне уносит всю ветку подменю', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const exportId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Экспорт');
+    });
+    expect(exportId, 'адрес подменю «Экспорта» назван').not.toBeNull();
+    const submenuId = /** @type {string} */ (exportId);
+
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const innerIds = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('PNG');
+    });
+    expect(innerIds, 'адрес подменю «PNG» назван').not.toBeNull();
+    await hoverItem(page, 'PNG');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const deep = await readMenu(page);
+    expect(deep.openCount, 'открыты корень и два подменю').toBe(3);
+    expect(isOpen(deep, /** @type {string} */ (innerIds)), 'подменю «PNG» открыто').toBe(true);
+
+    // Переход на соседа в корне — на два уровня выше «PNG». Закрыться обязана вся
+    // ветка: унести только глубочайший уровень значило бы оставить подменю
+    // «Экспорта» висеть поверх пункта, который больше не выбран.
+    await hoverItem(page, 'Заметки');
+
+    const after = await readMenu(page);
+    expect(isOpen(after, /** @type {string} */ (innerIds)), 'глубочайшее подменю ушло').toBe(false);
+    expect(isOpen(after, submenuId), 'подменю «Экспорта» ушло вместе с ним').toBe(false);
+    expect(after.openCount, 'остался корень').toBe(1);
+    expect(expandedLabels(after), 'отметок развёрнутости не осталось').toEqual([]);
+  });
+
+  test('наведение на отключённого соседа не закрывает подменю', async ({ page }) => {
+    await makeMenu(page, 'pair', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    // Владелец за один показ успевает встать в карту подписок уровня. Отключение
+    // между показами обязано оттуда выйти: у отключённого пункта нет ни подсветки,
+    // ни подписки, и наведение на него не решает ничего — в том числе не закрывает
+    // чужое подменю. Это то же, что в системных меню: серая строка не выбирается,
+    // и раскрытое рядом подменю не сворачивается.
+    await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown } */ (globalThis));
+      scope.__mc.close();
+      scope.__mc.setAvailability(0, false);
+    });
+    await openAt(page, OPEN_MIDDLE);
+    const second = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown } */ (globalThis));
+      return scope.__mc.submenuIdOf('Второй');
+    });
+    expect(second, 'второй владелец на месте').not.toBeNull();
+    const secondId = /** @type {string} */ (second);
+
+    await hoverItem(page, 'Второй');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const opened = await readMenu(page);
+    expect(isOpen(opened, secondId), 'подменю второго открыто').toBe(true);
+    // Контроль премиссы: отключённый владелец не помечается развёрнутым.
+    expect(itemOf(opened, 'Первый').expanded, 'отметки развёрнутости нет').toBeNull();
+
+    await hoverItem(page, 'Первый');
+    // Втрое больше прежнего срока закрытия: таймера нет, и ждать тут нечего.
+    await page.clock.fastForward(3000);
+
+    const after = await readMenu(page);
+    expect(isOpen(after, secondId), 'подменю осталось открытым').toBe(true);
+    expect(after.openCount, 'открыты корень и подменю').toBe(2);
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
+  });
+});
+
 test.describe('показ подменю', () => {
   test('наведение на пункт с подменю не открывает его мгновенно', async ({ page }) => {
     await makeMenu(page, 'tree', 'surface');
@@ -909,122 +1044,6 @@ test.describe('показ подменю', () => {
     await page.keyboard.press('ArrowDown');
     expect((await readMenu(page)).focusLabel, 'роуминг идёт внутри подменю').toBe('PNG');
   });
-
-  test('показ в новой точке снимает отложенное закрытие', async ({ page }) => {
-    await makeMenu(page, 'tree', 'surface');
-    await openAt(page, OPEN_MIDDLE);
-    const exportId = await page.evaluate(() => {
-      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
-      return scope.__mc.submenuIdOf('Экспорт');
-    });
-
-    await hoverItem(page, 'Экспорт');
-    await page.clock.fastForward(OPEN_GRACE_MS);
-    // Курсор уходит с владельца в сторону, в дереве меню: закрытие запланировано,
-    // и срок его ещё не истёк. Кейс про диагональное движение держит вторую
-    // половину этой же траектории — там закрытие действительно срабатывает.
-    await hoverItem(page, 'Новый');
-    await page.clock.fastForward(CLOSE_GRACE_MS - 50);
-    expect(isOpen(await readMenu(page), exportId), 'подменю на месте').toBe(true);
-
-    // Показ в новой точке начинает полный цикл: уровни гаснут на месте, в Top Layer,
-    // и подменю прежней постановки уходит вместе с ними, — но отложенное закрытие
-    // относится к той же прежней постановке. Дальше подменю открывает клавиатура:
-    // этот путь не трогает hover intent ни на одном шаге, и ушедшая задача снесла бы
-    // подменю, открытое уже на новом месте.
-    await openAt(page, OPEN_FAR);
-    expect(isOpen(await readMenu(page), exportId), 'подменю прежней постановки скрыто').toBe(false);
-    // Два шага вниз: показ не отмечает пунктов, а первым доступным в корне стоит
-    // «Новый» — у него подменю нет.
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowRight');
-    await page.clock.fastForward(CLOSE_GRACE_MS);
-
-    const after = await readMenu(page);
-    expect(isOpen(after, exportId), 'подменю, открытое после переноса, не снесено').toBe(true);
-    expect(after.openCount, 'открыты корень и подменю').toBe(2);
-    expect(after.focusLabel, 'фокус в подменю').toBe('PDF');
-  });
-
-  test('уход курсора закрывает подменю, оставшееся после Escape', async ({ page }) => {
-    await makeMenu(page, 'tree', 'surface');
-    await openAt(page, OPEN_MIDDLE);
-    const exportId = await page.evaluate(() => {
-      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
-      return scope.__mc.submenuIdOf('Экспорт');
-    });
-
-    // Вход в цепочку с клавиатуры. Показ подменю мышью фокус из родительского
-    // уровня не уводит (спека 6.2), и `Escape` после такого показа закрыл бы всё
-    // меню одним нажатием вместо самого глубокого уровня. Показ не отмечает пунктов,
-    // поэтому каждому уровню предшествует шаг вниз: в корне их два — до «Экспорта»,
-    // в подменю «Экспорта» один — до «PNG».
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowRight');
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowRight');
-    expect((await readMenu(page)).openCount, 'открыты корень и два подменю').toBe(3);
-
-    // Escape закрывает уровень, где стоит фокус, — в обход `#hideSubmenuFor`, и
-    // потому в обход укорочения цепочки. Уровень уходит из цепочки здесь же, иначе
-    // следующая операция по цепочке — уход курсора — спрятала бы его снова вместо
-    // показанного подменю «Экспорта», и оно осталось бы висеть при курсоре,
-    // который давно ушёл в сторону.
-    await page.keyboard.press('Escape');
-    const closed = await readMenu(page);
-    expect(closed.openCount, 'подменю «PNG» закрыто').toBe(2);
-    expect(isOpen(closed, exportId), 'подменю «Экспорта» осталось открытым').toBe(true);
-
-    await hoverItem(page, 'Заметки');
-    await page.clock.fastForward(CLOSE_GRACE_MS);
-    const after = await readMenu(page);
-    expect(isOpen(after, exportId), 'подменю «Экспорта» закрыто').toBe(false);
-    expect(after.openCount, 'остался корень').toBe(1);
-    expect(expandedLabels(after), 'отметок развёрнутости не осталось').toEqual([]);
-  });
-
-  test('курсор на владельце, отключённом между показами, планирует закрытие как на любой строке', async ({ page }) => {
-    await makeMenu(page, 'pair', 'surface');
-    await openAt(page, OPEN_MIDDLE);
-    // Владелец за один показ успевает встать в карту показа подменю. Отключение
-    // между показами обязано оттуда выйти: на отключённом владельце решать нечего,
-    // и обработчик движения курсора возвращается до планирования закрытия, как на
-    // любой другой строке уровня.
-    await page.evaluate(() => {
-      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown } */ (globalThis));
-      scope.__mc.close();
-      scope.__mc.setAvailability(0, false);
-    });
-    await openAt(page, OPEN_MIDDLE);
-    const second = await page.evaluate(() => {
-      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown } */ (globalThis));
-      return scope.__mc.submenuIdOf('Второй');
-    });
-    expect(second, 'второй владелец на месте').not.toBeNull();
-
-    await hoverItem(page, 'Второй');
-    await page.clock.fastForward(OPEN_GRACE_MS);
-    const opened = await readMenu(page);
-    expect(isOpen(opened, /** @type {string} */ (second)), 'подменю второго открыто').toBe(true);
-    // Контроль премиссы: отключённый владелец не должен ни открывать подменю сам,
-    // ни помечаться развёрнутым.
-    const deaf = itemOf(opened, 'Первый');
-    expect(deaf.haspopup, 'у отключённого владельца нет `aria-haspopup`').toBeNull();
-    expect(deaf.expanded, 'отметки развёрнутости нет').toBeNull();
-
-    await hoverItem(page, 'Первый');
-    await page.clock.fastForward(CLOSE_GRACE_MS);
-
-    const after = await readMenu(page);
-    expect(isOpen(after, /** @type {string} */ (second)), 'подменю второго закрыто').toBe(false);
-    expect(after.openCount, 'остался корень').toBe(1);
-    // Наведение на отключённого владельца не открывает его подменю: раскрывать
-    // нечего, а открытое подменю было бы меню без пути к закрытию.
-    expect(expandedLabels(after), 'отметок развёрнутости не осталось').toEqual([]);
-  });
-
   test('диагональное движение к подменю не закрывает его', async ({ page }) => {
     await makeMenu(page, 'tree', 'surface');
     await openAt(page, OPEN_MIDDLE);
@@ -1040,13 +1059,14 @@ test.describe('показ подменю', () => {
     const opened = await readMenu(page);
     expect(isOpen(opened, submenuId), 'подменю открыто').toBe(true);
 
-    // Прямая от пункта-владельца к нижнему крайнему пункту подменю — то самое
-    // движение, ради которого всё и затевалось. Оно идёт по прямой по построению,
-    // и прямая — единственное движение, на котором безопасная область обязана
-    // покрывать весь путь целиком: зазор между уровнями равен `SUBMENU_OFFSET`, и
-    // расширения ровно на него хватает, чтобы отрезок не выходил из области ни в
-    // одной своей точке. Обе точки берутся из настоящих рамок, а `steps`
-    // действительно гонит курсор по отрезку, а не прыгает в конец.
+    // Прямая от пункта-владельца к нижнему крайнему пункту подменю — движение
+    // через зазор между уровнями, на котором закрытия не происходит вовсе: решения
+    // принимает активный пункт уровня, а на пути через зазор ни один соседний
+    // пункт не посещается. Прежде здесь стояла безопасная область вокруг подменю,
+    // и этот кейс держал её на прямой; теперь область нет, и проверяется другое —
+    // что переход через зазор не вызывает `pointerenter` ни на чужом пункте.
+    // Обе точки берутся из настоящих рамок, а `steps` действительно гонит курсор
+    // по отрезку, а не прыгает в конец.
     const inset = 4;
     const far = await page.evaluate((input) => {
       const level = document.getElementById(input.id);
@@ -1058,15 +1078,15 @@ test.describe('показ подменю', () => {
       if (last === undefined) {
         throw new Error('в подменю нет пунктов');
       }
-      // Нижний крайний пункт, а не первый: расстояние от пункта-владельца
-      // максимально, и подменю защищает не близость к началу пути, а весь отрезок
-      // целиком. Отступ от угла обязателен: сам угол скруглённой рамки в попадание
-      // не входит, и точка на нём не достала бы до пункта ни в одном движке.
+      // Отступ от угла обязателен: сам угол скруглённой рамки в зазор не входит,
+      // и точка на нём не достала бы до пункта ни в одном движке.
       const rect = last.getBoundingClientRect();
       return { x: rect.right - input.inset, y: rect.bottom - input.inset };
     }, { id: submenuId, inset });
     await page.mouse.move(far.x, far.y, { steps: 20 });
-    await page.clock.fastForward(CLOSE_GRACE_MS * 3);
+    // Втрое больше прежнего срока закрытия подменю: таймера закрытия не осталось,
+    // и ждать тут нечего — ожидание лишь доказывает, что подменю не гаснет само.
+    await page.clock.fastForward(3000);
 
     const after = await readMenu(page);
     expect(isOpen(after, submenuId), 'подменю пережило прямое движение к дальнему пункту').toBe(true);
@@ -1074,175 +1094,6 @@ test.describe('показ подменю', () => {
     expect(expandedLabels(after), 'владелец всё ещё развёрнут').toEqual(['Экспорт']);
     expect(after.errors, 'ошибок страницы нет').toEqual([]);
   });
-
-  test('курсор, ушедший в сторону, закрывает подменю после closeDelayMs', async ({ page }) => {
-    await makeMenu(page, 'tree', 'surface');
-    await openAt(page, OPEN_MIDDLE);
-    const ownerId = await page.evaluate(() => {
-      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
-      return scope.__mc.submenuIdOf('Экспорт');
-    });
-    expect(ownerId, 'адрес подменю «Экспорта» назван').not.toBeNull();
-    const submenuId = /** @type {string} */ (ownerId);
-
-    await hoverItem(page, 'Экспорт');
-    await page.clock.fastForward(OPEN_GRACE_MS);
-    // Контроль состояния: «не открыто» ниже имеет смысл только если до ухода
-    // курсора подменю было открыто.
-    expect(isOpen(await readMenu(page), submenuId), 'подменю открыто').toBe(true);
-
-    // Соседний пункт того же уровня: у «Нового» нет подменю, и он лежит в
-    // родительском уровне, то есть за расширением безопасной области в сторону
-    // владельца. В центре пункта это почти полстроки мимо, и кейс прошёл бы при
-    // расширении в ту же сторону хоть на `SAFE_AREA_BUFFER`; край соседа закрепляют
-    // два кейса ниже.
-    await hoverItem(page, 'Новый');
-    // Срок закрытия ещё не истёк: подменю обязано быть на месте.
-    await page.clock.fastForward(CLOSE_GRACE_MS - 50);
-    const pending = await readMenu(page);
-    expect(isOpen(pending, submenuId), 'до истечения срока подменю на месте').toBe(true);
-
-    await page.clock.fastForward(CLOSE_GRACE_MS);
-    const after = await readMenu(page);
-    expect(isOpen(after, submenuId), 'подменю закрылось').toBe(false);
-    expect(after.openCount, 'корень остался открытым').toBe(1);
-    expect(expandedLabels(after), 'отметка развёрнутости снята').toEqual([]);
-  });
-
-  test('край соседнего пункта родительского уровня не защищает подменю', async ({ page }) => {
-    await makeMenu(page, 'tree', 'surface');
-    await openAt(page, OPEN_MIDDLE);
-    const ownerId = await page.evaluate(() => {
-      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
-      return scope.__mc.submenuIdOf('Экспорт');
-    });
-    expect(ownerId, 'адрес подменю «Экспорта» назван').not.toBeNull();
-    const submenuId = /** @type {string} */ (ownerId);
-
-    await hoverItem(page, 'Экспорт');
-    await page.clock.fastForward(OPEN_GRACE_MS);
-    expect(isOpen(await readMenu(page), submenuId), 'подменю открыто').toBe(true);
-
-    // Край соседа, а не его центр: центр отстоит от обращённой границы пункта почти на
-    // половину строки, и такой кейс прошёл бы при расширении в сторону владельца хоть
-    // на `SAFE_AREA_BUFFER`. Именно край и отличает соседа от владельца, поэтому
-    // правило «расширять в сторону владельца можно ровно на зазор» закрепляется здесь.
-    await moveTo(page, await facingEdgeOf(page, 'Новый'));
-    await page.clock.fastForward(CLOSE_GRACE_MS);
-
-    const after = await readMenu(page);
-    expect(isOpen(after, submenuId), 'подменю закрылось').toBe(false);
-    expect(after.openCount, 'корень остался открытым').toBe(1);
-    expect(expandedLabels(after), 'отметка развёрнутости снята').toEqual([]);
-
-    // Контроль живости: точка стояла на соседе, а не в пустоте меню, — назад по
-    // наведению подменю открывается тем же уровнем. Без этого шага «закрылось» не
-    // отличалось бы от «меню перестало показывать подменю вообще».
-    await hoverItem(page, 'Экспорт');
-    await page.clock.fastForward(OPEN_GRACE_MS);
-    expect(isOpen(await readMenu(page), submenuId), 'подменю снова открыто').toBe(true);
-  });
-
-  test('край соседнего пункта-владельца, не раскрытого, не защищает подменю', async ({ page }) => {
-    await makeMenu(page, 'tree', 'surface');
-    await openAt(page, OPEN_MIDDLE);
-    const ownerId = await page.evaluate(() => {
-      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
-      return scope.__mc.submenuIdOf('Экспорт');
-    });
-    expect(ownerId, 'адрес подменю «Экспорта» назван').not.toBeNull();
-    const submenuId = /** @type {string} */ (ownerId);
-
-    await hoverItem(page, 'Экспорт');
-    await page.clock.fastForward(OPEN_GRACE_MS);
-    expect(isOpen(await readMenu(page), submenuId), 'подменю открыто').toBe(true);
-
-    // Тот же край, но сосед — отключённый владелец: подменю у него есть и не
-    // раскрыто быть не может, то есть по виду он от владельца «Экспорта» не
-    // отличается. Проверять надо именно его: показ подменю на соседе снял бы
-    // запланированное закрытие и скрыл бы промах, а здесь решения принимает
-    // геометрия безопасной области.
-    await moveTo(page, await facingEdgeOf(page, 'Глухой'));
-    await page.clock.fastForward(CLOSE_GRACE_MS);
-
-    const after = await readMenu(page);
-    expect(isOpen(after, submenuId), 'подменю закрылось').toBe(false);
-    expect(after.openCount, 'корень остался открытым').toBe(1);
-    expect(expandedLabels(after), 'отметка развёрнутости снята').toEqual([]);
-  });
-
-  test('подменю, прижатое к краю вьюпорта, переживает переход через зазор', async ({ page }) => {
-    // Вьюпорта набора `wide` хватает, чтобы его подменю не поместилось ни справа, ни
-    // слева. Общий `beforeEach` ради этого менять нельзя: остальным кейсам файла его
-    // вьюпорт нужен для четырёх уровней вложенности.
-    await page.setViewportSize(NARROW_VIEWPORT);
-    await makeMenu(page, 'wide', 'surface');
-    await openAt(page, OPEN_WIDE);
-    const ownerId = await page.evaluate(() => {
-      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
-      return scope.__mc.submenuIdOf('Край');
-    });
-    expect(ownerId, 'адрес подменю назван').not.toBeNull();
-    const submenuId = /** @type {string} */ (ownerId);
-
-    await hoverItem(page, 'Край');
-    await page.clock.fastForward(OPEN_GRACE_MS);
-    const opened = await readMenu(page);
-    expect(isOpen(opened, submenuId), 'подменю открыто').toBe(true);
-
-    // Предмет кейса — геометрия показа, и без её проверки «прижатое к краю» было бы
-    // предположением. Обе неудачные попытки позиционера проверяются явно, а не
-    // через `left === SAFETY_PADDING`: прижатым может оказаться и не тот край.
-    const owner = itemOf(opened, 'Край');
-    const shown = opened.levels.find((level) => {
-      return level.id === submenuId;
-    });
-    expect(shown, 'подменю показано').not.toBeUndefined();
-    const submenu = /** @type {LevelView} */ (shown);
-    expect(
-      owner.rect.right + SUBMENU_OFFSET + submenu.rect.width,
-      'справа не помещается',
-    ).toBeGreaterThan(NARROW_VIEWPORT.width - SAFETY_PADDING);
-    expect(
-      owner.rect.left - SUBMENU_OFFSET - submenu.rect.width,
-      'слева не помещается',
-    ).toBeLessThan(SAFETY_PADDING);
-    expect(submenu.rect.left, 'прижато к отступу').toBeCloseTo(SAFETY_PADDING, 1);
-    // Расширение в сторону владельца здесь не работает: подменю прижато к краю
-    // слева, а владелец стоит правее, и зазор между ними в разы больше
-    // `SUBMENU_OFFSET`. Переход держит сам прямоугольник и вход в подменю.
-    expect(
-      Math.abs(owner.rect.right - submenu.rect.left),
-      'зазор больше SUBMENU_OFFSET',
-    ).toBeGreaterThan(SUBMENU_OFFSET);
-
-    // Прямая к нижнему крайнему пункту прижатого подменю. Курсор идёт по отрезку
-    // `steps` точками, и часы стоят, поэтому переход через зазор не растягивается
-    // на `CLOSE_GRACE_MS`: проверяется решение по каждой точке, а не скорость
-    // настоящей руки.
-    const inset = 4;
-    const far = await page.evaluate((input) => {
-      const level = document.getElementById(input.id);
-      if (level === null) {
-        throw new Error('подменю показано, но узла нет');
-      }
-      const items = level.querySelectorAll('.vc-item');
-      const last = items[items.length - 1];
-      if (last === undefined) {
-        throw new Error('в подменю нет пунктов');
-      }
-      const rect = last.getBoundingClientRect();
-      return { x: rect.left + rect.width / 2, y: rect.bottom - input.inset };
-    }, { id: submenuId, inset });
-    await page.mouse.move(far.x, far.y, { steps: 20 });
-    await page.clock.fastForward(CLOSE_GRACE_MS * 3);
-
-    const after = await readMenu(page);
-    expect(isOpen(after, submenuId), 'подменю пережило переход через зазор').toBe(true);
-    expect(expandedLabels(after), 'владелец всё ещё развёрнут').toEqual(['Край']);
-    expect(after.errors, 'ошибок страницы нет').toEqual([]);
-  });
-
   test('переход на другой пункт усекает цепочку', async ({ page }) => {
     await makeMenu(page, 'tree', 'surface');
     await openAt(page, OPEN_MIDDLE);
@@ -1564,13 +1415,13 @@ test.describe('показ подменю', () => {
     expect(moved.openCount, 'открыт только корень').toBe(1);
     expect(expandedLabels(moved), 'отметка развёрнутости снята').toEqual([]);
 
-    // Уход в сторону и обратно. Уровень при этом скрывается, но не пересоздаётся:
-    // идентичность уровня задаёт пара «родитель, владелец», и новый уровень получил
-    // бы новый `id`.
+    // Переход на соседний пункт того же уровня и обратно. Уровень при этом
+    // скрывается, но не пересоздаётся: идентичность уровня задаёт пара
+    // «родитель, владелец», и новый уровень получил бы новый `id`. Закрытие
+    // мгновенное — переход на соседа и есть решение.
     await hoverItem(page, 'Экспорт');
     await page.clock.fastForward(OPEN_GRACE_MS);
     await hoverItem(page, 'Заметки');
-    await page.clock.fastForward(CLOSE_GRACE_MS);
     expect(isOpen(await readMenu(page), exportId), 'подменю закрылось').toBe(false);
     await hoverItem(page, 'Экспорт');
     await page.clock.fastForward(OPEN_GRACE_MS);
