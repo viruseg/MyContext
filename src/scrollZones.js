@@ -197,6 +197,10 @@ export function createScrollZones(options) {
     up.removeEventListener('pointerleave', onZoneLeave);
     down.removeEventListener('pointerenter', onDownEnter);
     down.removeEventListener('pointerleave', onZoneLeave);
+    // `removeEventListener` смотрит только на `capture`, поэтому опция `passive`
+    // при снятии не повторяется и подписку не оставляет.
+    up.removeEventListener('wheel', onZoneWheel);
+    down.removeEventListener('wheel', onZoneWheel);
     list.removeEventListener('scroll', onListScroll);
   }
 
@@ -228,6 +232,29 @@ export function createScrollZones(options) {
     sync();
   }
 
+  /**
+   * Колесо над зоной не достаётся ни до чего.
+   *
+   * У зоны нет `overflow`, поэтому без `preventDefault` колесо уходит странице,
+   * страница скроллится, и глобальный обработчик закрывает меню. Зона — часть
+   * меню, и колесо над ней относится к меню так же, как колесо над самим списком.
+   *
+   * Заблокированная зона не исключение: там некуда идти прокрутке, но колесо всё
+   * так же не её. Различать состояния зон незачем — колесо гасится и на верхней,
+   * и на нижней, и решение о том, есть ли куда идти, принимает цикл по кадрам, а
+   * не это тело.
+   *
+   * Подписка обязана быть `passive: false`: браузер отменяет прокрутку по
+   * умолчанию у пассивного слушателя, и `preventDefault` в нём молчал бы, оставив
+   * ровно то поведение, которое здесь убирается.
+   *
+   * @param {WheelEvent} event
+   * @returns {void}
+   */
+  function onZoneWheel(event) {
+    event.preventDefault();
+  }
+
   // Подписка одна на контроллер, а не на `refresh`: пересчитывать признак можно
   // сколько угодно раз, слушателей столько не бывает. `scroll` слушается прямо
   // на списке — он не всплывает, и делегат на уровне его не увидит.
@@ -235,6 +262,8 @@ export function createScrollZones(options) {
   up.addEventListener('pointerleave', onZoneLeave);
   down.addEventListener('pointerenter', onDownEnter);
   down.addEventListener('pointerleave', onZoneLeave);
+  up.addEventListener('wheel', onZoneWheel, { passive: false });
+  down.addEventListener('wheel', onZoneWheel, { passive: false });
   list.addEventListener('scroll', onListScroll, { passive: true });
 
   return { refresh, stop, destroy };

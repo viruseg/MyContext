@@ -1443,43 +1443,82 @@ test.describe('живое меню', () => {
     expect(after.open, 'меню не закрылось').toBe(true);
   });
 
-  test('колесо над зоной прокручивает страницу и закрывает меню', async ({ page }) => {
+  test('колесо над зоной не прокручивает страницу и не закрывает меню', async ({ page }) => {
     await mountLiveMenu(page, 'first', { kind: 'long', prefix: 'Пункт' });
     await openLiveMenu(page, 'first', LIVE_POINTS.first);
     const levelId = await liveLevelIdOf(page, 'first');
-    const before = await page.evaluate(() => globalThis.scrollY);
-    // Контроль исходного места: у страницы, которая не прокручивается, колесо
-    // не дало бы события `scroll`, и закрытие проверялось бы на отсутствии
-    // события вместо его обработки.
-    expect(before, 'страница в начале').toBe(0);
+    const before = await readLive(page, levelId);
+    // Контроль исходного места обязателен: у страницы, которая не прокручивается,
+    // колесо не дало бы события `scroll`, и проверялось бы отсутствие события вместо
+    // его обработки.
+    expect(await page.evaluate(() => globalThis.scrollY), 'страница в начале').toBe(0);
+    expect(before.blocked, 'в начале гаснет только верхняя зона').toEqual({ up: true, down: false });
 
     await page.locator(`#${levelId} ${ZONE_DOWN}`).hover();
     await page.mouse.wheel(0, 120);
-    // Закрытие проверяется после паузы, а не мгновенно: под `reduce` слой зовёт
-    // `hidePopover` сразу, но проверять «закрылось» на следующем же кадре — значит
-    // проверять уход курсора из-под зоны, а не закрытие по прокрутке страницы.
+    // Пауза втрое больше срока закрытия меню скроллом: без неё кейс прошёл бы на
+    // закрытии, которое просто ещё не успело произойти.
     await page.waitForTimeout(SETTLE_MS);
 
-    // Контроль: колесо ушло странице. У зоны нет `overflow`, поэтому она не
-    // прокручивается и отдаёт колесо документу — как любой фон под меню.
+    // Зона — часть меню, и колесо над ней относится к меню так же, как колесо над
+    // самим списком. Раньше у зоны не было `overflow`, колесо уходило странице, а
+    // прокрутка страницы закрывала меню: одно движение колеса над зоной убирало
+    // меню с экрана, хотя прокручивать там было нечего.
     const scrolled = await page.evaluate(() => globalThis.scrollY);
-    expect(scrolled, 'страница прокрутилась').toBeGreaterThan(0);
+    expect(scrolled, 'страница не прокрутилась').toBe(0);
+
+    const after = await readLive(page, levelId);
     // Закрыт уровень, а не «не виден»: `isVisible()` у закрытого меню врёт во всех
     // трёх движках (замерено), потому что авторское `display: flex` у `.vc-menu`
-    // перебивает UA-правило `[popover]:not(:popover-open)`, и закрытый уровень
-    // остаётся с раскладкой и рамкой. Гасит его `opacity: 0`, а её видимость
-    // Playwright не смотрит. Поэтому закрытие читается двумя признаками: поповер
-    // ушёл из Top Layer, и уровень ничего не рисует.
-    //
-    // Само по себе закрытие здесь не привязано к прокрутке страницы: наведение на
-    // свободную зону запускает автоскролл, и кейс прошёл бы, даже если бы закрытие
-    // вызывал любой скролл. Привязку даёт соседний кейс «наведение на нижнюю зону
-    // прокручивает список вниз до упора», где меню после автоскролла в упор остаётся
-    // показанным: вместе эти два кейса и отделяют закрытие по прокрутке страницы от
-    // закрытия по прокрутке вообще.
+    // перебивает UA-правило `[popover]:not(:popover-open)`. Гасит закрытый уровень
+    // `opacity: 0`, а её видимость Playwright не смотрит.
+    expect(after.open, 'меню осталось в Top Layer').toBe(true);
+    expect(after.opacity, 'меню нарисовано').toBe('1');
+    // Список уехал вниз — но от автоскролла по наведению, а не от колеса: цикл по
+    // кадрам живёт на `pointerenter` и от `wheel` не зависит. Гашение колеса не
+    // должно было остановить и его.
+    expect(after.scrollTop, 'автоскролл по наведению отработал').toBeGreaterThan(before.scrollTop);
+    expect(after.scrollTop, 'список не доехал до низа').toBeLessThan(after.travel);
+  });
+
+  test('колесо над блокированной зоной тоже гасится', async ({ page }) => {
+    await mountLiveMenu(page, 'first', { kind: 'long', prefix: 'Пункт' });
+    await openLiveMenu(page, 'first', LIVE_POINTS.first);
+    const levelId = await liveLevelIdOf(page, 'first');
+
+    // Доводим список до низа прокруткой над ним: колесом над списком, а не над
+    // зоной — иначе блокировку зоны создавал бы сам предмет проверки.
+    await page.locator(`#${levelId} ${LIST}`).hover();
+    await page.evaluate((id) => {
+      const list = document.querySelector(`#${id} .vc-list`);
+      if (list === null) {
+        throw new Error('у уровня нет списка');
+      }
+      list.scrollTop = list.scrollHeight;
+    }, levelId);
+    // Признак упора ставит обработчик `scroll` на самом списке, а событие приходит
+    // после кадра: без ожидания снимок увидел бы прежнее состояние зон.
+    await page.waitForFunction(
+      (id) => {
+        const zone = document.querySelector(`#${id} .vc-scroll-zone-down`);
+        return zone !== null && zone.hasAttribute('data-vc-blocked');
+      },
+      levelId,
+    );
+    const atBottom = await readLive(page, levelId);
+    expect(atBottom.blocked.down, 'нижняя зона заблокирована').toBe(true);
+    expect(await page.evaluate(() => globalThis.scrollY), 'страница в начале').toBe(0);
+
+    // Блокировка — свойство прокрутки, а не «зоны нет». Зона остаётся на месте и
+    // остаётся частью меню, поэтому колесо над ней гасится так же.
+    await page.locator(`#${levelId} ${ZONE_DOWN}`).hover();
+    await page.mouse.wheel(0, 120);
+    await page.waitForTimeout(SETTLE_MS);
+
+    expect(await page.evaluate(() => globalThis.scrollY), 'страница не прокрутилась').toBe(0);
     const after = await readLive(page, levelId);
-    expect(after.open, 'меню закрылось').toBe(false);
-    expect(after.opacity, 'закрытое меню не нарисовано').toBe('0');
+    expect(after.open, 'меню осталось в Top Layer').toBe(true);
+    expect(after.displays, 'зона осталась на месте').toEqual({ up: 'flex', down: 'flex' });
   });
 
   test('вход в зону снимает выделение пункта', async ({ page }) => {
