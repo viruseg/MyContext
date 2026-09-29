@@ -2,6 +2,7 @@ import { DEFAULT_ANIMATION_DURATION, DEFAULT_MENU_LABEL, SAFE_AREA_BUFFER, SUBME
 import { createHoverIntent } from './hoverIntent.js';
 import { createKeyboard } from './keyboard.js';
 import { createLayer } from './layer.js';
+import { assertItems } from './renderer.js';
 
 /**
  * @typedef {import('./icons.js').EmojiIconConfig} EmojiIconConfig
@@ -37,9 +38,6 @@ import { createLayer } from './layer.js';
 const ITEM_SELECTOR = '.vc-item';
 const MENU_SELECTOR = '.vc-menu';
 const SCROLL_ZONE_SELECTOR = '.vc-scroll-zone';
-const SEPARATOR_TYPE = 'separator';
-const RASTER_TYPE = 'raster';
-const ICON_TYPES = new Set([RASTER_TYPE, 'emoji', 'svg']);
 const ITEMS_PATH = 'items';
 const CHAIN_ROOT_INDEX = 0;
 const PRIMARY_MOUSE_BUTTON = 0;
@@ -62,38 +60,6 @@ function isNonEmptyString(value) {
  */
 function isRecord(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/**
- * Иконка допустима при совпадении `type` одному из трёх видов, и у каждого вида
- * своё обязательное поле: у `emoji` и `svg` — непустой `value`, у `raster` —
- * непустой `alt`. Проверка `alt` единственная: рендерер подставит защитничную
- * пустую строку, и дефект уехал бы в скринридер. `value` обязателен у всех трёх
- * видов: без него `isSafeRasterUrl` разбирает `undefined` как адрес текущей
- * страницы, проходит проверку схемы и отдаёт `<img>` запрос за `undefined`.
- *
- * @param {unknown} icon описание иконки.
- * @param {string} path путь до описания.
- * @returns {void}
- * @throws {TypeError} на первом негодном поле.
- */
-function validateIcon(icon, path) {
-  if (icon === undefined) {
-    return;
-  }
-  if (!isRecord(icon)) {
-    throw new TypeError(`${path}: описание иконки должно быть объекром`);
-  }
-  const type = icon.type;
-  if (typeof type !== 'string' || !ICON_TYPES.has(type)) {
-    throw new TypeError(`${path}.type: неизвестный тип иконки, ожидается emoji, svg или raster`);
-  }
-  if (!isNonEmptyString(icon.value)) {
-    throw new TypeError(`${path}.value: у иконки ${type} обязателен непустой value`);
-  }
-  if (type === RASTER_TYPE && !isNonEmptyString(icon.alt)) {
-    throw new TypeError(`${path}.alt: у растровой иконки обязателен непустой alt`);
-  }
 }
 
 /**
@@ -909,6 +875,9 @@ export class MyContext {
       theme: this.#options.theme,
       animationDuration: this.#options.animationDuration,
       actions: this.#actions,
+      onLevelsDiscarded: (entries) => {
+        this.#forgetLevels(entries);
+      },
     });
     // `hoverIntent` решает, когда показывать и когда скрывать, и решает это
     // колбэками, а не опросом `isOpenPending`: опрос превратил бы модуль в
@@ -1309,14 +1278,14 @@ export class MyContext {
       return;
     }
     const parent = this.#levels.get(/** @type {HTMLElement} */ (level));
-    if (parent === undefined || rendered.key === null) {
+    const submenuItems = rendered.submenuItems;
+    // Владелец у рендерера один, и подменю у него ровно одно — то самое, что он
+    // развернул на этом показе. Второй вызов `submenuAction` здесь был бы вторым
+    // мнением о составе, а автор с побочным эффектом отдал бы два разных меню.
+    if (parent === undefined || submenuItems === null) {
       return;
     }
-    const item = this.#actions.get(rendered.key);
-    if (item === undefined || item.submenu === undefined) {
-      return;
-    }
-    this.#openSubmenu(this.#ensureSubmenuLevel(item.submenu, parent, rendered));
+    this.#openSubmenu(this.#ensureSubmenuLevel(submenuItems, parent, rendered));
   }
 
   /**
@@ -1553,6 +1522,38 @@ export class MyContext {
   }
 
   /**
+   * Забывает уровни, снятые слоем: их элементы, подписки на показ подменю, записи
+   * карты действий и регистрацию в движке.
+   *
+   * Слой владеет DOM и сообщает, что снёс; всё остальное помнит уже не он, и без
+   * этого прохода осталось бы помнить: `#showTargets` отдавал бы показ подменю
+   * пункту отцепленного уровня, а `Tab` в движке зациклился бы на пункте, события
+   * которого больше не придут. Записи `#actions` уходят по префиксу `menuId` —
+   * адрес уровня входит в ключ каждого его пункта, и иначе они остались бы навсегда.
+   *
+   * @param {LevelEntry[]} entries снесённые уровни, от глубоких к снесённому.
+   * @returns {void}
+   */
+  #forgetLevels(entries) {
+    for (const entry of entries) {
+      const element = entry.element;
+      this.#levels.delete(element);
+      const prefix = `${element.id}:`;
+      for (const key of [...this.#actions.keys()]) {
+        if (key.startsWith(prefix)) {
+          this.#actions.delete(key);
+        }
+      }
+      for (const [itemElement] of [...this.#showTargets]) {
+        if (element.contains(itemElement)) {
+          this.#showTargets.delete(itemElement);
+        }
+      }
+    }
+    this.#keyboard.forgetLevels(entries);
+  }
+
+  /**
    * Заводит уровни подменю на шаг вперёд — ровно для тех пунктов уровня, которые
    * рендерер назвал владельцами и которые роуминг может сделать активными. На тех
    * же пунктах вешается показ по наведению и по нажатию: подписка на показ и
@@ -1568,19 +1569,15 @@ export class MyContext {
    */
   #leadAhead(entry) {
     for (const rendered of entry.items) {
-      if (!rendered.hasSubmenu || !rendered.focusable || rendered.key === null) {
+      if (!rendered.hasSubmenu || !rendered.focusable || rendered.submenuItems === null) {
         this.#unsubscribeShowTarget(rendered);
         continue;
       }
-      const item = this.#actions.get(rendered.key);
       // `hasSubmenu` рендерер ставит только непустому подменю доступного пункта, а
-      // `submenu` у пункта обязано быть массивом — валидация прошла в
-      // конструкторе. Проверка оставлена потому, что карта действий принадлежит
-      // экземпляру, а лишнее условие стоит одного сравнения с `undefined` на
+      // `submenuItems` у владельца обязано быть непустым — проверка прошла при
+      // разворачивании. Проверка оставлена потому, что `#showTargets` и уровни
+      // принадлежат экземпляру, а лишнее условие стоит одного сравнения с `null` на
       // каждом владельце.
-      if (item === undefined || item.submenu === undefined) {
-        continue;
-      }
       // `addEventListener` не дублирует слушатель с той же ссылкой на том же
       // узле, а показ уровня зовёт этот проход на каждом показе, — повторных
       // подписок не будет.
@@ -1588,7 +1585,7 @@ export class MyContext {
       rendered.element.addEventListener('pointerenter', this.#onItemEnter);
       rendered.element.addEventListener('pointerleave', this.#onItemLeave);
       rendered.element.addEventListener('pointerdown', this.#onItemDown);
-      this.#ensureSubmenuLevel(item.submenu, entry, rendered);
+      this.#ensureSubmenuLevel(rendered.submenuItems, entry, rendered);
     }
   }
 
@@ -1769,84 +1766,22 @@ export class MyContext {
   }
 
   /**
-   * Рекурсивная проверка конфигурации.
+   * Проверка корневого состава.
    *
    * Первым же оператором конструктора: экземпляр с негодной конфигурацией появляться
    * не должен, и сообщение обязано называть путь до поля — вложенность конфигурации
    * с одного взгляда не читается.
    *
-   * @param {unknown} items пункты уровня; у корня это `items`, у подменю —
-   *   `items[n].submenu`.
-   * @param {string} [path] путь до проверяемого набора.
+   * Проверяется только корневой состав. Подменю не проверяются здесь вовсе: их
+   * предъявляет `submenuAction` на показе, и до показа их не существует. Проверка
+   * формы пункта живёт в рендерере одна на оба места, и та же проверка проходит
+   * состав, когда уровень из него строится.
+   *
+   * @param {unknown} items корневой состав меню.
    * @returns {void}
    * @throws {TypeError} на первом негодном поле.
    */
-  #validate(items, path = ITEMS_PATH) {
-    if (!Array.isArray(items)) {
-      throw new TypeError(`${path}: пункты меню должны быть массивом`);
-    }
-    // Пустой корень — ошибка: меню без пунктов не рисуется, и автор узнал бы об
-    // этом только кликом. Пустое подменю — не ошибка, см. `#validateItem`.
-    if (items.length === 0) {
-      throw new TypeError(`${path}: меню без пунктов не рисуется`);
-    }
-    items.forEach((item, index) => {
-      this.#validateItem(item, `${path}[${index}]`);
-    });
-  }
-
-  /**
-   * @param {unknown} item проверяемый пункт или разделитель.
-   * @param {string} path путь до пункта.
-   * @returns {void}
-   * @throws {TypeError} на первом негодном поле.
-   */
-  #validateItem(item, path) {
-    if (!isRecord(item)) {
-      throw new TypeError(`${path}: пункт должен быть объектом`);
-    }
-    // Разделитель отличается от пункта единственным полем, поэтому проверка идёт по
-    // нему же. Объявленное `type` обязано быть ровно `separator`: иначе опечатка
-    // автора тихо стала бы пунктом, и меню показало бы строку там, где разделитель.
-    if (item.type !== undefined) {
-      if (item.type !== SEPARATOR_TYPE) {
-        throw new TypeError(
-          `${path}.type: разделитель помечается значением "${SEPARATOR_TYPE}", получено ${String(item.type)}`,
-        );
-      }
-      return;
-    }
-    if (typeof item.label !== 'string' || item.label.trim() === '') {
-      throw new TypeError(`${path}.label: пункт обязан иметь непустую подпись`);
-    }
-    validateIcon(item.icon, `${path}.icon`);
-    if (item.action !== undefined && typeof item.action !== 'function') {
-      throw new TypeError(`${path}.action: обработчик пункта должен быть функцией`);
-    }
-    // `disabled` отклоняется, а не игнорируется: поле ушло из контракта в пользу
-    // `isEnabledAction`, и оставленное автором `disabled: true` иначе молча
-    // сделало бы пункт активным. Автор узнал бы об этом по клику, который сработал
-    // там, где действие выключено. Довод тот же, что и у `type` у разделителя.
-    if (item.disabled !== undefined) {
-      throw new TypeError(
-        `${path}.disabled: поле убрано, используйте isEnabledAction: () => boolean`,
-      );
-    }
-    if (item.isEnabledAction !== undefined && typeof item.isEnabledAction !== 'function') {
-      throw new TypeError(`${path}.isEnabledAction: предикат доступности должен быть функцией`);
-    }
-    const submenu = item.submenu;
-    if (submenu === undefined) {
-      return;
-    }
-    if (!Array.isArray(submenu)) {
-      throw new TypeError(`${path}.submenu: подменю должно быть массивом`);
-    }
-    // Пустое подменю — не подменю, но и не ошибка конфигурации: владельцем его
-    // делает рендерер по непустоте массива, и обходить нечего. Проверка непустоты
-    // здесь была бы вторым мнением об одном и том же решении.
-    if (submenu.length > 0) {
-      this.#validate(submenu, `${path}.submenu`);
-    }
+  #validate(items) {
+    assertItems(items, ITEMS_PATH);
   }
 }

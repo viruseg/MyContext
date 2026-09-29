@@ -9,7 +9,12 @@ import { renderIcon } from './icons.js';
  * ключ пункта, список доступных фокусу пунктов, зарезервированные идентификаторы
  * подменю для `aria-owns` и узлы прокрутки уровня.
  *
- * Четыре решения, которые нельзя вывести из разметки, зафиксированы здесь.
+ * Он же держит контракт пункта: проверку его формы, проверку результатов его
+ * действий и отпечаток его состава. Проверка описания иконки живёт здесь, а не в
+ * `icons.js`, потому что это проверка поля пункта наравне с подписью и подменю, а
+ * `icons.js` отвечает ровно за одну вещь: превратить уже годное описание в узел.
+ *
+ * Пять решений, которые нельзя вывести из разметки, зафиксированы здесь.
  *
  * **Ключ пункта — `${menuId}:${itemIndex}`, а не авторский `id`.** Идентификатор
  * у пункта опционален и может повторяться, а ключ обязан быть уникальным в
@@ -28,9 +33,9 @@ import { renderIcon } from './icons.js';
  *
  * **Обе боковые колонки зарезервированы всегда.** Слот иконки создаётся даже там,
  * где иконки нет, а колонку шеврона держит дорожка сетки из
- * `styles/mycontext.css`. Собственно элемент `.vc-chevron` создаётся только у
- * владельцев подменю. Из этого следует и то, что открытие подменю не сдвигает
- * ни одного лейбла.
+ * `styles/mycontext.css`. Собственно элемент `.vc-chevron` создаётся у каждого
+ * пункта, но в разметку попадает только у владельцев. Из этого следует и то, что
+ * открытие подменю не сдвигает ни одного лейбла.
  *
  * **Владелец — это одно условие: непустое подменю И доступный пункт.**
  * Отключённый пункт с непустым подменю владельцем не является: раскрыть его
@@ -41,14 +46,14 @@ import { renderIcon } from './icons.js';
  * `focusable` и `hasSubmenu` читают одно и то же, поэтому пункт не может
  * оказаться недоступным для роуминга и при этом обещать подменю.
  *
- * **Перечитывается `isEnabledAction`, и только он.** Уровень переиспользуется между
- * показами, а решение о доступности принимается при его сборке, — без
- * `refreshItems` предикат, изменивший смысл действия после первого показа, не
- * действовал бы никогда. Непустота подменю при этом не перечитывается: состав
- * уровня, подписи и иконки задаются первой сборкой, и меняются они новым
- * экземпляром. Владельцем пункт остаётся по факту непустого подменю, снятому при
- * сборке, — поэтому признак владельца выводится из `submenuId`, а не из текущего
- * `item.submenu`.
+ * **Четыре действия пункта перечитываются на каждом показе, а состав уровня
+ * перестраивается по отпечатку.** Уровень живёт дольше одного показа, и решение
+ * принимается при его сборке, — без `refreshItems` действие, изменившее смысл
+ * после первого показа, не действовало бы никогда. Перечитываются все четыре:
+ * доступность, подпись, иконка и подменю. Состав при этом не перечитывается, а
+ * сверяется: `submenuHashOf` кодирует значения полей по позициям, и разошёлся
+ * отпечаток — уровень перестраивается целиком, со сбросом всех состояний;
+ * совпал — перестраивать нечего, потому что различаться больше нечему.
  *
  * **Каждый владелец подменю резервирует `id` подменю в `aria-owns`.** Подменю
  * лежат в `<body>` рядом с корневым меню, а не внутри пункта (спека 8.3):
@@ -58,26 +63,38 @@ import { renderIcon } from './icons.js';
  * нет контейнера-`menu`, и `aria-owns` указывает на ещё не созданный узел.
  * Создатель подменю обязан взять идентификатор из
  * `owner.getAttribute('aria-owns')`: другой id сделал бы ссылку висячей.
- * Зарезервированный id хранится у пункта в `submenuId` — оттуда его и
- * возвращает `refreshItems`, потому что второй идентификатор на то же подменю
- * сделал бы ссылку висячей с другой стороны.
+ * Адрес выводится из `menuId` и позиции пункта, а не запоминается навсегда:
+ * пункт, не бывший владельцем при сборке, может стать им позже, и его адрес
+ * тогда ещё не существует.
  */
 
 /**
  * @typedef {object} MenuItem
+ * @property {() => string} labelAction подпись пункта. Зовётся при каждом показе;
+ *   вернул не строку или пустую — `TypeError` с путём до поля, исключение уходит
+ *   наружу. Единственное обязательное поле: пункт без подписи не читается и не
+ *   проходит аудит, поэтому подставлять её по умолчанию нечем.
  * @property {string} [id] авторский идентификатор. Копируется в `data-id` и в
- *   ключ пункта не входит: он опционален и может повторяться.
- * @property {string} label текст пункта.
- * @property {import('./icons.js').IconConfig} [icon] иконка. Без неё слот
+ *   отпечаток состава уровня входит, а в ключ пункта — нет: он опционален и может
+ *   повторяться.
+ * @property {() => import('./icons.js').IconConfig} [iconAction] иконка. Зовётся
+ *   при каждом показе; вернула не описание иконки — `TypeError`. Без неё слот
  *   остаётся пустым, но занимает место.
+ * @property {() => Array<MenuItem | SeparatorItem>} [submenuAction] непустой
+ *   массив — и только тогда, вместе с доступностью по `isEnabledAction`, пункт
+ *   считается владельцем подменю. Разделитель внутри подменю разрешён: подменю
+ *   отличается от корня только тем, откуда оно пришло. Зовётся при каждом показе
+ *   владельца; вернула не массив или пустой — `TypeError`, и подменю, нечем
+ *   раскрывать, не существует.
  * @property {() => boolean} [isEnabledAction] предикат доступности, зовёмся при
  *   каждом показе. Вернул не `true` — пункт отключён: он не входит в цикл
- *   роуминга и не бывает владельцем подменю даже при непустом `submenu`. Без поля
- *   пункт доступен. Исключение уходит из `open()` вызывающему, как из `action`.
+ *   роуминга и не бывает владельцем подменю даже при непустом `submenuAction`.
+ *   Без поля пункт доступен. Исключение уходит наружу, как из `action`.
  * @property {(event: MouseEvent | KeyboardEvent) => void} [action] вызывается по
  *   внутреннему ключу пункта, а не хранится на узле.
- * @property {MenuItem[]} [submenu] непустой массив — и только тогда, вместе с
- *   доступностью по `isEnabledAction`, пункт считается владельцем подменю.
+ * @property {number} [version] метка состава, `0` по умолчанию. Входит в отпечаток
+ *   уровня и позволяет автору потребовать перестройку при неизменившейся
+ *   структуре — например, после замены `submenuAction` на новую функцию.
  */
 
 /**
@@ -119,18 +136,24 @@ import { renderIcon } from './icons.js';
  * @property {boolean} focusable входит ли пункт в цикл роуминга. `false` у
  *   разделителей и отключённых пунктов.
  * @property {boolean} hasSubmenu владелец ли пункт непустого подменю.
- *   `false` у разделителей, у пунктов с пустым `submenu` и у отключённых:
+ *   `false` у разделителей, у пунктов с пустым `submenuAction` и у отключённых:
  *   признак один, и он означает «подменю можно раскрыть», а не «подменю есть».
  * @property {string | null} key внутренний ключ пункта; у разделителя `null`.
  * @property {string | null} submenuId `id`, зарезервированный под подменю этого
- *   пункта при сборке уровня; у не-владельцев и у разделителя `null`. Непустой
- *   ровно у тех пунктов, у которых `hasSubmenu` может стать истинным в принципе,
- *   и `refreshItems` берёт признак владельца отсюда, а не из текущего
- *   `item.submenu`.
- * @property {HTMLElement | null} chevron узел `.vc-chevron`; у не-владельцев при
- *   сборке `null`. `refreshItems` убирает его с пункта, потерявшего владение, и
- *   возвращает по адресу, а не ищет заново: шеврон в разметке ровно у владельцев,
- *   и искать его селектором значило бы допустить второе его место.
+ *   пункта; у не-владельцев и у разделителя `null`. Считается из `menuId` и
+ *   позиции на каждом показе, а не запоминается навсегда, — пункт может стать
+ *   владельцем позже, и тогда адрес надо назвать впервые.
+ * @property {HTMLSpanElement} iconSlot узел `.vc-icon-slot`. Держится ссылкой,
+ *   а не ищется селектором на показе: второй способ найти слот дал бы две
+ *   разные вещи, когда в нём лежит иконка.
+ * @property {HTMLSpanElement} labelNode узел `.vc-label`.
+ * @property {Array<MenuItem | SeparatorItem> | null} submenuItems развёрнутое
+ *   `submenuAction` этого показа у владельца и `null` у всех остальных.
+ *   Оркестратор берёт подменю отсюда, а не зовёт действие второй раз: два вызова
+ *   были бы двумя мнениями об одном и том же составе.
+ * @property {HTMLElement} chevron узел `.vc-chevron`; в разметке стоит только у
+ *   владельцев. `refreshItems` убирает его с пункта, потерявшего владение, и
+ *   возвращает по адресу, а не ищет заново.
  */
 
 /**
@@ -151,26 +174,200 @@ import { renderIcon } from './icons.js';
  */
 
 const SEPARATOR_TYPE = 'separator';
+const RASTER_TYPE = 'raster';
+const ICON_TYPES = new Set([RASTER_TYPE, 'emoji', 'svg']);
+const DEFAULT_VERSION = 0;
 
 /**
- * Разделитель отличается от пункта единственным полем, поэтому проверка идёт по
- * нему же. Объявление предикатом нужно сужению типа: обычная функция с
- * `boolean` на выходе тип не сужает, и в `MenuItem` пришлось бы приводить
- * приведением.
- *
- * @param {MenuItem | SeparatorItem} item
- * @returns {item is SeparatorItem} `true`, если это разделитель.
+ * Поля, ушедшие из контракта, и чем их заменить. Отклоняются, а не
+ * игнорируются: оставленное автором `label` иначе молча убрало бы подпись, а
+ * `submenu` — подменю, и ошибка вылезла бы там, где её не ждут. Довод тот же,
+ * что и у `type` у разделителя.
  */
-function isSeparator(item) {
-  return 'type' in item && item.type === SEPARATOR_TYPE;
+const REMOVED_FIELDS = [
+  ['label', 'labelAction: () => string'],
+  ['icon', 'iconAction: () => IconConfig'],
+  ['submenu', 'submenuAction: () => MenuItem[]'],
+  ['disabled', 'isEnabledAction: () => boolean'],
+];
+
+/**
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.trim() !== '';
 }
 
 /**
- * @param {MenuItem} item
- * @returns {boolean} `true`, если у пункта есть непустое подменю.
+ * @param {unknown} value
+ * @returns {value is Record<string, unknown>}
  */
-function hasSubmenuOf(item) {
-  return Array.isArray(item.submenu) && item.submenu.length > 0;
+function isRecord(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * @param {Record<string, unknown>} item
+ * @param {string} name имя поля-действия.
+ * @param {string} path путь до проверяемого поля.
+ * @param {boolean} required обязательность поля.
+ * @returns {void}
+ * @throws {TypeError} если поле объявлено не функцией или отсутствует там, где
+ *   обязательно.
+ */
+function assertActionField(item, name, path, required) {
+  const action = item[name];
+  if (action === undefined) {
+    if (required) {
+      throw new TypeError(`${path}.${name}: пункт обязан объявить это действие`);
+    }
+    return;
+  }
+  if (typeof action !== 'function') {
+    throw new TypeError(`${path}.${name}: действие пункта должно быть функцией`);
+  }
+}
+
+/**
+ * Форма пункта: какие поля есть, какие из них — функции. Результат действий она не
+ * проверяет: действие зовётся на показе, и проверять его вывод — работа того, кто
+ * вывод получил.
+ *
+ * Одна функция на оба места, где форма проверяется: конструктор экземпляра, до
+ * появления объекта, и рендерер, когда строит уровень из уже предъявленного
+ * состава. Две проверки означали бы два ответа на один вопрос и разошлись бы на
+ * первом же поле.
+ *
+ * @param {unknown} item проверяемый пункт или разделитель.
+ * @param {string} path путь до пункта.
+ * @returns {void}
+ * @throws {TypeError} на первом негодном поле; путь до поля — в сообщении.
+ */
+export function assertItem(item, path) {
+  if (!isRecord(item)) {
+    throw new TypeError(`${path}: пункт должен быть объектом`);
+  }
+  // Разделитель отличается от пункта единственным полем, поэтому проверка идёт по
+  // нему же. Объявленное `type` обязано быть ровно `separator`: иначе опечатка
+  // автора тихо стала бы пунктом, и меню показало бы строку там, где разделитель.
+  if (item.type !== undefined) {
+    if (item.type !== SEPARATOR_TYPE) {
+      throw new TypeError(
+        `${path}.type: разделитель помечается значением "${SEPARATOR_TYPE}", получено ${String(item.type)}`,
+      );
+    }
+    return;
+  }
+  assertActionField(item, 'labelAction', path, true);
+  assertActionField(item, 'iconAction', path, false);
+  assertActionField(item, 'submenuAction', path, false);
+  assertActionField(item, 'isEnabledAction', path, false);
+  assertActionField(item, 'action', path, false);
+  if (item.version !== undefined
+    && (typeof item.version !== 'number' || !Number.isFinite(item.version))) {
+    throw new TypeError(`${path}.version: метка состава должна быть конечным числом`);
+  }
+  for (const [field, replacement] of REMOVED_FIELDS) {
+    if (item[field] !== undefined) {
+      throw new TypeError(`${path}.${field}: поле убрано, используйте ${replacement}`);
+    }
+  }
+}
+
+/**
+ * Иконка допустима при совпадении `type` одному из трёх видов, и у каждого вида
+ * своё обязательное поле: у `emoji` и `svg` — непустой `value`, у `raster` —
+ * непустой `alt`. Проверка `alt` единственная: рендерер подставит защитничную
+ * пустую строку, и дефект уехал бы в скринридер. `value` обязателен у всех трёх
+ * видов: без него `isSafeRasterUrl` разбирает `undefined` как адрес текущей
+ * страницы, проходит проверку схемы и отдаёт `<img>` запрос за `undefined`.
+ *
+ * @param {unknown} icon описание иконки.
+ * @param {string} path путь до описания.
+ * @returns {import('./icons.js').IconConfig} то же описание, сужённое до контракта.
+ * @throws {TypeError} на первом негодном поле.
+ */
+export function assertIcon(icon, path) {
+  if (!isRecord(icon)) {
+    throw new TypeError(`${path}: описание иконки должно быть объектом`);
+  }
+  const type = icon.type;
+  if (typeof type !== 'string' || !ICON_TYPES.has(type)) {
+    throw new TypeError(`${path}.type: неизвестный тип иконки, ожидается emoji, svg или raster`);
+  }
+  if (!isNonEmptyString(icon.value)) {
+    throw new TypeError(`${path}.value: у иконки ${type} обязателен непустой value`);
+  }
+  if (type === RASTER_TYPE && !isNonEmptyString(icon.alt)) {
+    throw new TypeError(`${path}.alt: у растровой иконки обязателен непустой alt`);
+  }
+  return /** @type {import('./icons.js').IconConfig} */ (icon);
+}
+
+/**
+ * @param {unknown} items проверяемый набор пунктов.
+ * @param {string} path путь до набора.
+ * @returns {Array<MenuItem | SeparatorItem>} тот же набор, проверенный по форме.
+ * @throws {TypeError} если набор не массив, пуст или содержит негодный пункт.
+ */
+export function assertItems(items, path) {
+  if (!Array.isArray(items)) {
+    throw new TypeError(`${path}: пункты меню должны быть массивом`);
+  }
+  // Пустой набор — ошибка и у корня, и у подменю, и по одному правилу: нечего ни
+  // рисовать, ни раскрывать. Пустое подменю прежней конфигурации ошибкой не было
+  // — владельцем его делала непустота, — но теперь состав предъявляет автор, и
+  // пустой ответ на «что в этом подменю» не ответ.
+  if (items.length === 0) {
+    throw new TypeError(`${path}: меню без пунктов не рисуется`);
+  }
+  items.forEach((item, index) => {
+    assertItem(item, `${path}[${index}]`);
+  });
+  return /** @type {Array<MenuItem | SeparatorItem>} */ (items);
+}
+
+/**
+ * Отпечаток состава уровня по значениям полей пунктов, а не по ссылкам на них:
+ * автор вправе отдать новый массив новых объектов на каждом показе, и различие
+ * ссылок ничего не значило бы — изменилось бы ровно то, что кодирует отпечаток.
+ *
+ * В отпечаток входят длина и порядок, разделитель это или пункт, `id` и `version`.
+ * Действия в него не входят: у функции нет значения, а её результат и так
+ * перечитывается на каждом показе, поэтому новая функция с тем же смыслом не
+ * меняет в уровне ничего. `version` входит — это и есть способ автора сказать
+ * «перестрой, я заменил действие».
+ *
+ * Значения кодируются с длиной, а не разделителем: `id` автора может содержать
+ * что угодно, и без длины «a|b» и «a», «b» дали бы один отпечаток на два разных
+ * состава. Совпасть отпечатки могут только у структурно одинаковых наборов, а у
+ * них перестраивать нечего, — потому решение по отпечатку точное.
+ *
+ * @param {Array<MenuItem | SeparatorItem>} items
+ * @returns {string} отпечаток состава.
+ */
+export function submenuHashOf(items) {
+  const parts = [];
+  for (const item of items) {
+    if (isSeparator(item)) {
+      parts.push('s');
+      continue;
+    }
+    parts.push(`m${item.id === undefined ? '' : `${item.id.length}:${item.id}`}`);
+    parts.push(`v${item.version === undefined ? DEFAULT_VERSION : item.version}`);
+  }
+  return `${parts.length}|${parts.join('|')}`;
+}
+
+/**
+ * @param {MenuItem | SeparatorItem} item
+ * @returns {item is SeparatorItem} `true`, если это разделитель. Объявление
+ * предикатом нужно сужению типа: обычная функция с `boolean` на выходе тип не
+ * сужает, и в `MenuItem` пришлось бы приводить приведением.
+ */
+function isSeparator(item) {
+  return 'type' in item && item.type === SEPARATOR_TYPE;
 }
 
 /**
@@ -183,7 +380,7 @@ function hasSubmenuOf(item) {
  * не ответивший на заданный вопрос. Забытый `return` у автора гасит пункт, и автор
  * видит причину, а не молча работающее меню.
  *
- * Исключение из предиката наружу не гасится: вызывающий получает его из `open()`,
+ * Исключение из действия наружу не гасится: вызывающий получает его из `open()`,
  * как и исключение из `action`. Считать пункт доступным или отключённым наугад
  * значило бы превратить поломку автора в тихое изменение поведения.
  *
@@ -195,21 +392,104 @@ function isEnabledOf(item) {
 }
 
 /**
- * Владелец подменю. **Решение** о том, владелец ли пункт, принимается здесь, и
- * `hasSubmenu` у `RenderedItem` — это и есть этот ответ. Оркестратор
- * переспрашивает `hasSubmenu`, а не решает заново, потому что разошлись бы
- * ответы: у отключённого пункта остался бы признак раскрытия, которого не будет.
- *
- * Ответ `isEnabledOf` передаётся, а не спрашивается здесь снова: предикат на
- * сборке уровня зовётся один раз на пункт, и второй вызов был бы вторым мнением
- * об одном и том же решении.
+ * Подпись пункта на этом показе.
  *
  * @param {MenuItem} item
- * @param {boolean} enabled ответ `isEnabledOf` этому же пункту.
- * @returns {boolean} `true`, если у пункта непустое подменю и он доступен.
+ * @param {string} path путь до пункта.
+ * @returns {string} непустая подпись.
+ * @throws {TypeError} если действие вернуло не строку или пустую.
  */
-function isSubmenuOwner(item, enabled) {
-  return enabled && hasSubmenuOf(item);
+function labelOf(item, path) {
+  const label = item.labelAction();
+  if (!isNonEmptyString(label)) {
+    throw new TypeError(`${path}.labelAction: действие обязано вернуть непустую подпись`);
+  }
+  return label;
+}
+
+/**
+ * Иконка пункта на этом показе либо `null`, если у пункта её нет.
+ *
+ * @param {MenuItem} item
+ * @param {string} path путь до пункта.
+ * @returns {import('./icons.js').IconConfig | null}
+ * @throws {TypeError} если действие вернуло не описание иконки.
+ */
+function iconOf(item, path) {
+  if (item.iconAction === undefined) {
+    return null;
+  }
+  return assertIcon(item.iconAction(), `${path}.iconAction`);
+}
+
+/**
+ * Пункты подменю на этом показе либо `null`, если у пункта их нет.
+ *
+ * @param {MenuItem} item
+ * @param {string} path путь до пункта.
+ * @returns {Array<MenuItem | SeparatorItem> | null}
+ * @throws {TypeError} если действие вернуло не массив или пустой.
+ */
+function submenuOf(item, path) {
+  if (item.submenuAction === undefined) {
+    return null;
+  }
+  return assertItems(item.submenuAction(), `${path}.submenuAction`);
+}
+
+/**
+ * Владелец подменю: непустой состав И доступный пункт. Ответ `isEnabledOf`
+ * передаётся, а не спрашивается здесь снова: предикат на показе зовётся один раз на
+ * пункт, и второй вызов был бы вторым мнением об одном и том же решении.
+ *
+ * @param {boolean} enabled ответ `isEnabledOf` этому же пункту.
+ * @param {Array<MenuItem | SeparatorItem> | null} submenuItems развёрнутое
+ *   `submenuAction` пункта.
+ * @returns {boolean}
+ */
+function isSubmenuOwner(enabled, submenuItems) {
+  return enabled && submenuItems !== null;
+}
+
+/**
+ * Ответы пункта на этот показ: всё, что о нём знать, собирается здесь и в одном
+ * порядке — доступность, подпись, иконка, подменю. Один порядок на сборку уровня и
+ * на каждый его показ: автор с побочным эффектом в действии увидел бы разный
+ * порядок вызовов в зависимости от того, первый это показ или нет, а порядок
+ * вызовов — часть контракта, а не деталь реализации.
+ *
+ * @typedef {object} ResolvedItem
+ * @property {boolean} enabled ответ `isEnabledOf` этому же пункту.
+ * @property {string} label непустая подпись.
+ * @property {import('./icons.js').IconConfig | null} icon описание иконки либо
+ *   `null`, если у пункта её нет.
+ * @property {Array<MenuItem | SeparatorItem> | null} submenuItems пункты подменю
+ *   либо `null`, если у пункта их нет.
+ * @property {boolean} hasSubmenu владелец ли пункт подменю. **Решение** принимает
+ *   `isSubmenuOwner`, и `hasSubmenu` у `RenderedItem` — это и есть его ответ:
+ *   оркестратор переспрашивает признак, а не решает заново, потому что разошлись
+ *   бы ответы — у отключённого пункта остался бы признак раскрытия, которого не
+ *   будет.
+ */
+
+/**
+ * @param {MenuItem} item
+ * @param {string} path путь до пункта.
+ * @returns {ResolvedItem}
+ * @throws {TypeError} если хоть одно из действий вернуло не то, что обещало.
+ */
+function resolveItem(item, path) {
+  const enabled = isEnabledOf(item);
+  const label = labelOf(item, path);
+  const icon = iconOf(item, path);
+  const submenuItems = submenuOf(item, path);
+  return {
+    enabled,
+    label,
+    icon,
+    submenuItems,
+    hasSubmenu: isSubmenuOwner(enabled, submenuItems),
+  };
 }
 
 /**
@@ -228,12 +508,52 @@ function keyOf(context, itemIndex) {
  * создано, но `aria-owns` обязан быть уже назван, иначе связь «пункт ↔ меню» не
  * появилась бы вовсе. Префикс наследуется от `menuId`.
  *
- * @param {RenderContext} context
- * @param {number} itemIndex
+ * @param {string} menuId идентификатор элемента уровня.
+ * @param {number} itemIndex позиция пункта в уровне.
  * @returns {string}
  */
-function submenuIdOf(context, itemIndex) {
-  return `${context.menuId}-sub-${itemIndex}`;
+function submenuIdOf(menuId, itemIndex) {
+  return `${menuId}-sub-${itemIndex}`;
+}
+
+/**
+ * Ставит и снимает признаки владельца подменю. Единственное место, где они
+ * заводятся, и на сборке уровня, и на каждом показе: расхождение двух путей
+ * оставило бы на пункте `aria-owns`, ведущий в меню, раскрыть которое нечем.
+ *
+ * @param {RenderedItem} rendered
+ * @param {boolean} hasSubmenu
+ * @param {string} menuId
+ * @param {number} itemIndex
+ * @returns {void}
+ */
+function applyOwner(rendered, hasSubmenu, menuId, itemIndex) {
+  const element = rendered.element;
+  rendered.submenuId = hasSubmenu ? submenuIdOf(menuId, itemIndex) : null;
+  if (hasSubmenu) {
+    element.setAttribute('aria-haspopup', 'menu');
+    // Развёрнутым быть не может: подменю открывается только после показа, а
+    // уровень, в котором владелец, сейчас как раз показывается.
+    element.setAttribute('aria-expanded', 'false');
+    // Направление шеврона по умолчанию; движок позиционирования переставляет его
+    // на `left`, когда подменю пришлось открыть слева.
+    element.dataset.chevron = 'right';
+    element.setAttribute('aria-owns', /** @type {string} */ (rendered.submenuId));
+    if (rendered.chevron.parentElement !== element) {
+      element.appendChild(rendered.chevron);
+    }
+    return;
+  }
+  // Владелец, потерявший подменю, не оставляет за собой его признаков: иначе
+  // `aria-owns` уводил бы скринридер в меню, раскрыть которое нечем, а
+  // `aria-haspopup` обещал бы раскрытие, которого не будет.
+  element.removeAttribute('aria-haspopup');
+  element.removeAttribute('aria-expanded');
+  element.removeAttribute('data-chevron');
+  element.removeAttribute('aria-owns');
+  if (rendered.chevron.parentElement === element) {
+    element.removeChild(rendered.chevron);
+  }
 }
 
 /**
@@ -259,13 +579,27 @@ function renderSeparator() {
   element.className = 'vc-separator';
   element.setAttribute('role', 'separator');
   element.setAttribute('aria-orientation', 'horizontal');
+  // Подписи, иконки и шеврона у разделителя нет, но контракт `RenderedItem` один на
+  // оба вида узлов, а `refreshItems` по типу узла не фильтрует. Узлы заводятся и
+  // остаются отцепленными: разделитель проходит мимо `resolveItem` и `applyOwner`,
+  // и подменять их общим узлом уровня значило бы врать о разметке, которая к ним
+  // отношения не имеет.
+  const iconSlot = document.createElement('span');
+  iconSlot.className = 'vc-icon-slot';
+  const labelNode = document.createElement('span');
+  labelNode.className = 'vc-label';
+  const chevron = document.createElement('span');
+  chevron.className = 'vc-chevron';
   return {
     element,
     focusable: false,
     hasSubmenu: false,
     key: null,
     submenuId: null,
-    chevron: null,
+    iconSlot,
+    labelNode,
+    submenuItems: null,
+    chevron,
   };
 }
 
@@ -283,17 +617,10 @@ function renderSeparator() {
  * @returns {RenderedItem}
  */
 function renderMenuItem(item, context, itemIndex, setSize) {
-  // Предикат спрашивается один раз на пункт, а ответ читают и признак владельца, и
-  // `focusable`. Повторный вызов был бы вторым мнением об одном и том же решении, а
-  // у автора с побочным эффектом в предикате ещё и разошёлся бы с тем, что он видит.
-  const enabled = isEnabledOf(item);
-  // Решение о владельце принимается в одном месте — `isSubmenuOwner`, — и
-  // `hasSubmenu` выходит именно оттуда, а не из второй проверки: расхождение
-  // двух независимых ответов и было причиной того, что отключённый пункт
-  // обещал подменю, которое нечем было раскрыть.
-  const hasSubmenu = isSubmenuOwner(item, enabled);
-  /** @type {string | null} */
-  let submenuId = null;
+  const path = `${context.menuId}:${itemIndex}`;
+  assertItem(item, path);
+  const resolved = resolveItem(item, path);
+
   const element = document.createElement('div');
   element.className = 'vc-item';
   element.setAttribute('role', 'menuitem');
@@ -303,48 +630,40 @@ function renderMenuItem(item, context, itemIndex, setSize) {
   if (item.id !== undefined) {
     element.dataset.id = item.id;
   }
-  if (!enabled) {
+  if (!resolved.enabled) {
     element.setAttribute('aria-disabled', 'true');
   }
-  if (hasSubmenu) {
-    submenuId = submenuIdOf(context, itemIndex);
-    element.setAttribute('aria-haspopup', 'menu');
-    element.setAttribute('aria-expanded', 'false');
-    // Направление шеврона по умолчанию; движок позиционирования переставляет его
-    // на `left`, когда подменю пришлось открыть слева.
-    element.dataset.chevron = 'right';
-    element.setAttribute('aria-owns', submenuId);
+
+  const iconSlot = document.createElement('span');
+  iconSlot.className = 'vc-icon-slot';
+  if (resolved.icon !== null) {
+    iconSlot.appendChild(renderIcon(resolved.icon));
   }
 
-  const slot = document.createElement('span');
-  slot.className = 'vc-icon-slot';
-  if (item.icon !== undefined) {
-    slot.appendChild(renderIcon(item.icon));
-  }
+  const labelNode = document.createElement('span');
+  labelNode.className = 'vc-label';
+  labelNode.textContent = resolved.label;
 
-  const label = document.createElement('span');
-  label.className = 'vc-label';
-  label.textContent = item.label;
+  const chevron = document.createElement('span');
+  chevron.className = 'vc-chevron';
 
-  element.appendChild(slot);
-  element.appendChild(label);
+  element.appendChild(iconSlot);
+  element.appendChild(labelNode);
 
-  /** @type {HTMLElement | null} */
-  let chevron = null;
-  if (hasSubmenu) {
-    chevron = document.createElement('span');
-    chevron.className = 'vc-chevron';
-    element.appendChild(chevron);
-  }
-
-  return {
+  /** @type {RenderedItem} */
+  const rendered = {
     element,
-    focusable: enabled,
-    hasSubmenu,
+    focusable: resolved.enabled,
+    hasSubmenu: resolved.hasSubmenu,
     key: keyOf(context, itemIndex),
-    submenuId,
+    submenuId: null,
+    iconSlot,
+    labelNode,
+    submenuItems: resolved.hasSubmenu ? resolved.submenuItems : null,
     chevron,
   };
+  applyOwner(rendered, resolved.hasSubmenu, context.menuId, itemIndex);
+  return rendered;
 }
 
 /**
@@ -444,17 +763,20 @@ export function renderLevel(items, context) {
 }
 
 /**
- * Приводит уже построенный уровень к текущему ответу `isEnabledAction` его пунктов.
+ * Приводит уже построенный уровень к текущим ответам действий его пунктов.
  *
- * Уровень живёт дольше одного показа, и предикат, изменивший смысл действия между
- * показами, без этого прохода не действовал бы никогда: и разметка, и контракт
- * `RenderedItem` остались бы от решения, принятого при сборке. Перечитывается одно
- * поле, и признак владельца следует из него, а не из состава подменю, — поэтому
- * уровень, однажды построенный, меняет состояние, но не состав.
+ * Уровень живёт дольше одного показа, и действия, изменившие смысл между
+ * показами, без этого прохода не действовали бы никогда: и разметка, и контракт
+ * `RenderedItem` остались бы от решений, принятых при сборке. Перечитываются все
+ * четыре — доступность, подпись, иконка и подменю, — каждое ровно один раз на
+ * пункт, и все четыре зовутся у доступных пунктов тоже: ранний выход по совпавшему
+ * состоянию спросил бы действие только у тех, у кого оно могло ответить иначе, а
+ * автор ждал бы решения на каждом показе.
  *
- * Предикат спрашивается у каждого пункта на каждом показе, включая доступные:
- * ранний выход по совпавшему состоянию спросил бы предикат только у тех, у кого он
- * мог ответить иначе, а автор ждал бы решения на каждом показе.
+ * Запись пункта в карте `actions` перезаписывается здесь же. Без этого структурно
+ * тот же состав, предъявленный новыми объектами, оставил бы в карте действия
+ * прежних пунктов: отпечаток совпал бы, перестройки не было бы, а по клику звалось
+ * бы не то.
  *
  * Отметки роуминга с пункта, выпавшего из кольца, снимает движок, а не этот
  * проход: `data-active` — его словарь, и состояние «отключённый и активный»
@@ -462,53 +784,38 @@ export function renderLevel(items, context) {
  *
  * @param {Array<MenuItem | SeparatorItem>} items пункты уровня в исходном порядке.
  * @param {RenderedItem[]} renderedItems пункты того же уровня по порядку.
+ * @param {string} menuId идентификатор элемента уровня; входит в пути к полям и в
+ *   адрес зарезервированного подменю.
+ * @param {Map<string, MenuItem>} actions карта действий экземпляра.
  * @returns {void}
  */
-export function refreshItems(items, renderedItems) {
+export function refreshItems(items, renderedItems, menuId, actions) {
   for (const [itemIndex, renderedItem] of renderedItems.entries()) {
     const item = items[itemIndex];
     if (isSeparator(item) || renderedItem.key === null) {
       continue;
     }
-    const focusable = isEnabledOf(item);
-    // Владельцем пункт остаётся по факту непустого подменю, снятому при сборке:
-    // непустота `submenu` здесь не перечитывается, и `submenuId` — единственное,
-    // что её помнит.
-    const hasSubmenu = renderedItem.submenuId !== null && focusable;
-    if (renderedItem.focusable === focusable && renderedItem.hasSubmenu === hasSubmenu) {
+    actions.set(renderedItem.key, item);
+    const resolved = resolveItem(item, `${menuId}:${itemIndex}`);
+    renderedItem.labelNode.textContent = resolved.label;
+    if (resolved.icon === null) {
+      renderedItem.iconSlot.replaceChildren();
+    } else {
+      renderedItem.iconSlot.replaceChildren(renderIcon(resolved.icon));
+    }
+    renderedItem.submenuItems = resolved.hasSubmenu ? resolved.submenuItems : null;
+    if (renderedItem.focusable === resolved.enabled
+      && renderedItem.hasSubmenu === resolved.hasSubmenu) {
       continue;
     }
     const element = renderedItem.element;
-    if (focusable) {
+    if (resolved.enabled) {
       element.removeAttribute('aria-disabled');
     } else {
       element.setAttribute('aria-disabled', 'true');
     }
-    if (hasSubmenu) {
-      element.setAttribute('aria-haspopup', 'menu');
-      // Развёрнутым быть не может: подменю открывается только после показа, а
-      // уровень, в котором владелец, сейчас как раз показывается.
-      element.setAttribute('aria-expanded', 'false');
-      element.dataset.chevron = 'right';
-      element.setAttribute('aria-owns', /** @type {string} */ (renderedItem.submenuId));
-      const chevron = renderedItem.chevron;
-      if (chevron !== null && chevron.parentElement !== element) {
-        element.appendChild(chevron);
-      }
-    } else {
-      // Владелец, потерявший подменю, не оставляет за собой его признаков: иначе
-      // `aria-owns` уводил бы скринридер в меню, раскрыть которое нечем, а
-      // `aria-haspopup` обещал бы раскрытие, которого не будет.
-      element.removeAttribute('aria-haspopup');
-      element.removeAttribute('aria-expanded');
-      element.removeAttribute('data-chevron');
-      element.removeAttribute('aria-owns');
-      const chevron = renderedItem.chevron;
-      if (chevron !== null && chevron.parentElement === element) {
-        element.removeChild(chevron);
-      }
-    }
-    renderedItem.focusable = focusable;
-    renderedItem.hasSubmenu = hasSubmenu;
+    applyOwner(renderedItem, resolved.hasSubmenu, menuId, itemIndex);
+    renderedItem.focusable = resolved.enabled;
+    renderedItem.hasSubmenu = resolved.hasSubmenu;
   }
 }

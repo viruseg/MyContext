@@ -1,6 +1,6 @@
 import { DEFAULT_ANIMATION_DURATION, SAFETY_PADDING } from './constants.js';
 import { calculateMenuPosition, calculateSubmenuPosition } from './positioner.js';
-import { renderLevel, refreshItems } from './renderer.js';
+import { renderLevel, refreshItems, submenuHashOf } from './renderer.js';
 import { createScrollZones } from './scrollZones.js';
 import { applyAnimationDuration, applyTheme } from './theme.js';
 
@@ -145,6 +145,10 @@ import { applyAnimationDuration, applyTheme } from './theme.js';
  * @property {LevelEntry[]} children уровни, открытые из пунктов этого уровня.
  * @property {boolean} open открыт ли уровень. `false` с момента вызова `hide`,
  *   хотя до истечения отложенного закрытия узел ещё видим и лежит в Top Layer.
+ * @property {string} itemsHash отпечаток состава, по которому уровень построен.
+ *   Заново предъявленный состав с тем же отпечатком перестраивать не заставляет,
+ *   с другим — заставляет: это решение принимает `ensureLevel`, и оно одно на
+ *   сборку и на каждый показ.
  * @property {number} generation счётчик поколений. Растёт на каждом показе и на
  *   каждом закрытии; отложенное закрытие действует только при совпадении.
  * @property {number} activeIndex индекс пункта, которому движок роуминга передал
@@ -180,6 +184,12 @@ import { applyAnimationDuration, applyTheme } from './theme.js';
  *   `Illegal invocation`. Возвращённый жест задачи не интерпретируется.
  * @property {(handle: unknown) => void} [cancel] снятие задачи по жесту, который
  *   вернул `schedule`. По умолчанию глобальный `clearTimeout`.
+ * @property {(entries: LevelEntry[]) => void} [onLevelsDiscarded] сноса уровней
+ *   целиком, вместе со всем, что слои вокруг них помнят. Слой владеет DOM и
+ *   жизненным циклом уровней, а вызывающий — картами пунктов, подписок на показ и
+ *   реестром движка клавиатуры; без этого сигнала они бы навсегда сохранили
+ *   уровни, которых больше нет. Зовётся один раз на снос, до создания нового
+ *   уровня, и передаёт всё поддерево от глубоких уровней к снесённому.
  * @property {MediaQueryList} [reducedMotionQuery] запрос
  *   `prefers-reduced-motion: reduce`. Значение `.matches` читается в момент
  *   закрытия, поэтому смена настройки движка влияет на уже созданный слой. По
@@ -191,13 +201,17 @@ import { applyAnimationDuration, applyTheme } from './theme.js';
  *
  * @typedef {object} MenuLayer
  * @property {(items: Array<MenuItem | SeparatorItem>, parent: LevelEntry | null, levelIndex: number, ownerItem: RenderedItem | null) => LevelEntry} ensureLevel
- *   Возвращает уровень для этих пунктов, создавая его при первом обращении.
+ *   Возвращает уровень для этого состава, создавая его при первом обращении.
  *   Идентичность уровня задают родитель и пункт-владелец, а не ссылка на массив
- *   пунктов: повторный вызов с теми же аргументами возвращает тот же
- *   `LevelEntry` и ничего не перестраивает. `parent` и `ownerItem` обязаны быть
- *   одновременно `null` (корень) или одновременно заданы (подменю), а
- *   `ownerItem` обязан быть владельцем непустого подменю — иначе создание
- *   бросает `Error`.
+ *   пунктов. `parent` и `ownerItem` обязаны быть одновременно `null` (корень) или
+ *   одновременно заданы (подменю), а `ownerItem` обязан быть владельцем непустого
+ *   подменю — иначе создание бросает `Error`.
+ *
+ *   Уровень, который уже построен, приводится к предъявленному составу: тот же
+ *   отпечаток — обновляются ответы действий его пунктов, другой — уровень
+ *   перестраивается целиком вместе со всем, что открыто из него, и создаётся заново
+ *   под тем же `id`, потому что `aria-owns` владельца уже назван и другой адрес
+ *   сделал бы ссылку висячей.
  * @property {(entry: LevelEntry, anchor: Point) => void} showRoot
  *   Показывает корневой уровень в точке `anchor` вьюпорта. Отменяет отложенное
  *   закрытие этого уровня и переносит его в конец `<body>`. Пункты не трогает:
@@ -332,6 +346,7 @@ export function createLayer(options) {
     schedule = defaultSchedule,
     cancel = defaultCancel,
     reducedMotionQuery = defaultReducedMotionQuery(),
+    onLevelsDiscarded = () => {},
   } = options;
 
   instanceSerial += 1;
@@ -370,8 +385,8 @@ export function createLayer(options) {
   }
 
   /**
-   * @param {Array<MenuItem | SeparatorItem>} items
-   * @param {LevelEntry | null} parent
+   * @param {Array<MenuItem | SeparatorItem>} items пункты уровня в исходном порядке.
+   * @param {LevelEntry | null} parent уровень, из которого открывается этот.
    * @param {number} levelIndex
    * @param {RenderedItem | null} ownerItem
    * @param {string} menuId
@@ -391,6 +406,7 @@ export function createLayer(options) {
       ownerItem,
       children: [],
       open: false,
+      itemsHash: submenuHashOf(items),
       generation: 0,
       activeIndex: -1,
     };
@@ -412,6 +428,97 @@ export function createLayer(options) {
    * @returns {LevelEntry} тот же уровень при повторном вызове с теми же
    *   аргументами, приведённый к текущему состоянию его пунктов.
    */
+  /**
+   * Приводит построенный уровень к предъявленному составу: тот же отпечаток —
+   * обновляются ответы действий, другой — уровень перестраивается.
+   *
+   * Перестроение сносит поддерево целиком, а не перерисовывает список: состояния
+   * уровня живут не только в его DOM. Реестр движка клавиатуры, подписки на показ
+   * подменю и записи карты действий принадлежат окружению, и снос узлов их не
+   * стирает, — а частичная перерисовка оставила бы в реестре пункты прежнего
+   * состава и оставила бы `Tab` зацикленным на одном из них.
+   *
+   * Адрес нового уровня — прежний: `aria-owns` пункта-владельца уже назван, и
+   * второй адрес на то же подменю сделал бы ссылку висячей с другой стороны.
+   *
+   * @param {LevelEntry} entry уровень, построенный ранее.
+   * @param {Array<MenuItem | SeparatorItem>} items новый состав того же уровня.
+   * @param {number} levelIndex
+   * @returns {LevelEntry} тот же уровень, если состав не изменился, и новый иначе.
+   */
+  function reconcile(entry, items, levelIndex) {
+    const hash = submenuHashOf(items);
+    if (entry.itemsHash === hash) {
+      // Повторный показ — единственное время, когда состояние пунктов ещё можно
+      // догнать: автор выключает действие между показами, и без этого прохода
+      // поле действовало бы только на первом.
+      refreshItems(items, entry.items, entry.element.id, actions);
+      return entry;
+    }
+    const menuId = entry.element.id;
+    const parent = entry.parent;
+    discardLevels(entry);
+    const fresh = createEntry(items, parent, levelIndex, entry.ownerItem, menuId);
+    if (parent === null) {
+      root = fresh;
+    } else {
+      parent.children.push(fresh);
+    }
+    return fresh;
+  }
+
+  /**
+   * Снос уровня и всего, что из него построено.
+   *
+   * Порядок обхода — от глубоких к корню, тот же, что у `hideAll`. Здесь он не
+   * влияет ни на что: подменю лежат в `<body>` соседями, а не внутри друг друга,
+   * и снимаются все разом. Один порядок на оба обхода — чтобы расхождение не
+   * появилось там, где его не ждут.
+   *
+   * @param {LevelEntry} entry сносимый уровень.
+   * @returns {void}
+   */
+  function discardLevels(entry) {
+    const chain = chainOf(entry);
+    chain.sort((a, b) => {
+      return depthOf(b) - depthOf(a);
+    });
+    for (const level of chain) {
+      clearPendingHide(level);
+      // `hidePopover` на закрытом и на отцепленном элементе безопасен, поэтому
+      // вызов не зависит от того, показывался ли уровень. Без него показанное
+      // подменю осталось бы в Top Layer без узла, и закрывать его было бы нечего.
+      level.element.hidePopover();
+      level.element.remove();
+      level.open = false;
+      zonesOf(level).destroy();
+      const position = levels.indexOf(level);
+      if (position >= 0) {
+        levels.splice(position, 1);
+      }
+      zones.delete(level);
+    }
+    const parent = entry.parent;
+    if (parent === null) {
+      root = null;
+    } else {
+      const position = parent.children.indexOf(entry);
+      if (position >= 0) {
+        parent.children.splice(position, 1);
+      }
+    }
+    onLevelsDiscarded(chain);
+  }
+
+  /**
+   * Заводит уровень по составу либо приводит уже построенный к нему.
+   *
+   * @param {Array<MenuItem | SeparatorItem>} items пункты уровня в исходном порядке.
+   * @param {LevelEntry | null} parent уровень, из которого открывается этот.
+   * @param {number} levelIndex глубина уровня, начиная с 0; идёт в `aria-level`.
+   * @param {RenderedItem | null} ownerItem пункт-владелец; `null` у корня.
+   * @returns {LevelEntry}
+   */
   function ensureLevel(items, parent, levelIndex, ownerItem) {
     if (destroyed) {
       throw new Error('MyContext: слой уничтожен');
@@ -422,13 +529,9 @@ export function createLayer(options) {
       }
       if (root === null) {
         root = createEntry(items, null, levelIndex, ownerItem, `${menuIdPrefix}-0`);
-      } else {
-        // Повторный показ — единственное время, когда состояние пунктов ещё можно
-        // догнать: автор выключает действие между показами, и без этого прохода
-        // поле действовало бы только на первом.
-        refreshItems(items, root.items);
+        return root;
       }
-      return root;
+      return reconcile(root, items, levelIndex);
     }
     // Уровень без пункта-владельца некуда вешать: `aria-owns` и `aria-expanded`
     // живут на пункте, и подменю без пункта осталось бы связанным с миром.
@@ -442,8 +545,7 @@ export function createLayer(options) {
       return child.ownerItem === ownerItem;
     });
     if (existing !== undefined) {
-      refreshItems(items, existing.items);
-      return existing;
+      return reconcile(existing, items, levelIndex);
     }
     const entry = createEntry(items, parent, levelIndex, ownerItem, reservedSubmenuId(ownerItem));
     parent.children.push(entry);

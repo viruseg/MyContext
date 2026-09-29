@@ -203,6 +203,12 @@
  *   уровней, возвращает их `activeIndex` в `-1` и забывает их. Фокус не забирает:
  *   куда его девать, решает вызывающий код. После вызова уровень снова нужно
  *   отдать через `registerLevel`. Повторный вызов безопасен.
+ * @property {(entries: LevelEntry[]) => void} forgetLevels забывает перечисленные
+ *   уровни, не трогая остальные. Отметки роуминга с них не снимаются: узлы уровня
+ *   к этому моменту сняты с документа, и снимать нечего, — важно только не оставить
+ *   в реестре элемент, по которому больше не придёт ни одного события. `closeAll`
+ *   для этого не годится: он сносит всё меню вместе с показанными уровнями, а
+ *   перестроение сносит только снесённое поддерево.
  */
 
 /**
@@ -614,11 +620,22 @@ export function createKeyboard(host) {
     known.clear();
   }
 
+  /**
+   * @param {LevelEntry[]} entries уровни, снятые с документа слоем.
+   * @returns {void}
+   */
+  function forgetLevels(entries) {
+    for (const entry of entries) {
+      known.delete(entry.element);
+    }
+  }
+
   return {
     handleKeydown,
     registerLevel,
     activateFromPointer,
     clearActive,
     reset,
+    forgetLevels,
   };
 }
