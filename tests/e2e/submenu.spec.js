@@ -449,6 +449,17 @@ test.beforeEach(async ({ page }) => {
         { type: 'separator' },
         { labelAction: () => 'Второй' },
       ],
+      // Владелец с подменю длиннее списка: только у прокручиваемого уровня видны
+      // зоны прокрутки, а кейс о нейтральных областях должен наводить на видимую
+      // зону — наведение на скрытый узел не проверяет ничего.
+      scrollable: [
+        {
+          labelAction: () => 'Длинное',
+          submenuAction: () => Array.from({ length: 40 }, (_unused, index) => {
+            return { labelAction: () => `Пункт ${index + 1}` };
+          }),
+        },
+      ],
     };
 
     /** @type {string[]} */
@@ -791,6 +802,141 @@ test.describe('правило соседа', () => {
     const after = await readMenu(page);
     expect(isOpen(after, secondId), 'подменю осталось открытым').toBe(true);
     expect(after.openCount, 'открыты корень и подменю').toBe(2);
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
+  });
+
+  test('уход в нейтральную область не закрывает подменю', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const exportId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Экспорт');
+    });
+    expect(exportId, 'адрес подменю «Экспорта» назван').not.toBeNull();
+    const submenuId = /** @type {string} */ (exportId);
+
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const opened = await readMenu(page);
+    expect(isOpen(opened, submenuId), 'подменю открыто').toBe(true);
+    expect(opened.openCount, 'открыты корень и подменю').toBe(2);
+    expect(activeLabels(opened), 'владелец отмечен').toEqual(['Экспорт']);
+
+    // Четыре точки по очереди, все — вне меню и все без намерения что-либо
+    // выбрать: пустота страницы под меню, пустота страницы над ним, угол вьюпорта
+    // в стороне от обоих уровней и сам привязанный контейнер. Ни одна из них не
+    // должна увести подменю: единственное событие, которое его закрывает, —
+    // вход в соседний пункт того же уровня.
+    const voidBelow = await page.evaluate((id) => {
+      const level = document.getElementById(id);
+      if (level === null) {
+        throw new Error('подменю показано, но узла нет');
+      }
+      return { x: level.getBoundingClientRect().left + 4, y: globalThis.innerHeight - 40 };
+    }, submenuId);
+    const voidAbove = { x: voidBelow.x, y: 6 };
+    const farCorner = { x: 960, y: 660 };
+
+    for (const point of [voidBelow, voidAbove, farCorner]) {
+      await moveTo(page, point);
+      // Втрое больше прежнего срока закрытия подменю: такого таймера не осталось,
+      // и ожидание лишь доказывает, что подменю не гаснет само по себе.
+      await page.clock.fastForward(3000);
+      const snapshot = await readMenu(page);
+      expect(isOpen(snapshot, submenuId), `подменю цело в точке ${point.x}:${point.y}`).toBe(true);
+      expect(snapshot.openCount, `открыты корень и подменю в точке ${point.x}:${point.y}`).toBe(2);
+      expect(snapshot.errors, 'ошибок страницы нет').toEqual([]);
+    }
+    // Отметка роуминга после ухода курсора с дерева снимается — это отдельное
+    // правило, — но подменю от неё не зависит и остаётся на месте.
+    expect(activeLabels(await readMenu(page)), 'выделение сброшено уходом с дерева').toEqual([]);
+    expect(expandedLabels(await readMenu(page)), 'владелец всё ещё развёрнут').toEqual(['Экспорт']);
+  });
+
+  test('уход на зону прокрутки и на поля каркаса не закрывает подменю', async ({ page }) => {
+    // Набор `scrollable` — единственный с подменю длиннее списка, то есть с
+    // видимыми зонами. Вьюпорт остаётся общим: подменю здесь и не прижимается, а
+    // проверяется не геометрия показа.
+    await makeMenu(page, 'scrollable', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const ownerId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Длинное');
+    });
+    expect(ownerId, 'адрес подменю «Длинного» назван').not.toBeNull();
+    const submenuId = /** @type {string} */ (ownerId);
+
+    await hoverItem(page, 'Длинное');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    expect(isOpen(await readMenu(page), submenuId), 'подменю открыто').toBe(true);
+    // Премисса: зоны показываются только у прокручиваемого уровня, и без неё кейс
+    // наводил бы на невидимый узел, а наведение на невидимое ничего не проверяет.
+    const zoneVisible = await page.evaluate((id) => {
+      const zone = document.querySelector(`#${id} .vc-scroll-zone-down`);
+      return zone === null ? null : globalThis.getComputedStyle(zone).display;
+    }, submenuId);
+    expect(zoneVisible, 'нижняя зона показана').toBe('flex');
+
+    // Зона прокрутки — часть меню, и курсор на ней не выбирает ничего.
+    await hoverNode(page, `#${submenuId} .vc-scroll-zone-down`);
+    await page.clock.fastForward(3000);
+    const onZone = await readMenu(page);
+    expect(isOpen(onZone, submenuId), 'подменю цело на зоне прокрутки').toBe(true);
+    // Выделение на зоне снимается — так и было, — и это не влияет на подменю.
+    expect(activeLabels(onZone), 'выделение на зоне снято').toEqual([]);
+
+    // Поля каркаса между зоной и рамкой: там нет ни пункта, ни зоны.
+    const frame = await page.evaluate((id) => {
+      const rect = document.getElementById(id).getBoundingClientRect();
+      return { x: rect.left + 2, y: rect.top + rect.height - 3 };
+    }, submenuId);
+    await moveTo(page, frame);
+    await page.clock.fastForward(3000);
+    const onFrame = await readMenu(page);
+    expect(isOpen(onFrame, submenuId), 'подменю цело на полях каркаса').toBe(true);
+    expect(onFrame.openCount, 'открыты корень и подменю').toBe(2);
+    expect(onFrame.errors, 'ошибок страницы нет').toEqual([]);
+  });
+
+  test('возврат курсора на владельца, чьё подменю закрыто Escape, открывает его заново', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const exportId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Экспорт');
+    });
+    expect(exportId, 'адрес подменю «Экспорта» назван').not.toBeNull();
+    const submenuId = /** @type {string} */ (exportId);
+
+    // Цепочка из трёх уровней с клавиатуры: до «Экспорта» два шага вниз, в его
+    // подменю — один, до «PNG».
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
+    const pngId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('PNG');
+    });
+    expect(pngId, 'адрес подменю «PNG» назван').not.toBeNull();
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
+    expect((await readMenu(page)).openCount, 'открыты корень и два подменю').toBe(3);
+
+    // `Escape` закрывает уровень, где стоит фокус, — самый глубокий.
+    await page.keyboard.press('Escape');
+    const closed = await readMenu(page);
+    expect(isOpen(closed, /** @type {string} */ (pngId)), 'подменю «PNG» закрыто').toBe(false);
+    expect(closed.openCount, 'остались корень и подменю «Экспорта»').toBe(2);
+
+    // Возврат мышью на владельца, чьё подменю только что закрыли: уход курсора с
+    // пункта не отменяет закрытие, а новый вход в пункт планирует показ заново.
+    await hoverItem(page, 'PNG');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+
+    const after = await readMenu(page);
+    expect(isOpen(after, /** @type {string} */ (pngId)), 'подменю «PNG» открылось заново').toBe(true);
+    expect(after.openCount, 'снова открыты корень и два подменю').toBe(3);
+    expect(expandedLabels(after), 'развёрнуты «Экспорт» и «PNG»').toEqual(['PNG', 'Экспорт'].sort());
     expect(after.errors, 'ошибок страницы нет').toEqual([]);
   });
 });
