@@ -65,6 +65,7 @@ import { OPEN_GRACE_MS } from '../../src/constants.js';
  * @property {(slot: 'first' | 'second', x: number, y: number) => void} open
  * @property {(slot: 'first' | 'second') => void} destroy
  * @property {(slot: 'first' | 'second') => void} detach
+ * @property {() => void} closeAll
  * @property {() => Snapshot} read
  * @property {(name: string) => MenuRect | null} rectOf
  * @property {(name: string) => string | null} submenuIdOf
@@ -294,6 +295,19 @@ function readDownEvents(page) {
 function downsIn(records, type, button, level) {
   return records.filter((entry) => {
     return entry.type === type && entry.button === button && entry.level === level;
+  });
+}
+
+/**
+ * Закрывает меню всех экземпляров страницы одним статическим вызовом.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<void>}
+ */
+function closeAllMenus(page) {
+  return page.evaluate(() => {
+    const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+    scope.__mc.closeAll();
   });
 }
 
@@ -579,6 +593,12 @@ test.describe('глобальные слушатели', () => {
             throw new Error(`нет экземпляра ${slot}`);
           }
           menu.detach();
+        },
+        /**
+         * @returns {void}
+         */
+        closeAll() {
+          MyContext.closeAll();
         },
         read,
         rectOf: rectOfLabel,
@@ -1240,6 +1260,112 @@ test.describe('глобальные слушатели', () => {
     await page.mouse.click(VOID_POINT.x, VOID_POINT.y);
     const closed = await readMenu(page);
     expect(closed.openCount, 'второй экземпляр всё ещё слышит страницу').toBe(0);
+  });
+
+  test('closeAll закрывает каскад уровней у всех экземпляров', async ({ page }) => {
+    await makeMenu(page, 'first', 'chain', 'surface');
+    await makeMenu(page, 'second', 'chain', 'far');
+    await openAt(page, 'first', SURFACE_POINT);
+    await openAt(page, 'second', FAR_POINT);
+    // Подменю у первого экземпляра: «закрыть всё» и «закрыть корни» расходятся
+    // только на глубине, а проверка одного корня прошла бы на реализации,
+    // которая гасит показанные уровни и забывает про дочерние.
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const opened = await readMenu(page);
+    expect(opened.openCount, 'открыты два корня и подменю первого').toBe(3);
+    const ids = opened.levels.filter((level) => level.popoverOpen).map((level) => level.id);
+
+    await closeAllMenus(page);
+
+    const after = await readMenu(page);
+    expect(after.openCount, 'в Top Layer не осталось ни одного уровня').toBe(0);
+    // Поимённо, а не счётчиком: счётчик прошёл бы на реализации, которая погасила
+    // не те уровни и удержала нужное число.
+    for (const id of ids) {
+      expect(isOpen(after, id), `уровень ${id} закрыт`).toBe(false);
+    }
+    expect(after.errors, 'страница без ошибок').toEqual([]);
+  });
+
+  test('closeAll не отбирает фокус, оставленный на странице', async ({ page }) => {
+    await makeMenu(page, 'first', 'chain', 'surface');
+    await makeMenu(page, 'second', 'chain', 'far');
+    await openAt(page, 'first', SURFACE_POINT);
+    await openAt(page, 'second', FAR_POINT);
+
+    // Фокус уводится на страницу настоящим `focus()`, как в кейсе про уход курсора:
+    // состояние «меню открыто, фокус на странице» кликом не достичь — клик по
+    // контейнеру закрывает меню.
+    await page.evaluate(() => {
+      const surface = document.getElementById('surface');
+      if (surface instanceof HTMLElement) {
+        surface.focus();
+      }
+    });
+    const onPage = await readMenu(page);
+    expect(onPage.openCount, 'оба меню открыты').toBe(2);
+    expect(onPage.focusLog, 'фокус уехал на контейнер первого экземпляра').toEqual(['surface']);
+
+    await closeAllMenus(page);
+
+    const after = await readMenu(page);
+    expect(after.openCount, 'оба меню закрыты').toBe(0);
+    // Журнал, а не только конечное состояние: возврат фокуса второму контейнеру
+    // дал бы фокус «где-то на странице» и прошёл бы на `focusOwnerId`, а поимённо
+    // видно, что фокус не переезжал никуда.
+    expect(after.focusLog, 'фокус не переезжал ни на один контейнер').toEqual(['surface']);
+    expect(after.focusOwnerId, 'фокус остался там, где его оставил пользователь').toBe('surface');
+    expect(after.errors, 'страница без ошибок').toEqual([]);
+  });
+
+  test('closeAll снимает отложенный показ переоткрытия', async ({ page }) => {
+    // `reduce` пропускает отложенность целиком, а отложенный показ — это ровно то
+    // окно, которое проверяется. Без отключения его не существует.
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await makeMenu(page, 'first', 'chain', 'surface');
+    await openAt(page, 'first', SURFACE_POINT);
+    expect((await readMenu(page)).openCount, 'меню открыто').toBe(1);
+
+    // Правый клик по контейнеру открытого меню готовит показ в новой точке: цепочка
+    // погашена, отложенный `showAt` ещё не сработал. Уровень при этом остаётся в
+    // Top Layer — выходная анимация ещё идёт, — и наблюдаемое состояние совпадает с
+    // обычным открытым меню. Проверка от этого строже, а не слабее: закрывать есть
+    // что, и «окно между сокрытием и показом» видно не по флагу, а по часам.
+    await page.mouse.click(300, 220, { button: 'right' });
+    const pending = await readMenu(page);
+    expect(pending.openCount, 'меню ещё на экране, выходная анимация идёт').toBe(1);
+
+    await closeAllMenus(page);
+    await page.clock.fastForward(3000);
+
+    // Без снятия отложенного показа меню воскресло бы здесь — после того, как выход
+    // доиграл, и вызов вышел бы с меню на экране.
+    const after = await readMenu(page);
+    expect(after.openCount, 'отложенный показ не состоялся').toBe(0);
+    expect(after.errors, 'страница без ошибок').toEqual([]);
+  });
+
+  test('closeAll переживает уничтоженный экземпляр и оставляет живые рабочими', async ({ page }) => {
+    await makeMenu(page, 'first', 'chain', 'surface');
+    await makeMenu(page, 'second', 'chain', 'far');
+    await destroyMenu(page, 'first');
+    await openAt(page, 'second', FAR_POINT);
+    expect((await readMenu(page)).openCount, 'меню второго экземпляра открыто').toBe(1);
+
+    // Уничтоженный экземпляр в реестре уже не значится, и `closeAll()` не бросает
+    // наружу `Error` из метода, который ничего не возвращает.
+    await closeAllMenus(page);
+    const after = await readMenu(page);
+    expect(after.openCount, 'живое меню закрыто').toBe(0);
+    expect(after.errors, 'уничтоженный экземпляр вызова не сломал').toEqual([]);
+
+    // `closeAll()` закрывает, а не разрушает: экземпляр после него остаётся
+    // пригодным, и «закрыто» не значит «сломан».
+    await openAt(page, 'second', FAR_POINT);
+    expect((await readMenu(page)).openCount, 'экземпляр после closeAll открывается').toBe(1);
+    await closeAllMenus(page);
+    expect((await readMenu(page)).openCount, 'и снова закрывается').toBe(0);
   });
 
   test('detach снимает все глобальные слушатели', async ({ page }) => {
