@@ -82,6 +82,10 @@ import { OPEN_GRACE_MS, SAFETY_PADDING, SUBMENU_OFFSET } from '../../src/constan
  *   не виден, а `id` у него уже есть.
  * @property {number} openCount сколько уровней в Top Layer.
  * @property {string | null} focusLabel подпись пункта с фокусом.
+ * @property {boolean} focusInMenu фокус стоит внутри дерева меню. Отдельное поле,
+ *   а не вывод из `focusLabel`: подпись есть только у пунктов, и фокус на самом
+ *   уровне от неё неотличим от фокуса на `<body>` — а это разные состояния, и
+ *   меню на втором не отвечает на клавиши вовсе.
  * @property {string[]} log метки сработавших действий, по порядку.
  * @property {string[]} errors сообщения необработанных ошибок страницы.
  */
@@ -422,11 +426,17 @@ test.beforeEach(async ({ page }) => {
       // Обе невыбираемые строки на одном уровне: разделитель и отключённый пункт.
       // В `tree` отключённый пункт есть, а разделителя нет, и наоборот; кейс о
       // невыбираемых строках ловит обе границы разом, поэтому набор свой.
+      // Подменю у «Второго» — ради кейса о фокусе: закрываемый по наведению на
+      // отключённый пункт уровень уносит фокус с собой, и удержать его может только
+      // подменю, открытое с него.
       unselectable: [
         { labelAction: () => 'Живой' },
         { labelAction: () => 'Глухой', isEnabledAction: () => false },
         { type: 'separator' },
-        { labelAction: () => 'Второй' },
+        {
+          labelAction: () => 'Второй',
+          submenuAction: () => [{ labelAction: () => 'Под вторым' }],
+        },
       ],
       // Владелец с подменю длиннее списка: только у прокручиваемого уровня видны
       // зоны прокрутки, а кейс о нейтральных областях должен наводить на видимую
@@ -523,6 +533,7 @@ test.beforeEach(async ({ page }) => {
           return level.popoverOpen;
         }).length,
         focusLabel: focusedLabel === null ? null : String(focusedLabel.textContent),
+        focusInMenu: active !== null && active.closest('.vc-menu') !== null,
         log: log.slice(),
         errors: errors.slice(),
       };
@@ -760,14 +771,15 @@ test.describe('правило соседа', () => {
     expect(expandedLabels(after), 'отметок развёрнутости не осталось').toEqual([]);
   });
 
-  test('наведение на отключённого соседа не закрывает подменю', async ({ page }) => {
+  test('наведение на отключённого соседа закрывает подменю и снимает выделение', async ({ page }) => {
     await makeMenu(page, 'pair', 'surface');
     await openAt(page, OPEN_MIDDLE);
     // Владелец за один показ успевает встать в карту подписок уровня. Отключение
     // между показами обязано оттуда выйти: у отключённого пункта нет ни подсветки,
-    // ни подписки, и наведение на него не решает ничего — в том числе не закрывает
-    // чужое подменю. Это то же, что в системных меню: серая строка не выбирается,
-    // и раскрытое рядом подменю не сворачивается.
+    // ни подписки, и наведение на него решает ровно одно — что выбранного пункта
+    // у уровня больше нет. Подменю открытого соседа с этого момента тоже не
+    // принадлежит никому: держать его на серой строке значило бы оставить меню в
+    // состоянии, которого нет.
     await page.evaluate(() => {
       const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown } */ (globalThis));
       scope.__mc.close();
@@ -787,11 +799,12 @@ test.describe('правило соседа', () => {
     expect(isOpen(opened, secondId), 'подменю второго открыто').toBe(true);
     // Контроль премиссы: отключённый владелец не помечается развёрнутым.
     expect(itemOf(opened, 'Первый').expanded, 'отметки развёрнутости нет').toBeNull();
+    expect(activeLabels(opened), 'выделен владелец').toEqual(['Второй']);
 
     // Премисса наведения: `pointermove` по отключённому пункту доходит до уровня и
     // не отмечает его, как и любой другой невыбираемый, — значит точка действительно
     // лежит на пункте, а не пролетела мимо. Без этой проверки кейс прошёл бы и на
-    // уровне, где наведение не достаёт до пункта вовсе, и «не закрыло» ничего бы не
+    // уровне, где наведение не достаёт до пункта вовсе, и «сбросило» ничего бы не
     // значило.
     const landed = await page.evaluate(() => {
       const item = Array.from(document.querySelectorAll('.vc-item')).find((node) => {
@@ -811,8 +824,61 @@ test.describe('правило соседа', () => {
     await page.clock.fastForward(3000);
 
     const after = await readMenu(page);
-    expect(isOpen(after, secondId), 'подменю осталось открытым').toBe(true);
-    expect(after.openCount, 'открыты корень и подменю').toBe(2);
+    expect(isOpen(after, secondId), 'подменю второго закрыто').toBe(false);
+    expect(after.openCount, 'остался корень').toBe(1);
+    // Отметок не осталось ни на ком: у отключённого пункта их быть не может по
+    // построению, а отметка соседа значила бы «подменю раскрыто» — а оно только
+    // что закрылось.
+    expect(activeLabels(after), 'выделение снято').toEqual([]);
+    expect(expandedLabels(after), 'отметок развёрнутости не осталось').toEqual([]);
+    // Фокус отошёл на сам уровень: активного пункта у уровня больше нет, и клавиши
+    // адресуются уровню, а не призрачному выбору.
+    expect(after.focusLabel, 'фокус не на пункте').toBe(null);
+    expect(after.focusInMenu, 'фокус остался в меню').toBe(true);
+
+    // Контроль живости: после сброса клавиши работают, и первым доступным пунктом
+    // становится «Второй» — отключённый «Первый» в кольцо роуминга не входит.
+    await page.keyboard.press('ArrowDown');
+    const afterKey = await readMenu(page);
+    expect(afterKey.focusLabel, 'первым доступным встал «Второй»').toBe('Второй');
+    expect(activeLabels(afterKey), 'выделен «Второй»').toEqual(['Второй']);
+    expect(afterKey.openCount, 'подменю само не открылось').toBe(1);
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
+  });
+
+  test('наведение на отключённый пункт уводит фокус с закрываемого подменю', async ({ page }) => {
+    await makeMenu(page, 'unselectable', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+
+    // Подменю открыто клавиатурой, и фокус уехал в него — единственный способ
+    // остаться там, потому что мышиный показ фокус с владельца не снимает.
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('End');
+    await page.keyboard.press('ArrowRight');
+    const opened = await readMenu(page);
+    expect(opened.openCount, 'подменю «Второго» открыто').toBe(2);
+    const inner = /** @type {LevelView | undefined} */ (opened.levels[1]);
+    expect(inner?.items.map((item) => {
+      return item.label;
+    }), 'в подменю один пункт').toEqual(['Под вторым']);
+    expect(opened.focusLabel, 'фокус в подменю').toBe('Под вторым');
+
+    // Курсор уходит на отключённый пункт того же уровня. Скрываемый уровень уносит
+    // фокус с собой: под `reduce` `hidePopover()` мгновенный, и без переноса фокус
+    // упал бы на `<body>` — меню осталось бы на экране и перестало отвечать на
+    // клавиши. Перенос обязателен до скрытия, а не после: отложенный выход из Top
+    // Layer унёс бы фокус уже тогда, когда меню считает, что всё в порядке.
+    await hoverItem(page, 'Глухой');
+    const after = await readMenu(page);
+    expect(after.openCount, 'подменю закрыто').toBe(1);
+    expect(after.focusInMenu, 'фокус ушёл на уровень, а не на `<body>`').toBe(true);
+    expect(after.focusLabel, 'фокус на уровне, а не на пункте').toBe(null);
+
+    // Контроль живости: клавиша после сброса доходит до глубже несущего уровня, то
+    // есть до корня, — и там, где фокус упал бы на `<body>`, дошла бы до страницы.
+    await page.keyboard.press('ArrowDown');
+    const afterKey = await readMenu(page);
+    expect(afterKey.focusLabel, 'клавиша дошла до меню').toBe('Живой');
     expect(after.errors, 'ошибок страницы нет').toEqual([]);
   });
 
@@ -1121,36 +1187,56 @@ test.describe('показ подменю', () => {
     expect(expandedLabels(afterKey), 'развёрнут «Экспорт»').toEqual(['Экспорт']);
   });
 
-  test('курсор над невыбираемой строкой выделение не меняет и не сбрасывает', async ({ page }) => {
+  test('курсор над отключённым пунктом снимает выделение', async ({ page }) => {
     await makeMenu(page, 'unselectable', 'surface');
     await openAt(page, OPEN_MIDDLE);
 
-    // Живой пункт под курсором: выделение есть, и дальше проверяется, что две
-    // невыбираемые строки его не сдвигают.
+    // Живой пункт под курсором: выделение есть, и дальше проверяется, что невыбираемая
+    // строка его снимает, а не игнорирует.
     await hoverItem(page, 'Второй');
     const marked = await readMenu(page);
     expect(activeLabels(marked), 'отмечен пункт под курсором').toEqual(['Второй']);
     expect(marked.focusLabel, 'фокус на пункте под курсором').toBe('Второй');
 
-    // Отключённый пункт: вне цикла роуминга, отметки на нём быть не может. Сбрасывать
-    // тоже нечего, а выделение по требованию полного сброса снимается уходом курсора
-    // с дерева меню, а не наведением внутри него.
+    // Отключённый пункт: отметки на нём быть не может по построению, а отметка
+    // предыдущего должна уйти. Иначе меню показывает выбор, которого не делали, и
+    // пользователь читает серую строку как продолжение выделения — визуальная
+    // блокировка, из которой нет выхода.
     await hoverItem(page, 'Глухой');
     const overDisabled = await readMenu(page);
-    expect(activeLabels(overDisabled), 'отключённый пункт выделение не сменил').toEqual(['Второй']);
-    expect(overDisabled.focusLabel, 'фокус остался на живом пункте').toBe('Второй');
+    expect(activeLabels(overDisabled), 'выделение снято').toEqual([]);
+    // Фокус встаёт на сам уровень, а не остаётся на снятом пункте: активного пункта
+    // у уровня нет, и оставить фокус на неотмеченном значило бы оставить выбор,
+    // которого не видно.
+    expect(overDisabled.focusLabel, 'фокус не на снятом пункте').toBe(null);
+    expect(overDisabled.focusInMenu, 'фокус остался в меню').toBe(true);
 
-    // Разделитель: высота в один пиксель, и курсор пересекает его на каждом
-    // проходе мимо. Мигание здесь было бы постоянным, поэтому выделение и фокус
-    // обязаны остаться там же.
+    // Контроль: живой пункт после невыбираемой строки выделение всё-таки ставит.
+    // Без него тест проходил бы и на уровне, где выделение не двигает ничто.
+    await hoverItem(page, 'Живой');
+    expect(activeLabels(await readMenu(page)), 'живой пункт выделение поставил').toEqual(['Живой']);
+  });
+
+  test('курсор над разделителем выделение не сбрасывает', async ({ page }) => {
+    await makeMenu(page, 'unselectable', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+
+    // Разделитель высотой в один пиксель, и курсор пересекает его на каждом проходе
+    // мимо. Сбросило бы здесь выделение на каждом спуске по меню, то есть мигало бы
+    // постоянно, — поэтому разделитель остаётся нейтральной областью, какой и был.
+    await hoverItem(page, 'Второй');
+    const marked = await readMenu(page);
+    expect(activeLabels(marked), 'отмечен пункт под курсором').toEqual(['Второй']);
+
     await hoverNode(page, '.vc-separator');
     const overSeparator = await readMenu(page);
     expect(activeLabels(overSeparator), 'разделитель выделение не сменил').toEqual(['Второй']);
     expect(overSeparator.focusLabel, 'фокус остался на живом пункте').toBe('Второй');
-    // Контроль: живой пункт после невыбираемых строк выделение всё-таки сдвигает.
-    // Без него тест проходил бы и на уровне, где выделение не двигает ничто.
-    await hoverItem(page, 'Живой');
-    expect(activeLabels(await readMenu(page)), 'живой пункт выделение сдвинул').toEqual(['Живой']);
+
+    // Контроль: соседняя отключённая строка выделение снимает, то есть уровень
+    // различает невыбираемые строки, а не отключает сброс на всех сразу.
+    await hoverItem(page, 'Глухой');
+    expect(activeLabels(await readMenu(page)), 'отключённый пункт выделение снял').toEqual([]);
   });
 
   test('уход курсора до истечения задержки не открывает подменю', async ({ page }) => {
@@ -1320,7 +1406,23 @@ test.describe('показ подменю', () => {
     // что переход через зазор не вызывает `pointerenter` ни на чужом пункте.
     // Обе точки берутся из настоящих рамок, а `steps` действительно гонит курсор
     // по отрезку, а не прыгает в конец.
+    //
+    // Отправная точка — нижний правый угол владельца, а не его середина, и это
+    // обязательное условие самого кейса. Прямая из середины владельца в дальний
+    // угол подменю проходит по полосе соседней строки: у «Экспорта» снизу лежит
+    // отключённый «Глухой», и курсор цеплял его наискось. Пока невыбираемая строка
+    // была инертной, кейс проходил вопреки собственному комментарию, а теперь
+    // закрывает подменю — по новому правилу и совершенно правильно. Чтобы проверять
+    // зазор, а не правило соседа, отправная точка обязана выходить из владельца
+    // вбок, мимо соседних строк. Само выживание подменю и есть премисса пути:
+    // задел бы отрезок хоть одну строку уровня, подменю закрылось бы.
     const inset = 4;
+    const owner = await page.evaluate((name) => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.rectOf(name);
+    }, 'Экспорт');
+    expect(owner, 'рамка владельца есть').not.toBeNull();
+    const ownerRect = /** @type {MenuRect} */ (owner);
     const far = await page.evaluate((input) => {
       const level = document.getElementById(input.id);
       if (level === null) {
@@ -1336,6 +1438,7 @@ test.describe('показ подменю', () => {
       const rect = last.getBoundingClientRect();
       return { x: rect.right - input.inset, y: rect.bottom - input.inset };
     }, { id: submenuId, inset });
+    await page.mouse.move(ownerRect.right - inset, ownerRect.bottom - inset);
     await page.mouse.move(far.x, far.y, { steps: 20 });
     // Втрое больше прежнего срока закрытия подменю: таймера закрытия не осталось,
     // и ждать тут нечего — ожидание лишь доказывает, что подменю не гаснет само.
