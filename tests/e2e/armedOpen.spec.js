@@ -96,7 +96,10 @@ test.beforeEach(async ({ page }) => {
           { pressAndHold: /** @type {PressAndHoldMode} */ (input.pressAndHold) },
         );
         if (input.attach) {
-          menu.attach(document.getElementById('surface'));
+          const surface = document.getElementById('surface');
+          if (surface instanceof HTMLElement) {
+            menu.attach(surface);
+          }
         }
       },
       /**
@@ -231,7 +234,6 @@ test.describe('open с armed', () => {
       const menu = /** @type {{ open: (p: { x: number, y: number }, o: unknown) => void }} */
         (/** @type {unknown} */ (scope.__armed));
       try {
-        // @ts-expect-error — намеренно негодное значение опции.
         menu.open({ x: 260, y: 120 }, { armed: 'yes' });
         return { threw: false, message: '' };
       } catch (error) {

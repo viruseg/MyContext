@@ -86,11 +86,13 @@ test.beforeEach(async ({ page }) => {
      * @returns {void}
      */
     function handoff(how, event) {
-      const pointer = 'clientX' in event ? event : null;
+      // Событие активации может не нести ни координат, ни кнопки — на наведении их
+      // нет, — и тогда оба поля становятся пустыми, а не выдуманными.
+      const pointer = event !== null && 'clientX' in event ? event : null;
       handoffs.push({
         how,
         point: pointer === null ? null : { x: pointer.clientX, y: pointer.clientY },
-        button: 'button' in event ? event.button : 0,
+        button: event !== null && 'button' in event ? event.button : 0,
         menuOpen: document.querySelectorAll('.vc-menu:popover-open').length > 0,
       });
       if (handoffThrows) {
@@ -144,7 +146,10 @@ test.beforeEach(async ({ page }) => {
           { pressAndHold: /** @type {PressAndHoldMode} */ (input.pressAndHold) },
         );
         if (input.attach) {
-          menu.attach(document.getElementById('surface'));
+          const surface = document.getElementById('surface');
+          if (surface instanceof HTMLElement) {
+            menu.attach(surface);
+          }
         }
       },
       /**
@@ -305,8 +310,12 @@ test.describe('пункт с handoffAction', () => {
     const call = (await readMenu(page)).handoffs[0];
     const point = /** @type {{ x: number, y: number }} */ (call.point);
     expect(call.point, 'точка передана').not.toBeNull();
-    expect(point.x).toBeCloseTo(target.x, 0);
-    expect(point.y).toBeCloseTo(target.y, 0);
+    // Допуск в один пиксель: движки округляют координаты события до целых, и то,
+    // что приходит в действие, — это округлённая позиция курсора, а не точная
+    // геометрия пункта. Требовать тут точности до долей значило бы проверять
+    // движок, а не контракт.
+    expect(Math.abs(point.x - target.x), 'координата X').toBeLessThanOrEqual(1);
+    expect(Math.abs(point.y - target.y), 'координата Y').toBeLessThanOrEqual(1);
   });
 
   test('нажатие ускоряет отдачу, минуя задержку', async ({ page }) => {

@@ -548,6 +548,13 @@ test.beforeEach(async ({ page }) => {
         calls.focusOwner += 1;
         invoker.focus({ preventScroll: true });
       },
+      // Отдача управления на этом хосте не проверяется: у неё нет предмета среди
+      // уровней, которые здесь заводятся, и её кейсы лежат в `handoff.spec.js`,
+      // где хост настоящий. Здесь её достаточно объявить, чтобы объект отвечал
+      // контракту `KeyboardHost`.
+      handOver() {
+        calls.order.push('handOver');
+      },
     };
 
     const keyboard = createKeyboard(host);
