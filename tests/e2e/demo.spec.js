@@ -135,6 +135,7 @@ const SCENARIO_IDS = [
   'press-left',
   'armed',
   'handoff',
+  'dismissible',
   'mixed',
 ];
 
@@ -150,6 +151,7 @@ const SCENARIO_TITLES = {
   'press-left': 'Удержание левой кнопки',
   armed: 'Продолжение жеста',
   handoff: 'Отдача управления',
+  dismissible: 'Показ из чужого кода',
   mixed: 'Всё вместе',
 };
 
@@ -165,6 +167,7 @@ const SCENARIO_SHAPE = {
   'press-left': { first: 'Новый', last: 'Отключённый пункт', count: 4 },
   armed: { first: 'Первый', last: 'Последний', count: 3 },
   handoff: { first: 'Отдать', last: 'Обычный', count: 3 },
+  dismissible: { first: 'Первый', last: 'Последний', count: 3 },
   mixed: { first: 'Новый', last: 'Последний', count: 7 },
 };
 
@@ -181,6 +184,14 @@ const HELD_SCENARIOS = {
   armed: 'left',
   handoff: 'left',
 };
+
+/**
+ * Блоки, которые открывает кнопка в самом блоке: правый клик по ним не открывает
+ * ничего, и причина в этом не в блоке, а в его экземпляре — он не привязан.
+ * Отдельный список рядом с `HELD_SCENARIOS`, потому что открытие здесь делает
+ * страница, а не жест удержания.
+ */
+const BUTTON_SCENARIOS = ['dismissible'];
 
 /** Порядок подключения таблиц стилей, который требует бриф. */
 const STYLESHEET_ORDER = ['./styles/mycontext.css', './Demo/demo.css'];
@@ -228,6 +239,11 @@ const HANDOFF_HINT =
   'Пункт «Отдать» передаёт управление другому меню, и это меню уходит с экрана. Наведение '
   + 'с задержкой, как у владельца подменю; отключённый отдающий не отдаёт ничего.';
 
+const DISMISSIBLE_HINT =
+  'Меню открывает кнопка в блоке, а не правый клик по нему: блок не привязан, и закрывают '
+  + 'меню обычные правила — клик мимо, прокрутка, resize. Без `dismissible` оно висело бы '
+  + 'до Escape.';
+
 /**
  * Ожидаемая подсказка каждого блока. Таблица, а не условие по `id` в кейсе: подсказка
  * объявлена в описании сценария, и сверять её надо со всем списком, иначе
@@ -246,6 +262,7 @@ const SCENARIO_HINTS = {
   'press-left': PRESS_LEFT_HINT,
   armed: ARMED_HINT,
   handoff: HANDOFF_HINT,
+  dismissible: DISMISSIBLE_HINT,
   mixed: HINT,
 };
 
@@ -443,6 +460,26 @@ async function holdScenario(page, id, button) {
 async function releaseHeld(page, button) {
   await page.mouse.move(VIEWPORT.width - 8, VIEWPORT.height - 8);
   await page.mouse.up({ button });
+}
+
+/**
+ * Клик по кнопке показа в блоке: блок не привязан, и меню открывает страница.
+ *
+ * Отдельный открыватель по той же причине, что и `holdScenario`: правый клик по
+ * такому блоку не открывает ничего, и кейс получил бы ноль открытых уровней.
+ *
+ * Перед кликом чужое открытое меню снимается явно: `locator.click()` сначала
+ * проверяет, что элемент не перекрыт, и до нажатия не доходит, а перекрывать
+ * может уровень, у которого ещё идёт выход, — нажать и закрыть его нечем.
+ *
+ * @param {Page} page
+ * @param {string} id идентификатор сценария.
+ * @returns {Promise<string>}
+ */
+async function clickScenarioButton(page, id) {
+  await page.keyboard.press('Escape');
+  await page.locator(`[data-scenario="${id}"] .demo-scenario__opener`).click();
+  return openedRootId(page);
 }
 
 /**
@@ -1435,7 +1472,11 @@ test('демо: у каждого сценария свой независимы
 
   for (const id of SCENARIO_IDS) {
     const held = HELD_SCENARIOS[id];
-    const rootId = held === undefined ? await openScenario(page, id) : await holdScenario(page, id, held);
+    const rootId = held !== undefined
+      ? await holdScenario(page, id, held)
+      : BUTTON_SCENARIOS.includes(id)
+        ? await clickScenarioButton(page, id)
+        : await openScenario(page, id);
     // `openScenario` уже отказал бы, если бы открытых уровней оказалось не один, но
     // утверждение остаётся: иначе «своё меню у каждого» читалось бы по снимку с
     // наложением.
@@ -1649,4 +1690,31 @@ test('демо: отключённый отдающий пункт не отда
   expect(await logLines(page, 'handoff'), 'отдачи не было').toEqual([]);
   expect((await readMenu(page)).openCount, 'меню осталось').toBe(1);
   await releaseHeld(page, 'left');
+});
+
+test('демо: блок, открываемый кнопкой, закрывается кликом мимо', async ({ page }) => {
+  // Блок не привязан: правый клик по нему не открывает ничего, а меню показывает
+  // кнопка. Правила закрытия подняты показом (`dismissible`) — без них меню висело бы
+  // до `Escape`, и блок обещал бы читателю обратное.
+  const block = await page.locator('[data-scenario="dismissible"]').boundingBox();
+  if (block === null) {
+    throw new Error('блок сценария «dismissible» не найден');
+  }
+  await page.mouse.click(block.x + 20, block.y + 20, { button: 'right' });
+  expect((await readMenu(page)).openCount, 'правый клик по блоку ничего не открыл').toBe(0);
+
+  await clickScenarioButton(page, 'dismissible');
+  expect((await readMenu(page)).openCount, 'кнопка открыла меню').toBe(1);
+
+  await page.mouse.click(VIEWPORT.width - 12, 12);
+  expect((await readMenu(page)).openCount, 'клик мимо закрыл меню').toBe(0);
+});
+
+test('демо: пункт меню, открытого кнопкой, исполняется кликом', async ({ page }) => {
+  const rootId = await clickScenarioButton(page, 'dismissible');
+  const point = await centreOf(page, rootId, 'Первый');
+  await page.mouse.click(point.x, point.y, { button: 'left' });
+
+  expect(await logLines(page, 'dismissible'), 'действие исполнилось').toEqual(['Первый']);
+  expect((await readMenu(page)).openCount, 'меню закрылось').toBe(0);
 });

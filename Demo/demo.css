@@ -112,6 +112,28 @@ body {
 }
 
 /*
+ * Кнопка показа у блока, который открывает меню из чужого кода.
+ *
+ * Отдельный класс ради одного блока: остальные открываются правым кликом по
+ * всей площади, и кнопка в них была бы элементом без смысла.
+ */
+.demo-scenario__opener {
+  display: block;
+  margin: 0.75rem 0 0;
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--demo-muted);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.demo-scenario__opener:hover {
+  border-color: currentColor;
+}
+
+/*
  * Журнал кликов блока.
  *
  * Ограничен по высоте и прокручивается внутри себя, а не растёт: кликов за

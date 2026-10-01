@@ -66,10 +66,11 @@ function scenarioBlock(id) {
 /**
  * Печатает элемент с текстом.
  *
- * @param {string} tagName имя тега.
+ * @template {keyof HTMLElementTagNameMap} K
+ * @param {K} tagName имя тега.
  * @param {string} className класс.
  * @param {string} text содержимое.
- * @returns {HTMLElement}
+ * @returns {HTMLElementTagNameMap[K]}
  */
 function textElement(tagName, className, text) {
   const element = document.createElement(tagName);
@@ -222,6 +223,19 @@ function buildScenario(scenario, block) {
     autoHideDistance: scenario.autoHideDistance ?? DEFAULT_AUTO_HIDE_DISTANCE,
     pressAndHold: scenario.pressAndHold ?? DEFAULT_PRESS_AND_HOLD,
   });
+  if (scenario.openFromButton === true) {
+    // Привязки нет намеренно: блок с этим сценарием показывает показ из чужого кода,
+    // а правила закрытия поднимает сам показ. Привязанный блок открыл бы меню ещё и
+    // правым кликом, и `dismissible` ничего бы не менял.
+    const opener = textElement('button', 'demo-scenario__opener', 'Открыть меню');
+    opener.type = 'button';
+    opener.addEventListener('click', () => {
+      const rect = opener.getBoundingClientRect();
+      menu.open({ x: rect.right, y: rect.top }, { dismissible: true });
+    });
+    block.appendChild(opener);
+    return menu;
+  }
   menu.attach(block);
   if (scenario.openWithArmed === true) {
     // Вооружение ставит тот, кто держит кнопку, — в демо это страница. Показ идёт
