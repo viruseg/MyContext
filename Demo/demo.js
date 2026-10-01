@@ -223,6 +223,19 @@ function buildScenario(scenario, block) {
     pressAndHold: scenario.pressAndHold ?? DEFAULT_PRESS_AND_HOLD,
   });
   menu.attach(block);
+  if (scenario.openWithArmed === true) {
+    // Вооружение ставит тот, кто держит кнопку, — в демо это страница. Показ идёт
+    // из нажатия по самому блоку: кнопка уже зажата к этому моменту, и меню
+    // приходит в уже начавшемся жесте, ровно как это делает вызывающий код поверх
+    // чужого меню.
+    block.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) {
+        return;
+      }
+      event.preventDefault();
+      menu.open({ x: event.clientX, y: event.clientY }, { armed: true });
+    }, { capture: true });
+  }
   return menu;
 }
 
