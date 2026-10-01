@@ -1110,6 +1110,28 @@ test.describe('глобальные слушатели', () => {
     expect(after.errors, 'страница без ошибок').toEqual([]);
   });
 
+  test('скролл страницы без сдвига не закрывает меню', async ({ page }) => {
+    // Правило «скролл закрывает меню» сверяет сдвиг страницы, а не сам факт события:
+    // событие `scroll` может прийти, ничего не сдвинув, и закрывать по нему только что
+    // показанное меню — значит показать и тут же убрать. Кейс шлёт событие сам и
+    // держит страницу на месте: доказано, что обработчик реагирует на сдвиг, а не на
+    // событие; как именно браузер решает слать `scroll`, кейс не проверяет.
+    await makeMenu(page, 'first', 'chain', 'surface');
+    await openAt(page, 'first', SURFACE_POINT);
+    expect((await readMenu(page)).openCount, 'меню открыто').toBe(1);
+
+    const moved = await page.evaluate(() => {
+      const before = window.scrollY;
+      window.dispatchEvent(new Event('scroll'));
+      return { before, after: window.scrollY };
+    });
+    expect(moved.after, 'страница не сдвинулась').toBe(moved.before);
+
+    const after = await readMenu(page);
+    expect(after.openCount, 'меню осталось на экране').toBe(1);
+    expect(after.errors, 'страница без ошибок').toEqual([]);
+  });
+
   test('скролл внутреннего списка длинного меню его не закрывает', async ({ page }) => {
     await makeMenu(page, 'first', 'long', 'surface');
     await openAt(page, 'first', SURFACE_POINT);

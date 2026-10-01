@@ -43,6 +43,16 @@ import { assertItems } from './renderer.js';
  */
 
 /**
+ * Позиция прокрутки страницы. Пара нужна, чтобы отличить сдвиг от пересчёта области
+ * прокрутки: значения, а не ссылка на элемент, — иначе сравнение говорило бы «тот
+ * же узел» там, где спрашивается «то же место».
+ *
+ * @typedef {object} ScrollPosition
+ * @property {number} top
+ * @property {number} left
+ */
+
+/**
  * Вооружённое удержание: чем именно нажато и каким указателем.
  *
  * @typedef {object} ArmedPress
@@ -258,6 +268,34 @@ function assertPopoverSupport() {
   if (typeof HTMLElement === 'undefined' || typeof HTMLElement.prototype.showPopover !== 'function') {
     throw new Error(POPOVER_REQUIREMENT);
   }
+}
+
+/**
+ * Позиция прокрутки страницы либо `null`, если прокручивать нечем.
+ *
+ * @returns {ScrollPosition | null}
+ */
+function documentScroll() {
+  const scroller = document.scrollingElement;
+  if (scroller === null) {
+    return null;
+  }
+  return { top: scroller.scrollTop, left: scroller.scrollLeft };
+}
+
+/**
+ * Событие `scroll` пришло от самой страницы, а не от элемента внутри неё.
+ *
+ * Отдельная функция, потому что у события прокрутки целью может быть любой из
+ * четырёх узлов — `window`, `document`, `<html>` или `<body>` — в зависимости от
+ * браузера и от того, что именно пересчиталось.
+ *
+ * @param {EventTarget | null} target
+ * @returns {boolean}
+ */
+function isDocumentScroll(target) {
+  return target === window || target === document
+    || target === document.documentElement || target === document.body;
 }
 
 /**
@@ -628,6 +666,17 @@ export class MyContext {
    * @type {GlobalHandlerRow[]}
    */
   #globalHandlers = [];
+
+  /**
+   * Позиция прокрутки страницы на последнем показе.
+   *
+   * Нужна, чтобы отличить прокрутку от события `scroll`, ничего не сдвинувшего.
+   * Закрывать по такому событию только что показанное меню — значит показать и тут же
+   * убрать, а источник такого события не обязательно человек.
+   *
+   * @type {ScrollPosition | null}
+   */
+  #shownScroll = null;
 
   /** @type {boolean} */
   #destroyed = false;
@@ -1425,6 +1474,18 @@ export class MyContext {
     if (this.#isInsideAnyMenu(event.target)) {
       return;
     }
+    // Скролл страницы, который ничего не сдвинул, скроллом не считается: закрывать по
+    // нему только что показанное меню — значит показать и тут же убрать. Проверка
+    // только для страницы: своя позиция у элемента своя, а сверять её не с чем, так
+    // что прокрутка панели — в том числе сделанная кодом в том же такте, что и показ, —
+    // закрывает меню как прежде.
+    if (isDocumentScroll(event.target)) {
+      const now = documentScroll();
+      const shown = this.#shownScroll;
+      if (now !== null && shown !== null && now.top === shown.top && now.left === shown.left) {
+        return;
+      }
+    }
     this.#closeMenu({ returnFocus: false });
   };
 
@@ -1885,6 +1946,10 @@ export class MyContext {
     this.#chain.push(root);
     this.#leadAhead(root);
     this.#layer.showRoot(root, params);
+    // Позиция страницы запоминается после показа, а не до: событие `scroll` может
+    // прийти уже после того, как меню встало на место, и сверять его надо с тем, что
+    // было в момент показа, — иначе показ закрывал бы сам себя.
+    this.#shownScroll = documentScroll();
     // На каждый показ, а не на первый: после закрытия реестр движка пуст, и без
     // этого вызова меню было бы открытым и мёртвым для клавиатуры.
     this.#keyboard.registerLevel(root, { focus: true });
