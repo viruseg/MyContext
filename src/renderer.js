@@ -262,6 +262,7 @@ export function assertItem(item, path) {
   assertActionField(item, 'labelAction', path, true);
   assertActionField(item, 'iconAction', path, false);
   assertActionField(item, 'submenuAction', path, false);
+  assertActionField(item, 'handoffAction', path, false);
   assertActionField(item, 'isEnabledAction', path, false);
   assertActionField(item, 'action', path, false);
   if (item.version !== undefined

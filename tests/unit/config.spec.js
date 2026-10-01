@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { MyContext } from '../../src/MyContext.js';
+import { assertItem } from '../../src/renderer.js';
 
 /**
  * @typedef {import('../../src/MyContext.js').MenuItem} MenuItem
@@ -226,5 +227,37 @@ test.describe('валидация опции pressAndHold', () => {
       expect(() => menuWithOptions({ pressAndHold: mode })).not.toThrow();
     }
     expect(() => menuWithOptions({})).not.toThrow();
+  });
+});
+
+test.describe('поле handoffAction', () => {
+  test('не функция отклоняется', () => {
+    // Поле означает «отдай управление другому меню», и нефункция превратила бы его
+    // в «у пункта есть хендофф, но позвать некого»: пункт нарисовался бы со
+    // шевроном владельца и при этом ничего не открывал бы.
+    expect(() => menuOf([{ labelAction: () => 'Пункт', handoffAction: 'меню' }])).toThrow(TypeError);
+    expect(() => menuOf([{ labelAction: () => 'Пункт', handoffAction: 'меню' }])).toThrow('items[0].handoffAction');
+    expect(() => menuOf([{ labelAction: () => 'Пункт', handoffAction: {} }])).toThrow('items[0].handoffAction');
+    expect(() => menuOf([{ labelAction: () => 'Пункт', handoffAction: null }])).toThrow('items[0].handoffAction');
+  });
+
+  test('функция принимается, и handoffAction без action тоже', () => {
+    // Хендофф не требует собственного действия: отдача управления — и есть всё
+    // назначение пункта, а второе действие было бы вторым ответом на один вопрос.
+    expect(() => menuOf([{ labelAction: () => 'Пункт', handoffAction: () => undefined }])).not.toThrow();
+  });
+
+  test('разделительу поле не полагается, и его объявление отклоняется', () => {
+    // Разделитель отличается от пункта единственным полем `type`, и лишние поля у
+    // него по контракту просто игнорируются — как `labelAction` или `version`.
+    expect(() => menuOf([{ type: 'separator', handoffAction: () => undefined }])).not.toThrow();
+  });
+
+  test('форма проверяется на уровне, а не только на корне', () => {
+    // Одна проверка формы на оба места, где она живёт: корень и подменю. Путь
+    // строится вызывающим, поэтому подменю даёт вложенный путь — и ошибка обязана
+    // называть его, а не корень.
+    expect(() => assertItem({ labelAction: () => 'Лист', handoffAction: 42 }, 'items[1].0'))
+      .toThrow('items[1].0.handoffAction');
   });
 });

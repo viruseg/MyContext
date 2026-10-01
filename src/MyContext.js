@@ -24,11 +24,31 @@ import { assertItems } from './renderer.js';
  */
 
 /**
+ * @typedef {object} OpenOptions
+ * @property {boolean} [armed] показать меню внутри уже начатого жеста удержания.
+ *   Кнопка, названная `options.pressAndHold`, считается уже зажатой: меню закроется на
+ *   её отпускании, а под курсором в этот момент окажется доступный пункт — его
+ *   действие исполнится. Нужен вызывающему коду, который держит кнопку сам и открывает
+ *   меню уже после нажатия: вооружения от нажатия по контейнеру не было, а закрыть
+ *   меню должен тот же жест. По умолчанию `false`, и без опции поведение прежнее.
+ *   Требует `options.pressAndHold`, отличного от `'none'`: при `'none'` кнопки нет, и
+ *   закрывать меню будет нечем.
+ */
+
+/**
+ * Опции `open()`.
+ *
+ * @typedef {object} OpenOptionsShape
+ * @property {boolean} [armed] вооружать ли жест удержания на показе.
+ */
+
+/**
  * Вооружённое удержание: чем именно нажато и каким указателем.
  *
  * @typedef {object} ArmedPress
  * @property {number} button номер кнопки, которой вооружён жест.
- * @property {number} pointerId указатель, которым она нажата.
+ * @property {number} pointerId указатель, которым она нажата, либо
+ *   {@link EXTERNAL_POINTER_ID} у жеста, вооружённого снаружи.
  */
 
 /**
@@ -93,6 +113,29 @@ const PRIMARY_MOUSE_BUTTON = 0;
 const MIDDLE_MOUSE_BUTTON = 1;
 const RIGHT_MOUSE_BUTTON = 2;
 const DESTROYED_MESSAGE = 'MyContext: экземпляр уничтожен';
+/**
+ * `pointerId` вооружения, поднятого изнутри, — открытием с `armed`.
+ *
+ * Настоящим событием нулевой `pointerId` не приходит: браузер нумерует указатели с
+ * единицы. Значение выбрано поэтому, а не как «особое»: оно обязано отличаться от
+ * любого настоящего, и тогда сверка «свой или нет» отвечает «свой» ровно для
+ * вооружения снаружи и никогда — для остальных.
+ */
+const EXTERNAL_POINTER_ID = 0;
+
+/**
+ * Подписка обработчиков вооружения на `document`.
+ *
+ * `capture` обязателен: вооружённое меню обязано разобрать отпускание раньше любого
+ * обработчика страницы. `passive` — по той же причине, что и в таблице `attach()`:
+ * из этих трёх обработчиков `preventDefault` зовёт только `pointerdown`, и без
+ * `passive` браузеру пришлось бы ждать его на каждом движении указателя по странице.
+ *
+ * `AddEventListenerOptions`, а не `EventListenerOptions`: у второго нет поля `passive`.
+ *
+ * @type {AddEventListenerOptions}
+ */
+const HOLD_SUBSCRIPTION = { capture: true, passive: true };
 const POPOVER_REQUIREMENT =
   'MyContext: браузер не поддерживает Popover API — нет HTMLElement.prototype.showPopover';
 
@@ -159,6 +202,18 @@ function isRecord(value) {
  * @property {string} type
  * @property {EventListener} handler
  * @property {boolean} [passive] подписка без `preventDefault`; на снятии повторяется.
+ */
+
+/**
+ * Строка таблицы подписки вооружения.
+ *
+ * Отдельный тип, а не `GlobalHandlerRow` без `target`: подписка вооружения всегда
+ * на `document`, и объявлять в строке узел, которым этот узел быть не может, значило бы
+ * врать о таблице ради одного лишнего поля.
+ *
+ * @typedef {object} HoldHandlerRow
+ * @property {string} type
+ * @property {EventListener} handler
  */
 
 /**
@@ -564,7 +619,26 @@ export class MyContext {
    *
    * @type {ArmedPress | null}
    */
-  #armedPress = null;
+#armedPress = null;
+
+  /**
+   * Подписка, поднятая вооружением жеста изнутри — то есть открытием с
+   * `armed`. Отдельна от `#globalHandlers` подписки `attach()`: та снимается
+   * `detach()` и `destroy()`, а эта обязана сниматься вместе с самим жестом,
+   * потому что без привязки её больше никто не уберёт.
+   *
+   * @type {HoldHandlerRow[]}
+   */
+  #holdRows = [];
+
+  /**
+   * Поднята ли подписка вооружения. Отдельный признак, а не проверка по
+   * `#holdRows`: список пуст и до первой подписки, и после снятия, а снимать
+   * второй раз нечего.
+   *
+   * @type {boolean}
+   */
+  #holdBound = false;
 
   /**
    * Единственный обработчик активации: один на элемент уровня, ни одного на
@@ -1163,7 +1237,13 @@ export class MyContext {
       return;
     }
     const press = this.#armedPress;
-    if (press.pointerId !== event.pointerId || press.button !== event.button) {
+    if (press.button !== event.button) {
+      return;
+    }
+    // Указатель сверяется только у вооружённого изнутри жеста: вооружение снаружи не
+    // знает, каким пальцем держит вызывающий код, и сверять его не с чем, кроме как
+    // с отказу знать.
+    if (press.pointerId !== EXTERNAL_POINTER_ID && press.pointerId !== event.pointerId) {
       return;
     }
     // Снятие здесь, а не в `#closeMenu`: путь «меню уже закрыто» тоже обязан
@@ -1516,11 +1596,17 @@ export class MyContext {
    * проходит за один такт.
    *
    * @param {Point} params точка вызова в координатах вьюпорта, px.
+   * @param {OpenOptions} [options] дополнительные условия показа.
    * @returns {void}
    * @throws {Error} если экземпляр уничтожен.
+   * @throws {TypeError} если опции негодны.
    */
-  open(params) {
+  open(params, options) {
     this.#assertAlive();
+    this.#assertOpenOptions(options);
+    // Опция читается до всего остального: она решает, кто владеет жестом, а всё
+    // остальное тело метода уже исполняется под это решение.
+    const armed = options?.armed === true;
     // Первым делом и до всего: счётчик должен увидеть новое поколение раньше любого
     // обработчика, который успеет отреагировать на показ.
     this.#openSerial += 1;
@@ -1533,6 +1619,12 @@ export class MyContext {
     // прошёл бы мимо цикла, ради которого цикл и заведён.
     const reopening = this.#isShowing();
     this.#cancelReopen();
+    // Вооружение ставится здесь, а не в `#showAt`: под `reduce` и без него показ
+    // наступает в разное мгновение, а жест обязан начаться с показа меню, иначе
+    // отпускание пришло бы в пустоту.
+    if (armed) {
+      this.#armExternalPress();
+    }
     if (!reopening) {
       this.#showAt(params);
       return;
@@ -1574,6 +1666,87 @@ export class MyContext {
    */
   #isShowing() {
     return this.#chain.length > 0 || this.#reopenHandle !== null;
+  }
+
+  /**
+   * Вооружает жест удержания изнутри: кнопка, названная опцией, считается уже
+   * зажатой, и отпускание её закроет меню.
+   *
+   * Обычный жест вооружает нажатие по привязанному контейнеру, и меню, открытое
+   * таким нажатием, разбирает отпускание само. Эта функция покрывает обратный
+   * случай: кнопку держит вызывающий код, а меню он открывает уже после нажатия —
+   * то есть нажатия по контейнеру у меню не было и ждать его неоткуда. Без
+   * вооружения такое меню не закрылось бы ничем: разбирать отпускание нечем.
+   *
+   * **Указатель не сверяется.** Вооружение снаружи не знает, каким пальцем держит
+   * вызывающий код, и требовать от него этого значило бы запретить случай, ради
+   * которого функция написана. Сверяется кнопка — её называет опция
+   * `pressAndHold`, и она у вызывающего кода перед глазами.
+   *
+   * Поле `pointerId` заполняется нулём: `#onGlobalPointerRelease` сверяет его по
+   * неравенству, а нулевой `pointerId` настоящим событием не приходит — то есть
+   * проверка проходит для любого указателя, и это ровно задумано.
+   *
+   * @returns {void}
+   */
+  #armExternalPress() {
+    const button = pressButtonOf(this.#options.pressAndHold);
+    if (button === null) {
+      // Сюда не дойти: `#assertOpenOptions` отвергает `armed` при `'none'`, где
+      // кнопки нет вовсе. Проверка остаётся, потому что `#armExternalPress` —
+      // внутреннее тело, и его контракт не должен зависеть от того, кто его зовёт.
+      return;
+    }
+    this.#armedPress = { button, pointerId: EXTERNAL_POINTER_ID };
+    // Глобальные слушатели поднимает `attach()`, и без привязки их нет вовсе —
+    // а без них отпускание никто не разберёт. Отдельная подписка на вооружение
+    // снимается вместе с жестом: вооружённое меню обязано разбирать отпускание,
+    // и после закрытия подписка была бы страницей, которую никто не убирает.
+    this.#bindHoldHandlers();
+  }
+
+  /**
+   * Поднимает глобальные слушатели, нужные вооружённому жесту, — если они ещё не
+   * подняты. Идемпотентна: `attach()` поднимает их же, и повторная подписка на
+   * `document` дала бы второе срабатывание на каждое событие.
+   *
+   * @returns {void}
+   */
+  #bindHoldHandlers() {
+    if (this.#holdBound) {
+      return;
+    }
+    this.#holdBound = true;
+    this.#holdRows = [
+      { type: 'pointerup', handler: asListener(this.#onGlobalPointerRelease) },
+      { type: 'pointercancel', handler: asListener(this.#onGlobalPointerRelease) },
+      { type: 'pointerdown', handler: asListener(this.#onGlobalPointerDown) },
+    ];
+    for (const row of this.#holdRows) {
+      document.addEventListener(row.type, row.handler, HOLD_SUBSCRIPTION);
+    }
+  }
+
+  /**
+   * Снимает подписку, поднятую `#bindHoldHandlers`.
+   *
+   * Ссылка на обработчик берётся из `#holdRows`, а не строится заново: `add` и
+   * `remove` должны получить одну и ту же ссылку, и `asListener` на каждом вызове
+   * отдаёт новую — снятие по ней молча ничего не сняло бы, и обработчик остался
+   * бы на странице до конца её жизни. Симметрична подписке по той же таблице
+   * `capture`, что и `#unbindGlobalHandlers` для поднятых `attach()`.
+   *
+   * @returns {void}
+   */
+  #unbindHoldHandlers() {
+    if (!this.#holdBound) {
+      return;
+    }
+    for (const row of this.#holdRows) {
+      document.removeEventListener(row.type, row.handler, HOLD_SUBSCRIPTION);
+    }
+    this.#holdRows = [];
+    this.#holdBound = false;
   }
 
   /**
@@ -1714,6 +1887,10 @@ export class MyContext {
     // удержание — две стороны одного состояния меню, и закрытие обязано гасить
     // жест всегда, включая автоскрытие и потерю фокуса окна.
     this.#armedPress = null;
+    // Жест погашен, а значит погашена и подписка, поднятая ради него: оставлять её
+    // значило бы держать на странице обработчики закрытого меню. Снимается здесь, а
+    // не в `#onGlobalPointerRelease`, потому что закрытий много, а вооружение одно.
+    this.#unbindHoldHandlers();
     this.#layer.hideAll();
     this.#forgetPlacement();
     if (returnFocus) {
@@ -1767,6 +1944,9 @@ export class MyContext {
     MyContext.#live.delete(this);
     this.#destroyed = true;
     this.#unbind();
+    // Подписка вооружения не входит в `#unbind()`: та снимает подписку `attach()`,
+    // а эта поднята открытием с `armed` и без привязки живёт сама по себе.
+    this.#unbindHoldHandlers();
     this.#cancelReopen();
     // Забывание постановки тут не лишнее: `#forgetPlacement` снимает висящие задачи
     // hover, и после `destroy()` их больше некому отменить — сработавшая задача звала
@@ -2321,6 +2501,42 @@ export class MyContext {
   #assertAlive() {
     if (this.#destroyed) {
       throw new Error(DESTROYED_MESSAGE);
+    }
+  }
+
+  /**
+   * Проверка опций `open()`.
+   *
+   * Проверяется по форме, а не по смыслу: негодное значение молча превратилось бы в
+   * «жест не вооружён», и меню открылось бы, но его отпускание закрывать не стало бы —
+   * то есть автор задал бы опцию, а меню вело бы себя как при её отсутствии.
+   *
+   * Порядок проверок обратный чтению: сперва форма, потом согласованность. Значение,
+   * которое не логическое, не может быть истинным, и спорить с ним про режим удержания
+   * бессмысленно — сначала назвать пользователю его форму.
+   *
+   * @param {unknown} options опции как их передал вызывающий.
+   * @returns {void}
+   * @throws {TypeError} на первом негодном поле; путь до поля — в сообщении.
+   */
+  #assertOpenOptions(options) {
+    if (options === undefined) {
+      return;
+    }
+    const path = 'options';
+    if (!isRecord(options)) {
+      throw new TypeError(`${path}: опции открытия должны быть объектом`);
+    }
+    const { armed } = options;
+    if (armed !== undefined && typeof armed !== 'boolean') {
+      throw new TypeError(`${path}.armed: продолжение жеста — истина или ложь`);
+    }
+    // `armed` при `'none'` не имеет прочтения: закрывать меню будет нечем, а
+    // молчаливое игнорирование выдало бы опцию за сработавшую.
+    if (armed === true && this.#options.pressAndHold === 'none') {
+      throw new TypeError(
+        `${path}.armed: продолжить жест нечем — options.pressAndHold называет 'none', а удержания нет`,
+      );
     }
   }
 
