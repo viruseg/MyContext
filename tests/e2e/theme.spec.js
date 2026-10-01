@@ -1503,6 +1503,53 @@ test.describe('анимации', () => {
     expect(entry.running).toEqual([]);
   });
 
+  test('под reduce закрытый уровень не принимает события', async ({ page }) => {
+    // `reduce` пропускает отложенное закрытие, и легко пропустить при этом
+    // `data-vc-closing`: он снимает события с закрытого уровня, а не только гасит
+    // его. Авторское `display: flex` у `.vc-menu` перебивает UA-правило
+    // `[popover]:not(:popover-open) { display: none }` по происхождению, и без
+    // отметки закрытый уровень остался бы отрисованным — то есть невидимое меню
+    // глотало бы клики там, где его уже нет.
+    await mountLiveMenu(page, { count: 3 });
+    await openLiveMenu(page, { x: 220, y: 180 });
+
+    const shown = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('.vc-menu'))
+        .filter((level) => level.matches(':popover-open'))
+        .map((level) => level.getAttribute('aria-label') ?? '');
+    });
+    expect(shown, 'меню показано').toEqual(['Меню пробы']);
+
+    await page.evaluate(() => {
+      const scope = /** @type {{ __live?: LiveMenu }} */ (/** @type {unknown} */ (globalThis));
+      scope.__live?.menu.close();
+    });
+    // Под `reduce` закрытие мгновенное, и ждать нечего: пауза взята только
+    // затем, чтобы кадр после `close()` был уже следующим.
+    await page.waitForTimeout(50);
+
+    const closed = await page.evaluate(() => {
+      const level = Array.from(document.querySelectorAll('.vc-menu'))
+        .find((node) => node.getAttribute('aria-label') === 'Меню пробы');
+      if (!(level instanceof HTMLElement)) {
+        throw new Error('уровень пробы не найден');
+      }
+      const rect = level.getBoundingClientRect();
+      const hit = document.elementFromPoint(
+        Math.round(rect.left + rect.width / 2),
+        Math.round(rect.top + 8),
+      );
+      return {
+        open: level.matches(':popover-open'),
+        pointerEvents: getComputedStyle(level).pointerEvents,
+        hitInsideLevel: hit === null ? false : level.contains(hit),
+      };
+    });
+    expect(closed.open, 'меню закрыто').toBe(false);
+    expect(closed.pointerEvents, 'закрытый уровень не принимает события').toBe('none');
+    expect(closed.hitInsideLevel, 'под местом закрытого меню лежит страница').toBe(false);
+  });
+
   test('появление: используется @starting-style и transition-behavior allow-discrete', async ({ page, request }) => {
     // `@starting-style` не виден в вычисленных стилях, поэтому его наличие
     // проверяется по файлу...

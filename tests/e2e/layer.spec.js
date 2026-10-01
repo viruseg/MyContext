@@ -1626,20 +1626,25 @@ test.describe('закрытие', () => {
         pending: probe.tasks.length,
         hides: probe.hides.length,
         entryOpen: sub.open,
-        // Отложенности нет — значит нет и состояния закрытия: под `reduce`
-        // переходов нет, и `data-vc-closing` погасил бы уровень мгновенно.
         closing: sub.element.hasAttribute('data-vc-closing'),
+        pointerEvents: getComputedStyle(sub.element).pointerEvents,
       };
     });
 
     // Контроль: кейс обязан исполнить ветку `reduce`, иначе всё остальное
     // проверяло бы обычное отложенное закрытие.
     expect(result.reduced).toBe(true);
-    expect(result.closing).toBe(false);
     expect(result.open).toBe(false);
     expect(result.pending).toBe(0);
     expect(result.hides).toBe(1);
     expect(result.entryOpen).toBe(false);
+    // Отметка закрытия под `reduce` ставится, хотя анимировать нечего: она снимает
+    // события с закрытого уровня, а не только гасит его. Пропуск отложенности
+    // пропускает анимацию, а не отметку, — иначе закрытый уровень остался бы
+    // отрисованным, потому что авторское `display: flex` перебивает UA-правило
+    // `[popover]:not(:popover-open) { display: none }` по происхождению.
+    expect(result.closing).toBe(true);
+    expect(result.pointerEvents, 'закрытый уровень не принимает события').toBe('none');
   });
 
   test('reduced-motion: значение медиазапроса читается в момент закрытия, а не при создании', async ({ page }) => {
