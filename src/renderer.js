@@ -90,6 +90,12 @@ import { renderIcon } from './icons.js';
  *   каждом показе. Вернул не `true` — пункт отключён: он не входит в цикл
  *   роуминга и не бывает владельцем подменю даже при непустом `submenuAction`.
  *   Без поля пункт доступен. Исключение уходит наружу, как из `action`.
+ * @property {(event: Event) => void} [handoffAction] отдача управления другому
+ *   меню. Зовётся по наведению с задержкой, по нажатию — без неё — и по `Enter`
+ *   или `Space`, а затем меню уходит с экрана. Событие активации достаётся как
+ *   есть: по наведению это `pointerenter`, по нажатию `pointerdown`, с клавиатуры
+ *   `keydown`, — и что с ним делать, решает автор. Владельцем подменю пункт при
+ *   этом не становится: подменю у него нет, и раскрывать нечего.
  * @property {(event: MouseEvent | KeyboardEvent) => void} [action] вызывается по
  *   внутреннему ключу пункта, а не хранится на узле.
  * @property {number} [version] метка состава, `0` по умолчанию. Входит в отпечаток
@@ -138,6 +144,12 @@ import { renderIcon } from './icons.js';
  * @property {boolean} hasSubmenu владелец ли пункт непустого подменю.
  *   `false` у разделителей, у пунктов с пустым `submenuAction` и у отключённых:
  *   признак один, и он означает «подменю можно раскрыть», а не «подменю есть».
+ * @property {boolean} handsOff отдаёт ли пункт управление другому меню по
+ *   `handoffAction`. Владельцем при этом он не является: подменю у него нет, и
+ *   `aria-owns` ему некуда указывать. Признак нужен отдельно от `hasSubmenu`
+ *   именно поэтому — владелец раскрывает уровень сам, а отдающий уходит наружу.
+ * @property {((event: Event) => void) | null} handoff действие отдачи, взятое на
+ *   этом показе; `null` у всех, кто не отдаёт.
  * @property {string | null} key внутренний ключ пункта; у разделителя `null`.
  * @property {string | null} submenuId `id`, зарезервированный под подменю этого
  *   пункта; у не-владельцев и у разделителя `null`. Считается из `menuId` и
@@ -453,6 +465,22 @@ function isSubmenuOwner(enabled, submenuItems) {
 }
 
 /**
+ * Отдающий управление: действие есть И пункт доступен.
+ *
+ * Правило то же, что у владельца подменю, и по той же причине — отключённый пункт
+ * не отвечает ни за что. Совпадение двух правил не в костыль: отдача и подменю
+ * отвечают на один вопрос «есть ли у пункта продолжение», и различать их приходится
+ * не здесь, а в органе показа, где у каждого своё тело.
+ *
+ * @param {boolean} enabled ответ `isEnabledOf` этому же пункту.
+ * @param {((event: Event) => void) | null} handoff действие отдачи пункта.
+ * @returns {boolean}
+ */
+function handsOffOwner(enabled, handoff) {
+  return enabled && handoff !== null;
+}
+
+/**
  * Ответы пункта на этот показ: всё, что о нём знать, собирается здесь и в одном
  * порядке — доступность, подпись, иконка, подменю. Один порядок на сборку уровня и
  * на каждый его показ: автор с побочным эффектом в действии увидел бы разный
@@ -471,6 +499,10 @@ function isSubmenuOwner(enabled, submenuItems) {
  *   оркестратор переспрашивает признак, а не решает заново, потому что разошлись
  *   бы ответы — у отключённого пункта остался бы признак раскрытия, которого не
  *   будет.
+ * @property {boolean} handsOff отдаёт ли пункт управление наружу. **Решение**
+ *   принимает `handsOffOwner` по той же причине, что `hasSubmenu` — про отключённый
+ *   пункт должно быть известно и здесь, а разошлись бы ответы так же.
+ * @property {((event: Event) => void) | null} handoff действие отдачи этого показа.
  */
 
 /**
@@ -484,12 +516,18 @@ function resolveItem(item, path) {
   const label = labelOf(item, path);
   const icon = iconOf(item, path);
   const submenuItems = submenuOf(item, path);
+  // Отдача берётся по форме, а не проверяется на негодность: действие уже проверено
+  // `assertItem`, и результат его вызова — не наше дело, потому что звать его будет
+  // оркестратор, а не рендерер.
+  const handoff = item.handoffAction === undefined ? null : item.handoffAction;
   return {
     enabled,
     label,
     icon,
     submenuItems,
     hasSubmenu: isSubmenuOwner(enabled, submenuItems),
+    handsOff: handsOffOwner(enabled, handoff),
+    handoff,
   };
 }
 
@@ -518,34 +556,49 @@ function submenuIdOf(menuId, itemIndex) {
 }
 
 /**
- * Ставит и снимает признаки владельца подменю. Единственное место, где они
- * заводятся, и на сборке уровня, и на каждом показе: расхождение двух путей
+ * Ставит и снимает признаки пункта, уводящего в сторону. Единственное место, где
+ * они заводятся, и на сборке уровня, и на каждом показе: расхождение двух путей
  * оставило бы на пункте `aria-owns`, ведущий в меню, раскрыть которое нечем.
  *
+ * **Владелец подменю и отдающий управление делят шеврон, но не `aria-owns`.**
+ * Шеврон обещает «дальше будет ещё меню», и оба обещания одинаково верны. Связь же
+ * `aria-owns` может назвать только та, чьё подменю существует в этом документе, и у
+ * отдающего её нет: меню, которое откроется вместо нашего, нам не принадлежит, и
+ * адрес его элемента мы не знаем. Зато `aria-haspopup` у обоих уместно — раскрытие
+ * последует, и скринридеру полезно знать, что оно будет.
+ *
  * @param {RenderedItem} rendered
- * @param {boolean} hasSubmenu
+ * @param {boolean} hasSubmenu владелец ли пункт подменю.
+ * @param {boolean} handsOff отдаёт ли пункт управление наружу.
  * @param {string} menuId
  * @param {number} itemIndex
  * @returns {void}
  */
-function applyOwner(rendered, hasSubmenu, menuId, itemIndex) {
+function applyOwner(rendered, hasSubmenu, handsOff, menuId, itemIndex) {
   const element = rendered.element;
   rendered.submenuId = hasSubmenu ? submenuIdOf(menuId, itemIndex) : null;
-  if (hasSubmenu) {
+  if (hasSubmenu || handsOff) {
     element.setAttribute('aria-haspopup', 'menu');
-    // Развёрнутым быть не может: подменю открывается только после показа, а
-    // уровень, в котором владелец, сейчас как раз показывается.
-    element.setAttribute('aria-expanded', 'false');
+    if (hasSubmenu) {
+      // Развёрнутым быть не может: подменю открывается только после показа, а
+      // уровень, в котором владелец, сейчас как раз показывается.
+      element.setAttribute('aria-expanded', 'false');
+      element.setAttribute('aria-owns', /** @type {string} */ (rendered.submenuId));
+    } else {
+      // У отдающего раскрытия нет: `aria-expanded` обещало бы состояние, которое
+      // никто не меняет, — меню уходит вместе с пунктом, а не меняет вид у него.
+      element.removeAttribute('aria-expanded');
+      element.removeAttribute('aria-owns');
+    }
     // Направление шеврона по умолчанию; движок позиционирования переставляет его
     // на `left`, когда подменю пришлось открыть слева.
     element.dataset.chevron = 'right';
-    element.setAttribute('aria-owns', /** @type {string} */ (rendered.submenuId));
     if (rendered.chevron.parentElement !== element) {
       element.appendChild(rendered.chevron);
     }
     return;
   }
-  // Владелец, потерявший подменю, не оставляет за собой его признаков: иначе
+  // Пункт, потерявший и подменю, и отдачу, не оставляет за собой их признаков: иначе
   // `aria-owns` уводил бы скринридер в меню, раскрыть которое нечем, а
   // `aria-haspopup` обещал бы раскрытие, которого не будет.
   element.removeAttribute('aria-haspopup');
@@ -595,6 +648,8 @@ function renderSeparator() {
     element,
     focusable: false,
     hasSubmenu: false,
+    handsOff: false,
+    handoff: null,
     key: null,
     submenuId: null,
     iconSlot,
@@ -656,6 +711,8 @@ function renderMenuItem(item, context, itemIndex, setSize) {
     element,
     focusable: resolved.enabled,
     hasSubmenu: resolved.hasSubmenu,
+    handsOff: resolved.handsOff,
+    handoff: resolved.handsOff ? resolved.handoff : null,
     key: keyOf(context, itemIndex),
     submenuId: null,
     iconSlot,
@@ -663,7 +720,7 @@ function renderMenuItem(item, context, itemIndex, setSize) {
     submenuItems: resolved.hasSubmenu ? resolved.submenuItems : null,
     chevron,
   };
-  applyOwner(rendered, resolved.hasSubmenu, context.menuId, itemIndex);
+  applyOwner(rendered, resolved.hasSubmenu, resolved.handsOff, context.menuId, itemIndex);
   return rendered;
 }
 
@@ -805,8 +862,13 @@ export function refreshItems(items, renderedItems, menuId, actions) {
       renderedItem.iconSlot.replaceChildren(renderIcon(resolved.icon));
     }
     renderedItem.submenuItems = resolved.hasSubmenu ? resolved.submenuItems : null;
+    // Действие отдачи перечитывается здесь же, где перечитываются подпись и подменю:
+    // оно и есть ответ пункта на этот показ, и забытое прежнее означало бы, что
+    // меню уйдёт по адресу, который автор уже сменил.
+    renderedItem.handoff = resolved.handsOff ? resolved.handoff : null;
     if (renderedItem.focusable === resolved.enabled
-      && renderedItem.hasSubmenu === resolved.hasSubmenu) {
+      && renderedItem.hasSubmenu === resolved.hasSubmenu
+      && renderedItem.handsOff === resolved.handsOff) {
       continue;
     }
     const element = renderedItem.element;
@@ -815,8 +877,9 @@ export function refreshItems(items, renderedItems, menuId, actions) {
     } else {
       element.setAttribute('aria-disabled', 'true');
     }
-    applyOwner(renderedItem, resolved.hasSubmenu, menuId, itemIndex);
+    applyOwner(renderedItem, resolved.hasSubmenu, resolved.handsOff, menuId, itemIndex);
     renderedItem.focusable = resolved.enabled;
     renderedItem.hasSubmenu = resolved.hasSubmenu;
+    renderedItem.handsOff = resolved.handsOff;
   }
 }

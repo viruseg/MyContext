@@ -525,6 +525,30 @@ export class MyContext {
    */
   #hoverOwner;
 
+  /**
+   * Событие входа в пункт, ради которого зреет отложенное открытие.
+   *
+   * Живёт рядом с `#hoverOwner`, потому что показ по наведению происходит по таймеру
+   * и без него отдающему нечем было бы сказать, где стоял курсор: к моменту показа
+   * события входа в DOM уже нет, а восстанавливать точку по геометрии пункта —
+   * значило бы отвечать на вопрос о курсоре координатами элемента.
+   *
+   * @type {Event | null}
+   */
+  #hoverEvent = null;
+
+  /**
+   * Пункт, чьё отдача уже состоялась за текущую постановку.
+   *
+   * Метка против двойного вызова: наведение планирует показ, а нажатие показывает
+   * немедленно, и одно наведение может завершиться обоими путями. Ключ — узел
+   * пункта, а не ссылка на `RenderedItem`: узел переживает перестройку уровня, и
+   * ссылка после неё была бы указанием на предмет, которого на этот момент нет.
+   *
+   * @type {Element | null}
+   */
+  #handoffDone = null;
+
   /** @type {LevelEntry | null} */
   #root = null;
 
@@ -676,14 +700,14 @@ export class MyContext {
     if (rendered === null) {
       return;
     }
-    // Владелец непустого подменю по клику открывает подменю, а своё действие не
-    // зовёт — так же, как это делает `Enter`, и так же, как в родных меню. Решение
-    // ревью Task 9, а не вывод из разметки: `hasSubmenu` у рендерера означает «есть
-    // подменю», и наличие собственного действия этому не противоречит.
-    if (rendered.hasSubmenu) {
-      // Открытие подменю — тот же путь, что и по наведению: одно тело, один
-      // `ensureLevel` и одно место, где показанный уровень отдаётся движку.
-      this.#showSubmenuFor(rendered);
+    // Пункт, уводящий куда-то, по клику отдаёт управление или раскрывает подменю, а
+    // своё действие не зовёт — так же, как это делает `Enter`, и так же, как в родных
+    // меню. Решение ревью Task 9, а не вывод из разметки: `hasSubmenu` у рендерера
+    // означает «есть подменю», и наличие собственного действия этому не противоречит.
+    if (rendered.hasSubmenu || rendered.handsOff) {
+      // Показ — тот же путь, что и по наведению: одно тело, один `ensureLevel` и одно
+      // место, где показанный уровень отдаётся движку.
+      this.#showWhatItemLeadsTo(rendered, event);
       return;
     }
     this.#runItemAction(rendered, event);
@@ -934,10 +958,11 @@ export class MyContext {
     if (open !== null) {
       this.#hideSubmenuFor(open);
     }
-    if (!rendered.hasSubmenu) {
+    if (!rendered.hasSubmenu && !rendered.handsOff) {
       return;
     }
     this.#hoverOwner = rendered;
+    this.#hoverEvent = event;
     this.#hover.itemEnter();
   };
 
@@ -966,6 +991,11 @@ export class MyContext {
     if (event.button !== PRIMARY_MOUSE_BUTTON) {
       return;
     }
+    // Показ отдаётся само это событие, а не событие входа: отдающему важно, чем
+    // пункт активирован — по нажатию он отвечает иначе, чем по наведению, и по
+    // наведению у него нет кнопки вовсе. Замена происходит до `itemPress`, потому
+    // что тот зовёт `onOpen` синхронно и читает событие уже после подмены.
+    this.#hoverEvent = event;
     // Удержание кнопки открывает подменю немедленно, минуя `openDelayMs`. Само
     // событие не разбирается: `itemPress` молчит, если висящей задачи открытия
     // нет, а «уже открытое подменю» от неё неотличимо — задача снята и уходом с
@@ -1288,7 +1318,7 @@ export class MyContext {
       return;
     }
     const rendered = this.#focusableIn(entry, element);
-    if (rendered === null || rendered.hasSubmenu) {
+    if (rendered === null || rendered.hasSubmenu || rendered.handsOff) {
       return;
     }
     this.#runItemAction(rendered, event);
@@ -1541,11 +1571,14 @@ export class MyContext {
     // о показе принималось бы в другое мгновение, чем его вынес `hoverIntent`.
     // Предмет показа — уже наш, `#hoverOwner` кладёт его вход в пункт, а показывать —
     // тело ниже. Скрывать ему нечего: закрытием подменю занимается правило соседа.
+    // Событие входа едет рядом с предметом: показ по наведению происходит по таймеру,
+    // и без него отдающему нечем было бы сказать, где стоял курсор.
+    //
     this.#hover = createHoverIntent({
       onOpen: () => {
         const owner = this.#hoverOwner;
-        if (owner !== null) {
-          this.#showSubmenuFor(owner);
+        if (owner !== null && this.#hoverEvent !== null) {
+          this.#showWhatItemLeadsTo(owner, this.#hoverEvent);
         }
       },
     });
@@ -1815,6 +1848,9 @@ export class MyContext {
     this.#hover.cancelAll();
     this.#chain.length = 0;
     this.#hoverOwner = null;
+    // Событие входа живёт ровно до следующей постановки, как и сам `#hoverOwner`: в
+    // прежней постановке показа, который его ждал, уже не будет.
+    this.#hoverEvent = null;
     // «Курсор был внутри» отвечает на вопрос о прежней постановке, и после неё
     // вопрос снова «нет»: первое же движение нового меню снаружи иначе сбросило бы
     // выделение, которого ещё никто не ставил.
@@ -1839,6 +1875,11 @@ export class MyContext {
    */
   #showAt(params) {
     this.#hover.cancelAll();
+    // Метка отдачи снимается на показе, а не при закрытии: показ — единственное
+    // место, где прежняя активация заведомо кончилась. Закрытие происходит внутри
+    // самой отдачи, и снятая там метка отдала бы `click`, пришедший следом, вторым
+    // вызовом по уже ушедшему меню.
+    this.#handoffDone = null;
     const root = this.#ensureLevel(this.#items, null, 0, null);
     this.#root = root;
     this.#chain.push(root);
@@ -1985,6 +2026,9 @@ export class MyContext {
       openSubmenu: (entry) => {
         this.#openSubmenu(entry);
       },
+      handOver: (rendered, event) => {
+        this.#handOverTo(rendered, event);
+      },
       closeCurrentLevel: (entry) => {
         this.#closeCurrentLevel(entry);
       },
@@ -2044,25 +2088,37 @@ export class MyContext {
   }
 
   /**
-   * Показывает подменю пункта-владельца: находит уровень, из которого владелец
-   * открыт, и передаёт показ `#openSubmenu`.
+   * Показывает то, к чему пункт ведёт: подменю этого меню либо, у отдающего,
+   * ничего — вместо показа он передаёт управление наружу и уходит с экрана.
    *
-   * Уровень ищется по узлу владельца, а не берётся из аргумента: единственный
-   * вызов этого тела — колбэк `onOpen` плюс обработчик активации, и у первого
-   * под рукой нет ничего, кроме самого пункта.
+   * Два пути разведены здесь, а не вызывающими, потому что признаки у них разные и
+   * решаются по-разному: владельцу нужен уровень из его узла, отдающему — только
+   * действие и уход. Смешаны были бы в вызывающих, и там пришлось бы проверять и
+   * доступность, и наличие подменю, и передавать событие, — а здесь всё это уже
+   * решено и видно сразу.
    *
-   * @param {RenderedItem} rendered пункт-владелец, каким его назвал рендерер.
+   * @param {RenderedItem} rendered пункт, каким его назвал рендерер.
+   * @param {Event} event событие, которым пункт активирован; отдающему достаётся
+   *   как есть — координаты и кнопку доставать из него должен автор, который знает,
+   *   что с ними делать.
    * @returns {void}
    */
-  #showSubmenuFor(rendered) {
+  #showWhatItemLeadsTo(rendered, event) {
     if (this.#destroyed) {
       return;
     }
-    // Правило владельца повторяется здесь намеренно. Вызывающие фильтруют
-    // доступность по своей нужде — подпиской на показ и активацией пункта, — но
-    // путь показа, оставленный без собственной проверки, откроет подменю
-    // отключённого пункта, как только у него появится хоть один новый вызывающий.
-    if (!rendered.hasSubmenu || !rendered.focusable) {
+    // Правило доступности повторяется здесь намеренно. Вызывающие фильтруют её по
+    // своей нужде — подпиской на показ и активацией пункта, — но путь показа,
+    // оставленный без собственной проверки, откроет то, к чему ведёт отключённый
+    // пункт, как только у него появится хоть один новый вызывающий.
+    if (!rendered.focusable) {
+      return;
+    }
+    if (rendered.handsOff) {
+      this.#handOverTo(rendered, event);
+      return;
+    }
+    if (!rendered.hasSubmenu) {
       return;
     }
     const level = rendered.element.closest(MENU_SELECTOR);
@@ -2078,6 +2134,47 @@ export class MyContext {
       return;
     }
     this.#openSubmenu(this.#ensureSubmenuLevel(submenuItems, parent, rendered));
+  }
+
+  /**
+   * Передаёт управление пункта наружу и убирает это меню с экрана.
+   *
+   * **Меню уходит безусловно, и это не украшение, а часть контракта.** То, что
+   * автор покажет вместо него, ему не принадлежит и перекрывать его не должно: два
+   * меню на экране там, где пользователь ждёт одно, означают бы два набора
+   * подсветки и два ответа на одну прессу. Уход стоит после действия, а не до, и в
+   * `finally` — по той же причине, что и у `#runItemAction`: исключение автора не
+   * должно оставить наш уровень висеть поверх того, что он открыть не сумел.
+   *
+   * **Действие зовётся один раз на показ.** Одна активация приходит двумя
+   * событиями: наведение планирует показ, нажатие показывает его немедленно, а
+   * `click` после нажатия доходит третьим. Без метки автор получил бы три вызова на
+   * одно наведение и увидел бы отданное управление трижды. Метка снимается на
+   * следующем показе меню, а не при закрытии: закрытие происходит внутри отдачи, и
+   * снятая там метка отдала бы `click` вторым вызовом по уже ушедшему меню.
+   *
+   * @param {RenderedItem} rendered пункт, отдающий управление.
+   * @param {Event} event событие активации.
+   * @returns {void}
+   */
+  #handOverTo(rendered, event) {
+    const handoff = rendered.handoff;
+    if (handoff === null || this.#handoffDone === rendered.element) {
+      return;
+    }
+    this.#handoffDone = rendered.element;
+    // Поколение читается до действия: автор вправе открыть вместо нашего меню что угодно,
+    // и тогда закрытие по этому же событию убило бы то, что только что открылось.
+    const serial = this.#openSerial;
+    try {
+      handoff(event);
+    } finally {
+      // Пропуск закрытия — тот же, что у `#runItemAction`, и по той же причине:
+      // действие вправе показать меню заново, и закрытие убило бы его.
+      if (this.#openSerial === serial && !this.#destroyed) {
+        this.close();
+      }
+    }
   }
 
   /**
@@ -2303,7 +2400,8 @@ export class MyContext {
    */
   #leadAhead(entry) {
     for (const rendered of entry.items) {
-      if (!rendered.hasSubmenu || !rendered.focusable || rendered.submenuItems === null) {
+      const leadsSomewhere = rendered.hasSubmenu || rendered.handsOff;
+      if (!leadsSomewhere || !rendered.focusable) {
         this.#unsubscribeShowTarget(rendered);
         continue;
       }
@@ -2320,7 +2418,11 @@ export class MyContext {
       rendered.element.addEventListener('pointerenter', this.#onItemEnter);
       rendered.element.addEventListener('pointerleave', this.#onItemLeave);
       rendered.element.addEventListener('pointerdown', this.#onItemDown);
-      this.#ensureSubmenuLevel(rendered.submenuItems, entry, rendered);
+      // Уровень заводится только владельцу: отдающему подменю нет, и заводить ему
+      // нечего, а пустой уровень был бы меню без пунктов, которое нечем наполнить.
+      if (rendered.hasSubmenu && rendered.submenuItems !== null) {
+        this.#ensureSubmenuLevel(rendered.submenuItems, entry, rendered);
+      }
     }
     // Второй проход — по доступным пунктам без подменю: в первом на них явно вызвано
     // `#unsubscribeShowTarget`, а подписку правила соседа получать должны и они.
