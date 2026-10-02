@@ -5,9 +5,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "playwright test",
+    "test": "playwright test --project=unit --project=chromium",
     "test:unit": "playwright test --project=unit",
-    "test:e2e": "playwright test --project=chromium --project=firefox --project=webkit",
+    "test:e2e": "playwright test --project=unit --project=chromium",
+    "test:firefox": "playwright test --project=firefox --workers=1",
+    "test:webkit": "playwright test --project=webkit",
+    "test:all": "playwright test --project=unit --project=chromium --project=webkit && playwright test --project=firefox --workers=1",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "serve": "node scripts/serve.js"
   },
