@@ -100,6 +100,7 @@ import { CURSOR_OFFSET, DEFAULT_ANIMATION_DURATION, SAFETY_PADDING } from '../..
  * @property {(containerId: string) => void} attach
  * @property {() => void} detach
  * @property {(x: number, y: number) => void} open
+ * @property {(x: number, y: number) => void} openAsSubmenu
  * @property {() => void} close
  * @property {() => void} destroy
  * @property {() => void} markRoot
@@ -874,6 +875,12 @@ test.beforeEach(async ({ page }) => {
         }
         menu.open({ x, y });
       },
+      openAsSubmenu(x, y) {
+        if (menu === null) {
+          throw new Error('меню не создано');
+        }
+        menu.openAsSubmenu(x, y);
+      },
       close() {
         if (menu === null) {
           throw new Error('меню не создано');
@@ -1501,7 +1508,7 @@ test.describe('жизненный цикл MyContext', () => {
     expect(after.openCount, 'меню открылось после восстановления').toBe(1);
   });
 
-  test('attach, open, close и detach после destroy() бросают Error', async ({ page }) => {
+  test('attach, open, openAsSubmenu, close и detach после destroy() бросают Error', async ({ page }) => {
     await makeMenu(page, 'flat', 'workspace');
     await destroyMenu(page);
 
@@ -1516,6 +1523,9 @@ test.describe('жизненный цикл MyContext', () => {
         },
         () => {
           probe.open(300, 200);
+        },
+        () => {
+          probe.openAsSubmenu(300, 200);
         },
         () => {
           probe.close();
@@ -1537,6 +1547,7 @@ test.describe('жизненный цикл MyContext', () => {
     // `destroy()` после `destroy()` не бросает — это отдельный кейс: размонтирование
     // обязано иметь право позвать его ещё раз.
     expect(messages).toEqual([
+      'MyContext: экземпляр уничтожен',
       'MyContext: экземпляр уничтожен',
       'MyContext: экземпляр уничтожен',
       'MyContext: экземпляр уничтожен',

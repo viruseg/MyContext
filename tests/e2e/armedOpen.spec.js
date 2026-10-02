@@ -2,15 +2,18 @@ import { expect, test } from '@playwright/test';
 import { OPEN_GRACE_MS } from '../../src/constants.js';
 
 /**
- * `open({ x, y }, { armed })` — открытие меню внутри уже начатого чужого жеста.
+ * `open({ x, y }, { armed })` — открытие меню внутри уже начатого чужого жеста, и
+ * `openAsSubmenu(x, y)` — пресет того же для чужого меню.
  *
  * Меню на удержании вооружается нажатием по собственному якорю: без этого
  * отпускание кнопки его не закрывает, потому что разбирать отпускание нечем —
  * жеста не было. Сценарий, ради которого существует `armed`, обратный: кнопку
  * держат, нажатия по якорю не было, а закрыть меню должен тот же жест.
  *
- * Кейсы ниже проверяют именно контракт `armed`, а не работу удержания вообще:
- * она покрыта `pressAndHold.spec.js`, и дублировать её здесь незачем.
+ * Кейсы ниже проверяют именно контракт `armed` и его пресета, а не работу
+ * удержания вообще: она покрыта `pressAndHold.spec.js`, и дублировать её здесь
+ * незачем. Порядок разбора внутри жеста на `destroyOnClose` проверяет
+ * `destroyOnClose.spec.js` — там разбор стирает карту действий, а здесь не стирает.
  *
  * @typedef {import('../../src/MyContext.js').MenuItem} MenuItem
  * @typedef {import('../../src/constants.js').PressAndHoldMode} PressAndHoldMode
@@ -112,6 +115,15 @@ test.beforeEach(async ({ page }) => {
         }
         menu.open({ x: point.x, y: point.y }, { armed });
       },
+      /**
+       * @param {{ x: number, y: number }} point
+       */
+      openAsSubmenu(point) {
+        if (menu === null) {
+          throw new Error('меню не создано');
+        }
+        menu.openAsSubmenu(point.x, point.y);
+      },
       read() {
         return {
           openCount: document.querySelectorAll('.vc-menu:popover-open').length,
@@ -133,6 +145,7 @@ test.beforeEach(async ({ page }) => {
  * @typedef {object} ArmedProbe
  * @property {(input: ArmedInput) => void} make
  * @property {(point: { x: number, y: number }, armed?: boolean) => void} open
+ * @property {(point: { x: number, y: number }) => void} openAsSubmenu
  * @property {() => ArmedSnapshot} read
  */
 
@@ -185,6 +198,96 @@ async function centerOfItem(page, label) {
   expect(point, `пункт «${label}» есть в разметке`).not.toBeNull();
   return /** @type {{ x: number, y: number }} */ (point);
 }
+
+/**
+ * @param {import('@playwright/test').Page} page
+ * @param {{ x: number, y: number }} point
+ * @returns {Promise<void>}
+ */
+function openAsSubmenu(page, point) {
+  return page.evaluate((anchor) => {
+    const scope = /** @type {{ __armed: ArmedProbe }} */ (/** @type {unknown} */ (globalThis));
+    scope.__armed.openAsSubmenu(anchor);
+  }, point);
+}
+
+test.describe('openAsSubmenu', () => {
+  // Метод — пресет для чужого меню: `armed` плюс `dismissible`, и обе опции должны
+  // быть проверены здесь, а не выведены из того, что `armed` уже покрыт выше.
+  test('вооружает жест: отпускание кнопки закрывает показанное', async ({ page }) => {
+    // Порядок обязателен: кнопку держит вызывающий код, и меню приходит в уже
+    // начавшемся жесте. Без вооружения отпускание было бы некому разбирать.
+    await makeMenu(page, { pressAndHold: HELD_BUTTON, attach: false });
+    await page.mouse.move(PRESS_POINT.x, PRESS_POINT.y);
+    await page.mouse.down({ button: HELD_BUTTON });
+    await openAsSubmenu(page, PRESS_POINT);
+    expect((await readMenu(page)).openCount, 'меню показано').toBe(1);
+
+    await page.mouse.up({ button: HELD_BUTTON });
+    const after = await readMenu(page);
+    expect(after.openCount, 'отпускание закрыло меню').toBe(0);
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
+  });
+
+  test('поднимает правила закрытия на время показа', async ({ page }) => {
+    // Вторая половина пресета, и она проверяется поведением, а не счётчиком
+    // подписок: у непривязанного экземпляра правил закрытия нет вовсе, и без
+    // `dismissible` прокрутка оставила бы показанное висеть поверх кольца, которое
+    // ею же и закрывается. Проверяется на фоне `armed` — иначе кейс сходился бы и
+    // по другой причине.
+    await makeMenu(page, { pressAndHold: HELD_BUTTON, attach: false });
+    await openAsSubmenu(page, PRESS_POINT);
+    expect((await readMenu(page)).openCount, 'меню показано').toBe(1);
+
+    // Настоящий `resize`, а не синтетическое событие: проверяется подписка, а не тело
+    // обработчика, и подписку поднимает именно показ с `dismissible`.
+    //
+    // Ожидание условия, а не снимок сразу после `setViewportSize`: браузер отвечает на
+    // смену вьюпорта раньше, чем приходит само событие, и утверждение без ожидания
+    // мигает между прогонами.
+    await page.setViewportSize({ width: VIEWPORT.width, height: VIEWPORT.height + 1 });
+    await page.waitForFunction(() => {
+      return document.querySelectorAll('.vc-menu:popover-open').length === 0;
+    });
+    expect((await readMenu(page)).openCount, 'resize закрыл показанное').toBe(0);
+  });
+  test('отпускание над пунктом исполняет его действие', async ({ page }) => {
+    // Жест, вооружённый снаружи, разбирает отпускание целиком, а не только
+    // закрывает: под курсором может оказаться пункт, и его действие — часть
+    // контракта. Нажатия по пункту не было, `click` не возникнет, и единственный
+    // путь к действию — разбор отпускания.
+    await makeMenu(page, { pressAndHold: HELD_BUTTON, attach: false });
+    await page.mouse.move(PRESS_POINT.x, PRESS_POINT.y);
+    await page.mouse.down({ button: HELD_BUTTON });
+    await openAsSubmenu(page, PRESS_POINT);
+
+    const target = await centerOfItem(page, 'Первый');
+    await page.mouse.move(target.x, target.y);
+    await page.mouse.up({ button: HELD_BUTTON });
+
+    const after = await readMenu(page);
+    expect(after.calls, 'действие пункта исполнилось').toEqual(['Первый']);
+    expect(after.openCount, 'меню закрыто').toBe(0);
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
+  });
+
+  test('без удержания отклоняется', async ({ page }) => {
+    // `armed` при `pressAndHold: 'none'` не имеет прочтения: закрывать меню будет
+    // нечем, а молча не вооружённый жест оставил бы его висеть.
+    await makeMenu(page, { pressAndHold: 'none', attach: false });
+    const outcome = await page.evaluate(() => {
+      const scope = /** @type {{ __armed: ArmedProbe }} */ (/** @type {unknown} */ (globalThis));
+      try {
+        scope.__armed.openAsSubmenu({ x: 260, y: 120 });
+        return { threw: false, message: '' };
+      } catch (error) {
+        return { threw: true, message: error instanceof Error ? error.message : String(error) };
+      }
+    });
+    expect(outcome.threw, 'openAsSubmenu бросил ошибку').toBe(true);
+    expect(outcome.message).toContain('armed');
+  });
+});
 
 test.describe('open с armed', () => {
   test('отпускание кнопки закрывает меню, открытое с armed', async ({ page }) => {

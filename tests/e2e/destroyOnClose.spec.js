@@ -84,12 +84,16 @@ test.beforeEach(async ({ page }) => {
       errors.push(String(event.message));
     });
 
+    /** Подписи сработавших действий: разбор не должен мешать им дойти до конца. */
+    /** @type {string[]} */
+    const calls = [];
+
     /**
      * @param {string} label
      * @returns {MenuItem}
      */
     function item(label) {
-      return { labelAction: () => label, action: () => {} };
+      return { labelAction: () => label, action: () => { calls.push(label); } };
     }
 
     /**
@@ -138,6 +142,7 @@ test.beforeEach(async ({ page }) => {
         }
         made.length = 0;
         errors.length = 0;
+        calls.length = 0;
         made.push(new MyContext(items(), {
           label: 'Меню',
           animationDuration: input.animationDuration,
@@ -155,6 +160,17 @@ test.beforeEach(async ({ page }) => {
        */
       open(point, dismissible = false) {
         current().open({ x: point.x, y: point.y }, { dismissible });
+      },
+      /**
+       * Показ как сабменю чужого меню: контракт `open(x, y)`, который зовёт
+       * владелец кольца. Контракт метода проверяет `armedOpen.spec.js`, здесь он
+       * нужен как посылка: разбор приходит раньше действия.
+       *
+       * @param {{ x: number, y: number }} point
+       * @returns {void}
+       */
+      openAsSubmenu(point) {
+        current().openAsSubmenu(point.x, point.y);
       },
       close() {
         current().close();
@@ -191,6 +207,7 @@ test.beforeEach(async ({ page }) => {
           menuCount: levels.length,
           openCount: document.querySelectorAll('.vc-menu:popover-open').length,
           closingCount: document.querySelectorAll('.vc-menu[data-vc-closing]').length,
+          calls: calls.slice(),
           errors: errors.slice(),
         };
       },
@@ -286,6 +303,7 @@ test.beforeEach(async ({ page }) => {
  * @property {number} menuCount узлов `.vc-menu` в документе, включая гаснущие.
  * @property {number} openCount показанных уровней.
  * @property {number} closingCount уровней с меткой `data-vc-closing`.
+ * @property {string[]} calls подписи сработавших действий, по порядку.
  * @property {string[]} errors сообщения необработанных ошибок страницы.
  */
 
@@ -293,6 +311,7 @@ test.beforeEach(async ({ page }) => {
  * @typedef {object} OneShotProbe
  * @property {(input: OneShotInput) => void} make
  * @property {(point: { x: number, y: number }, dismissible?: boolean) => void} open
+ * @property {(point: { x: number, y: number }) => void} openAsSubmenu
  * @property {() => void} close
  * @property {() => void} closeAll
  * @property {() => Threw} tryOpen
@@ -311,6 +330,22 @@ function makeMenu(page, input) {
       (/** @type {unknown} */ (globalThis));
     scope.__oneShot.make(config);
   }, input);
+}
+
+/**
+ * Показ как сабменю чужого меню: контракт `open(x, y)`, который зовёт владелец
+ * кольца, удерживающий кнопку.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {{ x: number, y: number }} point
+ * @returns {Promise<void>}
+ */
+function openAsSubmenu(page, point) {
+  return page.evaluate((anchor) => {
+    const scope = /** @type {{ __oneShot: OneShotProbe }} */
+      (/** @type {unknown} */ (globalThis));
+    scope.__oneShot.openAsSubmenu(anchor);
+  }, point);
 }
 
 /**
@@ -746,6 +781,39 @@ test.describe('опция destroyOnClose', () => {
 
     await closeMenu(page);
     expect(await tryOpenMenu(page), 'разбор наступил на закрытии').toEqual({
+      threw: true,
+      message: DESTROYED_MESSAGE,
+    });
+  });
+});
+
+test.describe('destroyOnClose и удержание', () => {
+  test('разбор на отпускании не мешает действию пункта дойти до конца', async ({ page }) => {
+    // Сценарий, ради которого `openAsSubmenu` ищет действие до закрытия: пункт
+    // чужого меню открывает одноразовое меню по своему контракту `open(x, y)`,
+    // кнопку удержания держит владелец, и отпускание обязано довести действие
+    // пункта до конца.
+    //
+    // Порядок разбора отпускания: сначала закрытие, потом действие. Разбор стирает
+    // карту действий, и действие, взятое из карты после закрытия, не нашлось бы
+    // вовсе — отпускание сработало бы как «ничего». Поиск пункта поэтому идёт до
+    // закрытия, а исполнение — после.
+    await makeMenu(page, { destroyOnClose: true, pressAndHold: 'right' });
+    await page.mouse.move(SHOW_POINT.x, SHOW_POINT.y);
+    await page.mouse.down({ button: 'right' });
+    await openAsSubmenu(page, SHOW_POINT);
+
+    const point = await centreOfItem(page, 'Первый');
+    await page.mouse.move(point.x, point.y, { steps: 6 });
+    await page.mouse.up({ button: 'right' });
+
+    await waitClosed(page);
+    const after = await readMenu(page);
+    expect(after.calls, 'действие исполнилось').toEqual(['Первый']);
+    expect(after.openCount, 'меню закрылось').toBe(0);
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
+    await waitLevelsGone(page);
+    expect(await tryOpenMenu(page), 'экземпляр разобран').toEqual({
       threw: true,
       message: DESTROYED_MESSAGE,
     });
