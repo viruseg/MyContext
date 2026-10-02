@@ -4,14 +4,17 @@ import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 
 const ROOT = resolve(import.meta.dirname, '..', '..');
-const PORT = 4319;
+// Порт по индексу воркера: `beforeAll` выполняется в каждом воркере, и на общий
+// порт вторая копия встала бы с `EADDRINUSE` и ждала бы готовности, которой не
+// будет, — файл падал бы по таймауту хука, а не по существу кейса.
+const PORT = 4319 + Number(process.env.TEST_WORKER_INDEX ?? 0);
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 
 /**
  * @typedef {object} Probe
  * @property {(path: string, init?: RequestInit) => Promise<{ status: number, allow: string | null, body: string }>}
  *   ask ответ сервера одним запросом.
- * @property {() => Promise<void>} stop остановить сервер.
+ * @property {() => void} stop остановить сервер.
  */
 
 /**
@@ -19,6 +22,10 @@ const ORIGIN = `http://127.0.0.1:${PORT}`;
  *
  * Отдельный порт — обязателен: конфигурация Playwright поднимает свой сервер, и
  * кейс, ударивший в тот же, проверял бы чужой процесс вместо проверяемого.
+ *
+ * Один сервер на весь файл, а не на каждый кейс: подъём `node` под нагрузкой
+ * занимает дольше самих запросов, и шесть подъёмов подряд превращали файл в
+ * гонку за портом и время старта.
  *
  * @returns {Promise<Probe>}
  */
@@ -29,22 +36,28 @@ async function startServer() {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
-  let ready = false;
-  child.stdout.on('data', (chunk) => {
-    if (String(chunk).includes('demo:')) {
-      ready = true;
-    }
+  /** @type {string} */
+  let noise = '';
+  child.stderr.on('data', (chunk) => {
+    noise += String(chunk);
   });
-
-  const deadline = Date.now() + 10000;
-  while (!ready && Date.now() < deadline) {
-    await new Promise((resolve) => {
-      setTimeout(resolve, 25);
-    });
-  }
-  if (!ready) {
-    child.kill();
-    throw new Error('сервер не поднялся за 10 с');
+  // `node` печатает стартовую строку до того, как начнёт принимать соединения, поэтому
+  // одного признака мало: ждать надо первого успешного запроса.
+  const deadline = Date.now() + 30000;
+  for (;;) {
+    try {
+      const probe = await fetch(`${ORIGIN}/index.html`);
+      await probe.text();
+      break;
+    } catch {
+      if (Date.now() > deadline) {
+        child.kill();
+        throw new Error(`сервер на порту ${PORT} не поднялся за 30 с. Его вывод: ${noise}`);
+      }
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+    }
   }
 
   return {
@@ -56,10 +69,10 @@ async function startServer() {
         body: await response.text(),
       };
     },
-    async stop() {
+    stop() {
       child.kill();
-      // `SIGTERM` на Windows доставляется как принудительное завершение, и
-      // ждать выхода не нужно: процесс уже не держит порт.
+      // `SIGTERM` на Windows доставляется как принудительное завершение, и ждать
+      // выхода не нужно: процесс уже не держит порт.
     },
   };
 }
@@ -68,13 +81,17 @@ test.describe('раздача скриптом scripts/serve.js', () => {
   /** @type {Probe} */
   let server;
 
-  test.beforeEach(async () => {
+  test.beforeAll(async () => {
     server = await startServer();
   });
 
-  test.afterEach(async () => {
-    await server.stop();
-  });
+test.afterAll(() => {
+  // Сервер мог и не подняться: тогда `beforeAll` упал, и гасить нечего. Падение
+  // подъёма сообщает о себе само, а этот крючок не должен перебивать его своим.
+  if (server !== undefined) {
+    server.stop();
+  }
+});
 
   test('отдаёт корень, модуль и стили', async () => {
     for (const path of ['/', '/src/index.js', '/styles/mycontext.css']) {
