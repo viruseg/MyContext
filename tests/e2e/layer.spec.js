@@ -1768,8 +1768,9 @@ test.describe('закрытие', () => {
     expect(result.pending).toBe(0);
     expect(result.open).toEqual([false, false, false, false]);
     expect(result.entriesOpen).toEqual([false, false, false, false]);
-    // Владельцы всех трёх подменю свёрнуты, обычный пункт отметки не имел.
-    expect(result.expanded).toEqual([null, null, null, null]);
+    // Владельцы всех трёх подменю свёрнуты — `false`, а не отсутствие отметки;
+    // обычный пункт отметки не имел и не получает её вовсе.
+    expect(result.expanded).toEqual(['false', 'false', 'false', null]);
     // Уровни остались в DOM: ленивость из спеки держится на переиспользовании.
     expect(result.connected).toEqual([true, true, true, true]);
   });

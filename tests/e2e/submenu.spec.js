@@ -830,8 +830,9 @@ test.describe('правило соседа', () => {
     await page.clock.fastForward(OPEN_GRACE_MS);
     const opened = await readMenu(page);
     expect(isOpen(opened, secondId), 'подменю второго открыто').toBe(true);
-    // Контроль премиссы: отключённый владелец не помечается развёрнутым.
-    expect(itemOf(opened, 'Первый').expanded, 'отметки развёрнутости нет').toBeNull();
+    // Контроль премиссы: отключённый пункт владельцем не был, и отметки
+    // развёрнутости у него нет вовсе — в отличие от закрытого подменю, где «false».
+    expect(itemOf(opened, 'Первый').expanded, 'отключённый владелец отметки не имеет').toBeNull();
     expect(activeLabels(opened), 'выделен владелец').toEqual(['Второй']);
 
     // Премисса наведения: `pointermove` по отключённому пункту доходит до уровня и
@@ -1631,7 +1632,7 @@ test.describe('показ подменю', () => {
     const after = await readMenu(page);
     expect(after.openCount, 'корень показан').toBe(1);
     expect(itemOf(after, 'Экспорт').chevron, 'шеврон вернулся в исходное положение').toBe('right');
-    expect(itemOf(after, 'Экспорт').expanded, 'у закрытого подменю отметки развёрнутости нет').toBeNull();
+    expect(itemOf(after, 'Экспорт').expanded, 'у закрытого подменю отметка развёрнутости "false"').toBe('false');
     expect(after.errors, 'ошибок страницы нет').toEqual([]);
   });
 
@@ -2020,10 +2021,10 @@ test.describe('показ подменю', () => {
     const after = await readMenu(page);
     expect(isOpen(after, innerIds.png), 'подменю прежнего владельца скрыто').toBe(false);
     expect(isOpen(after, innerIds.download), 'подменю нового владельца открыто').toBe(true);
-    // Слой снимает отметку, а не пишет `"false"`: у закрытого подменю состояния
-    // «развёрнуто» нет, и `aria-haspopup` остаётся единственным верным признаком
-    // того, что подменю есть.
-    expect(itemOf(after, 'PNG').expanded, 'отметка снята с прежнего владельца').toBeNull();
+    // Подменю закрыто — у владельца `false`, а не отсутствие отметки: свёрнутое
+    // подменю у пункта есть, и отсутствие отметки отличалось бы от того, что
+    // подменю нет вовсе.
+    expect(itemOf(after, 'PNG').expanded, 'у закрытого подменю отметка "false"').toBe('false');
     expect(itemOf(after, 'PNG').haspopup, 'признак наличия подменю остался').toBe('menu');
     // Обрезка не должна уносить предков: «Экспорт» — родитель обоих уровней, и его
     // подменю на месте. Усечение не по глубже, а по всей ветке унесло бы и его.
@@ -2064,7 +2065,7 @@ test.describe('показ подменю', () => {
     });
     expect(owners.length, 'владельцы в разметке остались').toBeGreaterThan(0);
     for (const owner of owners) {
-      expect(owner.expanded, `у владельца «${owner.label}» отметки нет`).toBeNull();
+      expect(owner.expanded, `подменю владельца «${owner.label}» помечено свёрнутым`).toBe('false');
     }
     expect(after.log, 'ни одно действие не вызвано').toEqual([]);
     expect(after.errors, 'ошибок страницы нет').toEqual([]);

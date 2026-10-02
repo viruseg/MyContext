@@ -703,7 +703,12 @@ export function createLayer(options) {
   }
 
   /**
-   * @param {LevelEntry} entry
+   * Отметка развёрнутости возвращается в `"false"`, а не снимается: у закрытого
+   * подменю оно и есть «свёрнуто», и `false` говорит об этом прямо. Отсутствие
+   * отметки означало бы «состояние неизвестно» и не отличалось бы от пункта без
+   * подменю вовсе — а подменю у пункта есть и появится снова.
+   *
+   * @param {LevelEntry} entry закрываемый уровень.
    * @returns {void}
    */
   function collapseOwner(entry) {
@@ -711,10 +716,7 @@ export function createLayer(options) {
     if (owner === null) {
       return;
     }
-    // Отметка развёрнутости снимается, а не переводится в `false`: у закрытого
-    // подменю состояния «развёрнуто» нет, и `aria-haspopup` остаётся единственным
-    // верным признаком того, что подменю есть.
-    owner.element.removeAttribute('aria-expanded');
+    owner.element.setAttribute('aria-expanded', 'false');
   }
 
   /**

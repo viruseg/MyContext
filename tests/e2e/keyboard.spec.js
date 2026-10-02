@@ -1660,9 +1660,9 @@ test.describe('переходы между уровнями', () => {
     expect(result.after.levels.root.activeIndex).toBe(1);
     expect(result.after.levels.root.tabStops).toBe(1);
     expect(result.after.levels.root.activeMarks).toBe(1);
-    // Отметка развёрнутости снята закрытым уровнем, а `aria-owns` остался: подменю
+    // Отметка развёрнутости вернулась в "false", а `aria-owns` остался: подменю
     // у пункта есть и появится снова.
-    expect(result.after.levels.root.items[1].expanded).toBe(null);
+    expect(result.after.levels.root.items[1].expanded).toBe('false');
     expect(result.after.levels.root.items[1].owns).toBe(result.before.levels.sub.id);
   });
 
@@ -1836,7 +1836,7 @@ test.describe('переходы между уровнями', () => {
     // закрытый уровень снял.
     expect(result.after.focus.label).toBe('Экспорт');
     expect(result.after.levels.root.activeIndex).toBe(1);
-    expect(result.after.levels.root.items[1].expanded).toBe(null);
+    expect(result.after.levels.root.items[1].expanded).toBe('false');
   });
 
   test('ArrowLeft после мышиного открытия закрывает подменю и возвращает фокус владельцу', async ({ page }) => {

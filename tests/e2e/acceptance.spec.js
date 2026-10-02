@@ -750,7 +750,7 @@ test.describe('приёмка по критериям готовности', () 
     const closed = await readMenu(page);
     expect(isOpen(closed, submenuId), 'подменю закрыто переходом на соседний пункт').toBe(false);
     expect(closed.openCount, 'остался корень').toBe(1);
-    expect(itemOf(closed, 'Ветка').expanded, 'отметка развёрнутости снята').toBeNull();
+    expect(itemOf(closed, 'Ветка').expanded, 'подменю помечено свёрнутым').toBe('false');
   });
 
   test('критерий 4: все три типа иконок работают, а лейблы соосны независимо от их наличия', async ({ page }) => {
