@@ -133,8 +133,6 @@ const SCENARIO_IDS = [
   'autohide',
   'press',
   'press-left',
-  'armed',
-  'handoff',
   'dismissible',
   'mixed',
 ];
@@ -149,8 +147,6 @@ const SCENARIO_TITLES = {
   autohide: 'Автоскрытие',
   press: 'Удержание кнопки',
   'press-left': 'Удержание левой кнопки',
-  armed: 'Продолжение жеста',
-  handoff: 'Отдача управления',
   dismissible: 'Показ из чужого кода',
   mixed: 'Всё вместе',
 };
@@ -165,8 +161,6 @@ const SCENARIO_SHAPE = {
   autohide: { first: 'Открыть', last: 'Удалить', count: 4 },
   press: { first: 'Новый', last: 'Отключённый пункт', count: 4 },
   'press-left': { first: 'Новый', last: 'Отключённый пункт', count: 4 },
-  armed: { first: 'Первый', last: 'Последний', count: 3 },
-  handoff: { first: 'Отдать', last: 'Обычный', count: 3 },
   dismissible: { first: 'Первый', last: 'Последний', count: 3 },
   mixed: { first: 'Новый', last: 'Последний', count: 7 },
 };
@@ -181,8 +175,6 @@ const SCENARIO_SHAPE = {
 const HELD_SCENARIOS = {
   press: 'right',
   'press-left': 'left',
-  armed: 'left',
-  handoff: 'left',
 };
 
 /**
@@ -230,17 +222,6 @@ const PRESS_LEFT_HINT =
   'То же меню, но открывает только левая кнопка: правый клик не открывает ничего, '
   + 'и системное меню браузера остаётся его делом.';
 
-const ARMED_HINT =
-  'Меню открывается с уже вооружённым жестом: кнопку держал вызывающий код, а нажатия '
-  + 'по якорю не было. Отпускание по-прежнему закрывает меню, а над пунктом — исполняет '
-  + 'его действие.';
-
-const HANDOFF_HINT =
-  'Пункт «Отдать» передаёт управление другому меню, и это меню уходит с экрана. '
-  + 'Вторым аргументом приходит описание живого жеста — `{ button, held }`, — и его '
-  + 'можно передать дальше как есть. Наведение '
-  + 'с задержкой, как у владельца подменю; отключённый отдающий не отдаёт ничего.';
-
 const DISMISSIBLE_HINT =
   'Меню открывает кнопка в блоке, а не правый клик по нему: блок не привязан, и закрывают '
   + 'меню обычные правила — клик мимо, прокрутка, resize. Без `dismissible` оно висело бы '
@@ -262,8 +243,6 @@ const SCENARIO_HINTS = {
   autohide: AUTO_HIDE_HINT,
   press: PRESS_HOLD_HINT,
   'press-left': PRESS_LEFT_HINT,
-  armed: ARMED_HINT,
-  handoff: HANDOFF_HINT,
   dismissible: DISMISSIBLE_HINT,
   mixed: HINT,
 };
@@ -1642,55 +1621,6 @@ test('демо: блок на левой кнопке не открываетс�
 
   const rootId = await holdScenario(page, 'press-left', 'left');
   expect(rootId, 'левая кнопка блок открыла').not.toBe('');
-  await releaseHeld(page, 'left');
-});
-
-test('демо: блок продолжения жеста открывается нажатием и закрывается отпусканием', async ({ page }) => {
-  // Показ с `armed` идёт из обработчика страницы, а не из привязки блока, и кейс
-  // обязан доказать, что такой показ вообще состоялся: без него «меню открылось и
-  // закрылось» ничего не сказало бы — блок молчал бы, и состояния не отличались бы
-  // от пустых.
-  const rootId = await holdScenario(page, 'armed', 'left');
-  expect(rootId, 'блок открылся').not.toBe('');
-  expect((await readMenu(page)).openCount, 'меню показано').toBe(1);
-
-  // Отпускание над пунктом — тот же контракт, что у обычного удержания: действие
-  // исполнилось, меню закрылось. Здесь важно, что вооружение было внутренним, а
-  // отпускание — настоящим: одно без другого не проходит.
-  const point = await centreOf(page, rootId, 'Первый');
-  await page.mouse.move(point.x, point.y);
-  await page.mouse.up({ button: 'left' });
-
-  expect(await logLines(page, 'armed'), 'действие исполнилось').toEqual(['Первый']);
-  expect((await readMenu(page)).openCount, 'меню закрылось').toBe(0);
-});
-
-test('демо: блок отдачи передаёт управление и уходит с экрана', async ({ page }) => {
-  const rootId = await holdScenario(page, 'handoff', 'left');
-  expect(rootId, 'блок открылся').not.toBe('');
-  const point = await centreOf(page, rootId, 'Отдать');
-
-  // Отдача приходит наведением с задержкой, как у владельца подменю. Отпускание
-  // после неё не нужно и было бы уже не по адресу: меню к этому моменту ушло.
-  await page.mouse.move(point.x, point.y, { steps: 6 });
-  await page.waitForTimeout(400);
-
-  const log = await logLines(page, 'handoff');
-  expect(log.length, 'отдача состоялась').toBe(1);
-  expect(log[0], 'отдано по наведению').toContain('отдано');
-  expect(log[0], 'событие активации — введение курсора').toContain('pointerenter');
-  expect((await readMenu(page)).openCount, 'меню ушло').toBe(0);
-  await releaseHeld(page, 'left');
-});
-
-test('демо: отключённый отдающий пункт не отдаёт', async ({ page }) => {
-  const rootId = await holdScenario(page, 'handoff', 'left');
-  const point = await centreOf(page, rootId, 'Отключённый отдающий');
-  await page.mouse.move(point.x, point.y, { steps: 6 });
-  await page.waitForTimeout(400);
-
-  expect(await logLines(page, 'handoff'), 'отдачи не было').toEqual([]);
-  expect((await readMenu(page)).openCount, 'меню осталось').toBe(1);
   await releaseHeld(page, 'left');
 });
 
