@@ -378,6 +378,33 @@ test('refresh останавливает цикл, когда перебора �
   expect(result.pendingAfterRefresh).toBe(true);
 });
 
+test('цикл идёт и когда первый кадр отдан с отметкой времени ровно 0', async ({ page }) => {
+  // Отметка «время ещё не замерено» не должна совпадать с возможным значением
+  // времени кадра. Настоящий `requestAnimationFrame` ноль не отдаёт, но это
+  // свойство его источника, а не контракт: подмена `performance.now` в странице
+  // или иной источник кадра дают ноль законно, и цикл на нём обязан идти, а не
+  // принять второй кадр за первый и не сдвинуть список ни разу.
+  await mountStand(page, STAND);
+  const result = await page.evaluate((step) => {
+    const scope = /** @type {{ __stand: ScrollStand }} */ (/** @type {unknown} */ (globalThis));
+    const stand = scope.__stand;
+    const before = stand.list.scrollTop;
+    stand.down.dispatchEvent(new PointerEvent('pointerenter'));
+    stand.flush(0);
+    stand.flush(step);
+    return {
+      before,
+      moved: stand.list.scrollTop,
+      pending: stand.pending(),
+    };
+  }, FRAME_STEP_MS);
+
+  // Контроль живости: цикл не встал и не исчерпал кадры — иначе «список не
+  // сдвинулся» означало бы просто «цикла не было».
+  expect(result.pending, 'цикл продолжает ставить кадры').toBe(true);
+  expect(result.moved, 'список сдвинулся').toBeGreaterThan(result.before);
+});
+
 test('верхняя зона заблокирована в начале, нижняя свободна', async ({ page }) => {
   await mountStand(page, STAND);
   const result = await page.evaluate(() => {

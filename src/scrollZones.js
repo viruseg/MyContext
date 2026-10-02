@@ -77,8 +77,12 @@ export function createScrollZones(options) {
   let frame = 0;
   // Направление цикла: `1` вниз, `-1` вверх, `0` — цикла нет.
   let direction = 0;
-  // Отметка времени предыдущего кадра; `0` значит «время ещё не замерено».
-  let previous = 0;
+  // Отметка времени предыдущего кадра; `null` значит «время ещё не замерено».
+  // Именно `null`, а не `0`: ноль — законное значение отметки кадра, и при
+  // совпадении второй кадр принимался бы за первый, а список не сдвинулся бы
+  // ни разу за весь цикл.
+  /** @type {number | null} */
+  let previous = null;
 
   /**
    * Единственный писатель `data-vc-blocked`. Порог снизу с допуском в 1 px:
@@ -114,7 +118,7 @@ export function createScrollZones(options) {
     frame = 0;
     // Первый кадр задаёт точку отсчёта: время между постановкой цикла и первым
     // кадром не имеет отношения к шагу и уводил бы список на пол-экрана.
-    if (previous === 0) {
+    if (previous === null) {
       previous = time;
       frame = requestFrame(step);
       return;
@@ -162,7 +166,7 @@ export function createScrollZones(options) {
     }
     stop();
     direction = next;
-    previous = 0;
+    previous = null;
     frame = requestFrame(step);
   }
 
