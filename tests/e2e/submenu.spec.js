@@ -1603,6 +1603,38 @@ test.describe('показ подменю', () => {
       .toBeCloseTo(owner.rect.right + SUBMENU_OFFSET, 1);
   });
 
+  test('повторный показ уровня возвращает шеврон владельца в исходное положение', async ({ page }) => {
+    // `data-chevron` ставит слой при открытии подменю, а снимает только в том случае,
+    // если подменю открывается снова: закрытие отметку оставляет. Уровень при этом
+    // переиспользуется, и второй показ обязан вернуть признаки владельца в исходное
+    // положение — иначе свёрнутое подменю осталось бы с развёрнутым шевроном.
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_RIGHT);
+
+    // Контроль премиссы: до флипа шеврон обычный, иначе «не развернулся бы» ничем
+    // не отличалось бы от «и так был развёрнут».
+    const fresh = itemOf(await readMenu(page), 'Экспорт');
+    expect(fresh.chevron, 'у свежего владельца шеврон обычный').toBe('right');
+
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    expect(itemOf(await readMenu(page), 'Экспорт').chevron, 'подменю развернуло шеврон').toBe('left');
+
+    // Переоткрытие у другого края: подменю здесь вправо поместится, и показ обязан
+    // вернуть шеврон обычным. Корневой уровень при этом переиспользуется, а не
+    // строится заново — иначе случай был бы другим.
+    await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown } */ (globalThis));
+      scope.__mc.close();
+    });
+    await openAt(page, OPEN_LEFT);
+    const after = await readMenu(page);
+    expect(after.openCount, 'корень показан').toBe(1);
+    expect(itemOf(after, 'Экспорт').chevron, 'шеврон вернулся в исходное положение').toBe('right');
+    expect(itemOf(after, 'Экспорт').expanded, 'у закрытого подменю отметки развёрнутости нет').toBeNull();
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
+  });
+
   test('вложенность 4 уровней открывается целиком и все меню в пределах вьюпорта', async ({ page }) => {
     await makeMenu(page, 'tree', 'surface');
     await openAt(page, OPEN_MIDDLE);

@@ -871,6 +871,18 @@ export function refreshItems(items, renderedItems, menuId, actions) {
     // оно и есть ответ пункта на этот показ, и забытое прежнее означало бы, что
     // меню уйдёт по адресу, который автор уже сменил.
     renderedItem.handoff = resolved.handsOff ? resolved.handoff : null;
+    // Базовое положение шеврона возвращается на каждом показе, а не только когда
+    // владелец меняет признаки. `data-chevron` переставляет движок позиционирования,
+    // когда подменю пришлось открыть слева, и снимает перестановку только показом
+    // подменю: пока подменю закрыто, развёрнутый шеврон остался бы указывать в
+    // сторону, в которую подменю не открывается.
+    //
+    // Ставится здесь, а не только в `applyOwner`, потому что ранний выход ниже
+    // `applyOwner` не вызывает, а пропуск вёл бы к показу меню с развёрнутым
+    // шевроном у свёрнутого подменю.
+    if (resolved.hasSubmenu || resolved.handsOff) {
+      renderedItem.element.dataset.chevron = 'right';
+    }
     if (renderedItem.focusable === resolved.enabled
       && renderedItem.hasSubmenu === resolved.hasSubmenu
       && renderedItem.handsOff === resolved.handsOff) {
