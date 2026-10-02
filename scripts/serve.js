@@ -24,11 +24,66 @@ const MIME_TYPES = {
 };
 
 /**
- * Преобразует URL запроса в путь внутри репозитория.
- * Возвращает `null`, если путь выходит за пределы корня или URL не разбирается.
+ * Раздаваемые части репозитория.
+ *
+ * **Белый список, а не «внутри корня — значит можно».** Демо-сервер поднимают и
+ * человек, и e2e, и корень репозитория — это исходники библиотеки вместе со всем
+ * прочим: `.git/`, `package.json`, конфигурация Playwright, планы. Ни одному из них
+ * на демо-странице не место, и отдавать их по HTTP нельзя.
+ *
+ * Отдельного правила на точечные имена не нужно: `.git` и `.codegraph` в списке не
+ * стоят, и скрытый каталог внутри `src/` или `styles/` тоже не откроется — но
+ * скрытый файл внутри раздаваемого каталога откроется, поэтому точки проверяются
+ * на каждом сегменте пути, а не только на первом.
+ *
+ * @type {ReadonlySet<string>}
+ */
+const SERVED_ENTRIES = new Set(['index.html', 'Demo', 'src', 'styles']);
+
+/**
+ * Методы, которыми сервер что-то отдаёт, в виде заголовка `Allow`.
+ *
+ * Отдельная константа, потому что из неё берётся и заголовок ответа, и проверка
+ * метода запроса, а перечислять «GET, HEAD» в двух местах значило бы получить
+ * ответ, который обещает одно, а проверяет другое.
+ */
+const ALLOWED_METHODS = 'GET, HEAD';
+
+/**
+ * Ответ «путь ведёт из раздаваемой части».
+ *
+ * Отдельное значение, а не `null`: снаружи попытка обхода и промах по имени
+ * неразличимы, и сводить их к одному ответу значило бы врать — промах должен
+ * отвечать `404`, а обход — `403`.
+ */
+const FORBIDDEN = Symbol('forbidden');
+
+/**
+ * Отбивка ответа с перечнем методов.
+ *
+ * @param {import('node:http').ServerResponse} res
+ * @param {number} status
+ * @param {string} body
+ * @returns {void}
+ */
+function refuse(res, status, body) {
+  res.writeHead(status, {
+    'content-type': 'text/plain; charset=utf-8',
+    allow: ALLOWED_METHODS,
+  });
+  res.end(body);
+}
+
+/**
+ * Преобразует URL запроса в путь отдаваемого файла.
+ *
+ * `null` означает «такого файла у сервера нет», а `FORBIDDEN` — «путь ведёт из
+ * раздаваемой части». Ответы разные, и различать их приходится здесь: попытка
+ * выйти из корня и запрос несуществующего файла выглядят снаружи одинаково, но
+ * первое — попытка, а второе — обычный промах.
  *
  * @param {string | undefined} url
- * @returns {string | null}
+ * @returns {string | null | typeof FORBIDDEN}
  */
 function resolveFilePath(url) {
   if (url === undefined) return null;
@@ -38,10 +93,33 @@ function resolveFilePath(url) {
   } catch {
     return null;
   }
-  const relative = pathname.endsWith('/') ? `${pathname}index.html` : pathname;
-  const filePath = resolve(join(ROOT, relative));
-  if (filePath !== ROOT && !filePath.startsWith(ROOT + sep)) return null;
-  return filePath;
+  const segments = pathname.split('/').filter((segment) => {
+    return segment !== '' && segment !== '.';
+  });
+  // `..` остаётся в разобранном пути только там, где вышел из корня уйти некуда:
+  // нормализатор URL выкидывает `..` над корнем, а `%2f` в percent-форме
+  // раскрывается уже после нормализации. Такой сегмент — ровно то, чем полезен
+  // обход, и ответ на него — запрет, а не «нет такого файла».
+  if (segments.some((segment) => {
+    return segment === '..';
+  })) {
+    return FORBIDDEN;
+  }
+  if (segments.length === 0) {
+    return join(ROOT, 'index.html');
+  }
+  const [head, ...rest] = segments;
+  if (head === undefined || !SERVED_ENTRIES.has(head)) return null;
+  if (rest.some((segment) => {
+    return segment.startsWith('.');
+  })) {
+    return null;
+  }
+  const filePath = resolve(join(ROOT, segments.join('/')));
+  if (filePath !== ROOT && !filePath.startsWith(ROOT + sep)) return FORBIDDEN;
+  // Каталог отдаётся своей страницей: `/Demo/` и `/Demo` должны означать одно и
+  // то же, иначе ссылка на каталог отвечала бы 404 там, где файл есть.
+  return isDirectory(filePath) ? join(filePath, 'index.html') : filePath;
 }
 
 /**
@@ -76,17 +154,48 @@ function isFile(filePath) {
 }
 
 /**
- * Отвечает `403` за пределами корня, `404` для неизвестного пути, иначе отдаёт файл.
+ * `true`, если путь указывает на каталог.
+ *
+ * @param {string} filePath
+ * @returns {boolean}
+ */
+function isDirectory(filePath) {
+  try {
+    return statSync(filePath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Отвечает `204` на `OPTIONS`, `405` на нераздаваемый метод, `403` за пределами
+ * раздаваемого, `404` для неизвестного пути, иначе отдаёт файл.
  *
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
  * @returns {void}
  */
 function handleRequest(req, res) {
+  // Метод разбирается раньше пути: запрос, который ничего не читает, должен быть
+  // отвергнут одинаково и на существующем файле, и на несуществующем, а ответ с
+  // телом страницы на `POST /` выдавал бы сервер, который вообще ничего не пишет.
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, { allow: ALLOWED_METHODS });
+    res.end();
+    return;
+  }
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    refuse(res, 405, 'Method Not Allowed');
+    return;
+  }
   const filePath = resolveFilePath(req.url);
+  if (filePath === FORBIDDEN) {
+    refuse(res, 403, 'Forbidden');
+    return;
+  }
   if (filePath === null) {
-    res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
-    res.end('Forbidden');
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('Not Found');
     return;
   }
 
