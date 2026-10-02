@@ -98,7 +98,7 @@ import { renderIcon } from './icons.js';
  *   описание живого жеста: `held` значит, что кнопка зажата прямо сейчас, `button`
  *   называет её, а `button: null` значит «кнопка не названа». Это ровно то, что
  *   ждёт третьим аргументом `openSubmenu(x, y, handoff)` чужое меню, поэтому
- *   передача выглядит как `radial.openSubmenu(event.clientX, event.clientY, handoff)`.
+ *   передача выглядит как `owner.openSubmenu(event.clientX, event.clientY, handoff)`.
  *   Действие, объявленное с одним параметром, продолжает работать. Владельцем
  *   подменю пункт при этом не становится: подменю у него нет, и раскрывать нечего.
  * @property {(event: MouseEvent | KeyboardEvent) => void} [action] вызывается по
