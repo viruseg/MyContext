@@ -15,7 +15,7 @@ export default defineConfig({
   // Чинить флэк ретраями или ослаблением утверждений нельзя: ретрай маскировал бы
   // реальную регрессию.
   workers: 2,
-  retries: process.env.CI ? 0 : 1,
+  retries: 0,
   use: {
     headless: true,
   },
@@ -24,7 +24,12 @@ export default defineConfig({
     // хотя юнит-тесты HTTP-запросов не делают.
     command: 'node scripts/serve.js',
     url: BASE_URL,
-    reuseExistingServer: true,
+    // В CI переиспользование запрещено: занятый порт означает чужой процесс с
+    // чужими файлами, и прогон молча пошёл бы против устаревшей копии. Локально
+    // переиспользование удобно, но обходится перезапуском: `SERVED_ENTRIES` и
+    // порт вычисляются один раз при старте, и правка сервера без перезапуска не
+    // подхватывается.
+    reuseExistingServer: !process.env.CI,
   },
   projects: [
     {
