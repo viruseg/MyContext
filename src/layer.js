@@ -252,6 +252,11 @@ import { applyAnimationDuration, applyTheme } from './theme.js';
  *   удаляет их из DOM и чистит состояние. Повторный вызов безопасен, остальные
  *   методы после него — нет-операции, а `ensureLevel` бросает `Error`: значение
  *   уровня он вернуть не может. Карту `actions` `destroy` не трогает.
+ * @property {() => void} destroyAfterHide
+ *   То же, что `destroy`, но в конце выхода: разбор отложен на
+ *   `animationDuration`, а под `reduce` — сразу, потому что там `hide` гасит
+ *   уровень мгновенно и ждать нечего. Пока уровни в DOM, слой остаётся живым и
+ *   повторный вызов `destroyAfterHide` переставит разбор, а не разорвёт его.
  */
 
 /**
@@ -833,6 +838,35 @@ export function createLayer(options) {
     root = null;
   }
 
+  /**
+   * Разбор в конце выхода, а не сразу после закрытия.
+   *
+   * `hide` оставляет уровень в Top Layer на `animationDuration`: он гаснет на своём
+   * месте, и снять его раньше — значит оборвать анимацию на середине. Для обычного
+   * закрытия это неважно — уровень переиспользуется следующим показом, — но меню,
+   * заведённое ради одного показа, следующего показа не имеет: его узлы должны уйти
+   * вместе с анимацией, иначе оно либо моргает, либо остаётся в DOM навсегда.
+   *
+   * Задача не отменяется, и отменять её нечем: разбор объявляет слой мёртвым сразу,
+   * и ни один его метод больше не ставит задач, кроме `destroyAfterHide` — повторный
+   * вызов лишь переставляет срок.
+   *
+   * @returns {void}
+   */
+  function destroyAfterHide() {
+    if (destroyed) {
+      return;
+    }
+    // Под `reduce` закрытие мгновенно: `hide` уже вызвал `hidePopover`, и ждать
+    // после этого нечего, — ждание только оставило бы закрытые уровни в DOM на всю
+    // длительность.
+    if (reducedMotionQuery.matches) {
+      destroy();
+      return;
+    }
+    schedule(destroy, animationDuration);
+  }
+
   return {
     ensureLevel,
     showRoot,
@@ -840,5 +874,6 @@ export function createLayer(options) {
     hide,
     hideAll,
     destroy,
+    destroyAfterHide,
   };
 }

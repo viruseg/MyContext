@@ -230,6 +230,26 @@ test.describe('валидация опции pressAndHold', () => {
   });
 });
 
+test.describe('валидация опции destroyOnClose', () => {
+  test('не логическое значение отклоняется', () => {
+    // Молча проигнорированная опция оставила бы экземпляр жить после закрытия
+    // там, где автор рассчитывал на его разбор, и подписки копились бы по одному
+    // разу на каждый показ — то есть опция выдала бы себя за сработавшую.
+    expect(() => menuWithOptions({ destroyOnClose: 'yes' })).toThrow(TypeError);
+    expect(() => menuWithOptions({ destroyOnClose: 'yes' })).toThrow('options.destroyOnClose');
+    expect(() => menuWithOptions({ destroyOnClose: 1 })).toThrow('options.destroyOnClose');
+    expect(() => menuWithOptions({ destroyOnClose: null })).toThrow('options.destroyOnClose');
+  });
+
+  test('обе величины принимаются, и отсутствие поля тоже', () => {
+    // `false` — это прежнее поведение, а не отсутствие опции: поле объявлено
+    // всегда, и автор может вернуть меню к обычному закрытию одним значением.
+    expect(() => menuWithOptions({ destroyOnClose: true })).not.toThrow();
+    expect(() => menuWithOptions({ destroyOnClose: false })).not.toThrow();
+    expect(() => menuWithOptions({})).not.toThrow();
+  });
+});
+
 test.describe('поле handoffAction', () => {
   test('не функция отклоняется', () => {
     // Поле означает «отдай управление другому меню», и нефункция превратила бы его

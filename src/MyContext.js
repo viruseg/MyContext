@@ -118,6 +118,25 @@ import { assertItems } from './renderer.js';
  *   `pressAndHold`, отличном от `'none'`: при `'none'` жеста нажатия нет, и опция
  *   молчала бы. Исключение из предиката не гасится и уходит из обработчика
  *   нажатия. См. [`isArmableAction`](README.md#isarmableaction).
+ * @property {boolean} [destroyOnClose] разбирать ли экземпляр при закрытии,
+ *   `false` по умолчанию. Нужен меню, которое автор заводит на один показ: ссылки
+ *   на такой экземпляр ни у кого нет, а `destroy()` звать некому, и без опции он
+ *   переживает закрытие вместе со слушателем `contextmenu` на своём контейнере,
+ *   глобальными правилами закрытия, уровнями в DOM и записью в реестре живых. С
+ *   закрытием разбирается всё это разом, и следующий показ требует нового
+ *   экземпляра.
+ *
+ *   Разбор наступает на любом закрытии — закрытие у экземпляра одно, — и
+ *   объявляет экземпляр уничтоженным сразу: `open`, `attach`, `detach` и `close`
+ *   бросают `Error` ровно как после `destroy()`, а контейнер перестаёт открывать
+ *   меню. Уровни при этом снимаются не сразу: разбор отложен до конца выхода, иначе
+ *   меню, рассчитанное на один показ, пропадало бы ещё и без анимации. Под
+ *   `prefers-reduced-motion: reduce` выхода нет, и разбор мгновенен.
+ *
+ *   Переоткрытие на месте — повторный `open()` по уже открытому меню — закрытием
+ *   не считается: это тот же показ, и погасшие уровни доводятся новым.
+ *
+ *   См. [`destroyOnClose`](README.md#destroyonclose).
  */
 
 /**
@@ -134,6 +153,7 @@ import { assertItems } from './renderer.js';
  * @property {number} autoHideDistance
  * @property {PressAndHoldMode} pressAndHold
  * @property {((event: PointerEvent) => boolean) | undefined} isArmableAction
+ * @property {boolean} destroyOnClose
  */
 
 const ITEM_SELECTOR = '.vc-item';
@@ -1645,6 +1665,7 @@ export class MyContext {
       autoHideDistance: options.autoHideDistance ?? DEFAULT_AUTO_HIDE_DISTANCE,
       pressAndHold: options.pressAndHold ?? DEFAULT_PRESS_AND_HOLD,
       isArmableAction: options.isArmableAction,
+      destroyOnClose: options.destroyOnClose ?? false,
     };
     this.#actions = new Map();
     this.#levels = new Map();
@@ -2030,6 +2051,10 @@ export class MyContext {
    * Закрытия по уходу курсора среди этих путей нет и быть не может: состоянием
    * подменю владеет активный пункт уровня, и курсор его не меняет.
    *
+   * Один закрывающий разбор на все пути — и потому же разбор одноразового меню
+   * стоит здесь, а не в каждом из них: закрытий много, а `destroyOnClose` одно, и
+   * перечислить его по правилам закрытия значило бы со временем забыть правило.
+   *
    * @param {{ returnFocus: boolean }} options вернуть ли фокус привязанному контейнеру.
    * @returns {void}
    */
@@ -2053,6 +2078,11 @@ export class MyContext {
     this.#forgetPlacement();
     if (returnFocus) {
       this.#returnFocus();
+    }
+    // Последним: разбор обнуляет `#focusOwner`, и вернуть фокус после него было бы
+    // уже некуда. Само закрытие от разбора не зависит, а вот фокус — зависит.
+    if (this.#options.destroyOnClose) {
+      this.#dispose({ keepLevels: true });
     }
   }
 
@@ -2094,6 +2124,25 @@ export class MyContext {
    * @returns {void}
    */
   destroy() {
+    this.#dispose({ keepLevels: false });
+  }
+
+  /**
+   * Разбор экземпляра — всё, кроме, по договорённости с вызывающим, снятия уровней
+   * из DOM. Идемпотентен.
+   *
+   * **Признак уничтожения ставится здесь же, а не в конце.** Дальше слою остаётся
+   * работать: при `keepLevels` он доигрывает выход и снимает узлы сам. Состояния «экземпляр
+   * мёртв, но ещё что-то движется» пришлось бы тогда различать во всех проверках
+   * страницы, поэтому мёртвым экземпляр объявляется целиком и сразу: `#assertAlive`
+   * и все прочие охраняющие места видят одно и то же состояние, а отдельного признака
+   * «умирает» в классе не появляется.
+   *
+   * @param {{ keepLevels: boolean }} options снять ли уровни из DOM сейчас или отдать
+   *   их слою на конец выхода.
+   * @returns {void}
+   */
+  #dispose({ keepLevels }) {
     if (this.#destroyed) {
       return;
     }
@@ -2107,10 +2156,9 @@ export class MyContext {
     this.#unbindHoldHandlers();
     this.#cancelReopen();
     // Забывание постановки тут не лишнее: `#forgetPlacement` снимает висящие задачи
-    // hover, и после `destroy()` их больше некому отменить — сработавшая задача звала
+    // hover, и после разбора их больше некому отменить — сработавшая задача звала
     // бы колбэк у уничтоженного экземпляра.
     this.#forgetPlacement();
-    this.#layer.destroy();
     // Карта целиком: она принадлежит экземпляру, а не уровню, и рендерер не знает,
     // когда уровень перестал существовать. Частичная очистка оставила бы записи
     // уровней, снесённых перестроением, и уровней, никогда не показанных.
@@ -2120,6 +2168,14 @@ export class MyContext {
     this.#hoverTargets.clear();
     this.#root = null;
     this.#focusOwner = null;
+    if (keepLevels) {
+      // Уровни остаются в DOM до конца выхода: `destroy()` снял бы их мгновенно, и
+      // меню пропало бы вместе с анимацией. Гасить их нечем и не нужно — `hide`
+      // погасил их сам.
+      this.#layer.destroyAfterHide();
+      return;
+    }
+    this.#layer.destroy();
   }
 
   /**
@@ -2798,6 +2854,7 @@ export class MyContext {
       autoHideDistance,
       pressAndHold,
       isArmableAction,
+      destroyOnClose,
     } = options;
     if (theme !== undefined && theme !== 'auto' && theme !== 'light' && theme !== 'dark') {
       throw new TypeError(
@@ -2854,6 +2911,13 @@ export class MyContext {
     // проверять его форму здесь нельзя: до нажатия она неизвестна.
     if (isArmableAction !== undefined && typeof isArmableAction !== 'function') {
       throw new TypeError(`${path}.isArmableAction: предикат должен быть функцией`);
+    }
+    // Форма, а не значение из списка: молча проигнорированная опция оставила бы
+    // экземпляр жить после закрытия там, где автор рассчитывал на его разбор, —
+    // и подписки копились бы по одному разу на каждый показ, то есть опция
+    // выдавала бы себя за сработавшую.
+    if (destroyOnClose !== undefined && typeof destroyOnClose !== 'boolean') {
+      throw new TypeError(`${path}.destroyOnClose: разбор при закрытии — истина или ложь`);
     }
   }
 
