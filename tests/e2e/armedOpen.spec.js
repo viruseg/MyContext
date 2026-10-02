@@ -64,6 +64,8 @@ test.beforeEach(async ({ page }) => {
     const calls = [];
     /** @type {string[]} */
     const errors = [];
+    /** Звать ли разобранный экземпляр из действия пункта — см. `run`. */
+    let probeDisposed = false;
     globalThis.addEventListener('error', (event) => {
       errors.push(String(event.message));
     });
@@ -73,7 +75,29 @@ test.beforeEach(async ({ page }) => {
      * @returns {MenuItem}
      */
     function item(label) {
-      return { labelAction: () => label, action: () => calls.push(label) };
+      return { labelAction: () => label, action: () => run(label) };
+    }
+
+    /**
+     * Действие пункта. По требованию пробы дополнительно зовёт `open()` и записывает
+     * исход: на пути разбора отпускания экземпляр к моменту действия уже разобран,
+     * и `open()` обязан бросить. Проверяется именно отказ — без него кейс проходил
+     * бы и с целым экземпляром, то есть ничего не говорил бы о разборе.
+     *
+     * @param {string} label
+     * @returns {void}
+     */
+    function run(label) {
+      calls.push(label);
+      if (!probeDisposed || menu === null) {
+        return;
+      }
+      try {
+        menu.open({ x: 0, y: 0 });
+        calls.push(`${label}: открылся`);
+      } catch (error) {
+        calls.push(`${label}: ${error instanceof Error ? error.constructor.name : 'Error'}`);
+      }
     }
 
     /** @type {InstanceType<typeof MyContext> | null} */
@@ -87,6 +111,7 @@ test.beforeEach(async ({ page }) => {
           menu.destroy();
         }
         calls.length = 0;
+        probeDisposed = input.destroyOnClose === true;
         errors.length = 0;
         menu = new MyContext(
           [
@@ -430,10 +455,45 @@ test.describe('openSubmenu', () => {
     expect((await readMenu(page)).openCount, 'ни один вызов не показал меню').toBe(0);
   });
 
-  test('destroyOnClose: действие получает уже разобранный экземпляр', async ({ page }) => {
-    // Разбор отпускания стирает карту действий и разбирает одноразовый экземпляр,
-    // и потому действие исполняется уже после разбора. На пути контракта это
-    // верно так же, как на пути armed, и автору это тоже достаётся.
+  test('имя кнопки из Object.prototype не проходит', async ({ page }) => {
+    // Таблица кодов — обычный объект, и он наследует `constructor`, `toString`,
+    // `__proto__` и прочее. Проверка «в таблице есть такая строка» на этом
+    // проходит, вооружает жест числом, которого не бывает, и отпускание, которое
+    // обязано было закрыть меню, его не закрывает никогда. Pielet на том же входе
+    // отвергает значение через `Set`, и разойтись тут нельзя: контракт один.
+    await makeMenu(page, { pressAndHold: 'left', attach: false });
+    const messages = await page.evaluate(() => {
+      const scope = /** @type {{ __armed: ArmedProbe }} */ (/** @type {unknown} */ (globalThis));
+      /** @param {string} name */
+      const message = (name) => {
+        try {
+          scope.__armed.openSubmenu(
+            { x: 1, y: 1 },
+            /** @type {never} */ ({ button: name, held: true }),
+          );
+          return '';
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      };
+      return ['constructor', 'toString', '__proto__', 'valueOf', 'hasOwnProperty'].map(message);
+    });
+    for (const [index, name] of ['constructor', 'toString', '__proto__', 'valueOf', 'hasOwnProperty'].entries()) {
+      expect(messages[index], `имя «${name}» отвергнуто`).toContain('button');
+    }
+    expect((await readMenu(page)).openCount, 'меню не показано').toBe(0);
+  });
+
+  test('destroyOnClose: экземпляр разобран до действия, и звать его нельзя', async ({ page }) => {
+    // Разбор отпускания стирает карту действий и разбирает одноразовый экземпляр
+    // раньше, чем зовёт действие, — потому порядок «сначала закрыть, потом действие»
+    // выбран один на все пути активации. На пути контракта это значит, что автор
+    // `handoffAction`, передающий управление дальше, не может звать наше меню обратно
+    // из `action`: к этому моменту его уже нет.
+    //
+    // Проверяется не «действие исполнилось», а именно тем, что действие попыталось
+    // звать разобранный экземпляр и получило отказ. Прежняя формулировка кейса
+    // проходила и без `destroyOnClose`, то есть ничего не проверяла.
     await makeMenu(page, { pressAndHold: 'left', attach: false, destroyOnClose: true });
     await page.mouse.down({ button: 'left' });
     await openSubmenu(page, PRESS_POINT, { button: 'left', held: true });
@@ -443,9 +503,14 @@ test.describe('openSubmenu', () => {
     await page.mouse.up({ button: 'left' });
 
     const after = await readMenu(page);
-    expect(after.calls, 'действие исполнилось').toEqual(['Первый']);
+    // Действие исполнилось, и `open()` внутри него получил `Error`: к этому моменту
+    // экземпляр уже разобран. Без `destroyOnClose` тот же вызов прошёл бы, и вторая
+    // запись была бы «открылся» — то есть кейс проверял бы разбор, а не порядок.
+    expect(after.calls, 'действие исполнилось и звать разобранный экземпляр нельзя').toEqual([
+      'Первый',
+      'Первый: Error',
+    ]);
     expect(after.openCount, 'меню закрыто и разобрано').toBe(0);
-    expect(after.errors, 'действие не звало разобранный экземпляр').toEqual([]);
   });
 });
 
@@ -564,6 +629,7 @@ test.describe('openAsSubmenu', () => {
       }
     });
     expect(outcome.threw, 'openAsSubmenu бросил ошибку').toBe(true);
+    expect(outcome.message, 'отказ называет свой метод').toContain('openAsSubmenu(x, y)');
     expect(outcome.message).toContain('pressAndHold');
   });
 });
