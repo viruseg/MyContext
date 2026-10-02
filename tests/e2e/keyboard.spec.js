@@ -524,6 +524,10 @@ test.beforeEach(async ({ page }) => {
         openedLayer().showSubmenu(entry);
         showInChain(entry);
         keyboard.registerLevel(entry, { focus: false });
+        // Показ не перестраивает уровень: у пробы нет составов пунктов, которые
+        // движок мог бы сверить. Показанный уровень по факту равен переданному, и
+        // возвращать его — обязательство контракта, а не описание поведения.
+        return entry;
       },
       closeCurrentLevel(entry) {
         calls.order.push('closeCurrentLevel');

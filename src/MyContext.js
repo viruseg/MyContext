@@ -2472,7 +2472,7 @@ export class MyContext {
         }
       },
       openSubmenu: (entry) => {
-        this.#openSubmenu(entry);
+        return this.#openSubmenuFromKeyboard(entry);
       },
       handOver: (rendered, event) => {
         this.#handOverTo(rendered, event);
@@ -2533,6 +2533,42 @@ export class MyContext {
     this.#leadAhead(entry);
     this.#chain.push(entry);
     this.#keyboard.registerLevel(entry, { focus: false });
+  }
+
+  /**
+   * Показ уровня-подменю, заведённого движком клавиатуры.
+   *
+   * **Уровень приводится к текущему состоянию, иначе показ был бы показом
+   * устаревшего снимка.** Мышиный путь приводит уровень сам, до `#openSubmenu`, а
+   * движок приходит по уже заведённому уровню и показывает его как есть. Между
+   * двумя показами автор вправе выключить пункт подменю, и без этого прохода
+   * `ArrowRight` показал бы меню, в котором отключённый пункт остался в кольце
+   * роуминга и исполнялся по `Enter`.
+   *
+   * Возвращается уровень по факту показа, а не переданный: при изменившемся
+   * составе `#ensureSubmenuLevel` перестраивает уровень целиком, и движок обязан
+   * выделять пункт нового, а не только что снятого.
+   *
+   * @param {LevelEntry} entry уровень, найденный движком по паре «родитель, владелец».
+   * @returns {LevelEntry} показанный уровень.
+   */
+  #openSubmenuFromKeyboard(entry) {
+    if (this.#destroyed) {
+      return entry;
+    }
+    const owner = entry.ownerItem;
+    const parent = entry.parent;
+    const items = owner === null ? null : owner.submenuItems;
+    // Три «нет» подряд у невозможны на живом меню: движок находит уровень по
+    // владельцу, и владелец с подменю всегда отдаёт его состав. Оставлено защитой
+    // от чужого уровня, показанного мимо владельца: показывать его нечем, и
+    // `#openSubmenu` бросил бы на сломанном уровне.
+    if (owner === null || parent === null || items === null) {
+      return entry;
+    }
+    const current = this.#ensureSubmenuLevel(items, parent, owner);
+    this.#openSubmenu(current);
+    return current;
   }
 
   /**

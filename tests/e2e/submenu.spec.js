@@ -54,6 +54,10 @@ import { OPEN_GRACE_MS, SAFETY_PADDING, SUBMENU_OFFSET } from '../../src/constan
  * @property {string | null} owns зарезервированный адрес подменю.
  * @property {string | null} chevron `data-chevron`.
  * @property {number} chevrons сколько узлов `.vc-chevron` на пункте.
+ * @property {string | null} disabled `aria-disabled`.
+ * @property {string | null} tabindex `tabindex` пункта: `"0"` у доступного, `"-1"`
+ *   у невыбираемого. Читается с узла, потому что в кольцо роуминга попадает ровно
+ *   то, у кого он нулевой.
  * @property {MenuRect} rect рамка пункта во вьюпорте.
  */
 
@@ -104,6 +108,9 @@ import { OPEN_GRACE_MS, SAFETY_PADDING, SUBMENU_OFFSET } from '../../src/constan
  * @property {(index: number, enabled: boolean) => void} setAvailability правка
  *   `isEnabledAction` у пункта набора последнего `make`: автор выключает пункт
  *   между показами, и решение обязано дойти до уже построенного уровня.
+ * @property {(index: number, enabled: boolean) => void} setNestedAvailability то же
+ *   для пункта внутри подменю набора `nested`: там правка невозможна иначе,
+ *   потому что `submenuAction` отдаёт наружу тот же массив.
  * @property {(enabled: boolean) => OwnerProbe} ownersOf
  * @property {() => string[]} toggles переключения Top Layer по уровням в виде
  *   «`id` уровня:`newState`». Снимок `toggle` различает «меню переехало» и «меню
@@ -372,6 +379,18 @@ test.beforeEach(async ({ page }) => {
     const { renderLevel } = await import('../../src/renderer.js');
 
     /**
+     * Подменю набора `nested` лежит в отдельном массиве, а не собирается в
+     * `submenuAction`: кейсу о перечитывании нужно выключить пункт **внутри** уже
+     * построенного подменю между двумя его показами, а свежий массив на каждый
+     * вызов дал бы новые пункты, к которым правка и не относилась бы.
+     *
+     * @type {Array<MenuItem | SeparatorItem>}
+     */
+    const nestedItems = [
+      { labelAction: () => 'Лист', action: () => log.push('лист') },
+    ];
+
+    /**
      * Наборы объявлены здесь, а не приходят аргументом: у пунктов есть
      * `action`-функции, а `page.evaluate` сериализует аргументы как JSON и функции
      * бы выбросил.
@@ -387,6 +406,9 @@ test.beforeEach(async ({ page }) => {
      * @type {Record<string, Array<MenuItem | SeparatorItem>>}
      */
     const sets = {
+      nested: [
+        { labelAction: () => 'Владелец', submenuAction: () => nestedItems },
+      ],
       tree: [
         { labelAction: () => 'Новый', action: () => log.push('новый') },
         {
@@ -491,6 +513,8 @@ test.beforeEach(async ({ page }) => {
         owns: item.getAttribute('aria-owns'),
         chevron: item.getAttribute('data-chevron'),
         chevrons: item.querySelectorAll('.vc-chevron').length,
+        disabled: item.getAttribute('aria-disabled'),
+        tabindex: item.getAttribute('tabindex'),
         rect: {
           left: rect.left,
           top: rect.top,
@@ -617,6 +641,15 @@ test.beforeEach(async ({ page }) => {
         }
         // Предикат вешается на живом объекте набора: автор выключает пункт между
         // показами, и решение обязано дойти до уже построенного уровня.
+        item.isEnabledAction = () => enabled;
+      },
+      setNestedAvailability(index, enabled) {
+        const item = nestedItems[index];
+        if (item === undefined || 'type' in item) {
+          throw new Error('в подменю нет такого пункта');
+        }
+        // Предикат вешается на живом объекте: правка обязана дойти до уже
+        // построенного уровня, минуя перестроение.
         item.isEnabledAction = () => enabled;
       },
       toggles() {
@@ -1807,6 +1840,54 @@ test.describe('показ подменю', () => {
     expect(exportItem.haspopup, 'есть `aria-haspopup`').toBe('menu');
     expect(exportItem.chevron, 'есть `data-chevron`').toBe('right');
     expect(exportItem.chevrons, 'есть узел шеврона').toBe(1);
+  });
+
+  test('повторный показ подменю с клавиатуры перечитывает действия его пунктов', async ({ page }) => {
+    // Кейс-близнец кейса выше, но показ подменю идёт клавишей, а не наведением.
+    // Оба обязаны вести себя одинаково: «действия пункта перечитываются на каждом
+    // показе» — свойство показа, а не свойство того, кто его вызвал. Клавиатурный
+    // путь не ходит через `ensureLevel`, а берёт уже заведённый уровень, так что
+    // без явной проверки расхождение осталось бы незамеченным: мышиный путь её
+    // закрывает и оттого выглядит работающим.
+    await makeMenu(page, 'nested', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+
+    // Первый показ подменю мышью: без него нет заведённого уровня, и клавиатурный
+    // показ не отличался бы от первого построения.
+    await hoverItem(page, 'Владелец');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    expect((await readMenu(page)).openCount, 'подменю показано').toBe(2);
+
+    // Пункт внутри подменю выключается, пока подменю закрыто. Правка обязана дойти
+    // до уже построенного уровня — иначе на следующем показе он остался бы в кольце
+    // роуминга, а его действие исполнилось бы.
+    await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown } */ (globalThis));
+      scope.__mc.setNestedAvailability(0, false);
+    });
+
+    // Уход с показа мышью, чтобы цепочка осталась на корне и фокус встал туда же.
+    await hoverItem(page, 'Владелец');
+    await page.keyboard.press('ArrowLeft');
+    expect((await readMenu(page)).openCount, 'подменю закрыто').toBe(1);
+
+    await page.keyboard.press('ArrowDown');
+    expect((await readMenu(page)).focusLabel, 'выделен владелец').toBe('Владелец');
+    await page.keyboard.press('ArrowRight');
+    const after = await readMenu(page);
+    expect(after.openCount, 'подменю открыто с клавиатуры').toBe(2);
+
+    const leaf = itemOf(after, 'Лист');
+    // Пункт выключен, поэтому `ArrowDown` не вправе на него встать, а `Enter` на
+    // владельце — исполнить его действие. Итоговый журнал и есть предмет кейса.
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Enter');
+    const final = await readMenu(page);
+    expect(final.log, 'действие отключённого пункта не выполнено').toEqual([]);
+    expect(leaf.disabled, 'пункт помечен отключённым').toBe('true');
+    expect(leaf.tabindex, 'пункт вне кольца роуминга').toBe('-1');
+    expect(final.focusLabel, 'фокус не встал на отключённый пункт').not.toBe('Лист');
+    expect(final.errors, 'ошибок страницы нет').toEqual([]);
   });
 
   test('подменю не пересоздаётся при повторном наведении на тот же пункт', async ({ page }) => {
