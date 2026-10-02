@@ -90,12 +90,17 @@ import { renderIcon } from './icons.js';
  *   каждом показе. Вернул не `true` — пункт отключён: он не входит в цикл
  *   роуминга и не бывает владельцем подменю даже при непустом `submenuAction`.
  *   Без поля пункт доступен. Исключение уходит наружу, как из `action`.
- * @property {(event: Event) => void} [handoffAction] отдача управления другому
+ * @property {(event: Event, handoff: import('./MyContext.js').SubmenuHandoff) => void} [handoffAction] отдача управления другому
  *   меню. Зовётся по наведению с задержкой, по нажатию — без неё — и по `Enter`
  *   или `Space`, а затем меню уходит с экрана. Событие активации достаётся как
  *   есть: по наведению это `pointerenter`, по нажатию `pointerdown`, с клавиатуры
- *   `keydown`, — и что с ним делать, решает автор. Владельцем подменю пункт при
- *   этом не становится: подменю у него нет, и раскрывать нечего.
+ *   `keydown`, — и что с ним делать, решает автор. Вторым аргументом приходит
+ *   описание живого жеста: `held` значит, что кнопка зажата прямо сейчас, `button`
+ *   называет её, а `button: null` значит «кнопка не названа». Это ровно то, что
+ *   ждёт третьим аргументом `openSubmenu(x, y, handoff)` чужое меню, поэтому
+ *   передача выглядит как `radial.openSubmenu(event.clientX, event.clientY, handoff)`.
+ *   Действие, объявленное с одним параметром, продолжает работать. Владельцем
+ *   подменю пункт при этом не становится: подменю у него нет, и раскрывать нечего.
  * @property {(event: MouseEvent | KeyboardEvent) => void} [action] вызывается по
  *   внутреннему ключу пункта, а не хранится на узле.
  * @property {number} [version] метка состава, `0` по умолчанию. Входит в отпечаток
@@ -148,7 +153,7 @@ import { renderIcon } from './icons.js';
  *   `handoffAction`. Владельцем при этом он не является: подменю у него нет, и
  *   `aria-owns` ему некуда указывать. Признак нужен отдельно от `hasSubmenu`
  *   именно поэтому — владелец раскрывает уровень сам, а отдающий уходит наружу.
- * @property {((event: Event) => void) | null} handoff действие отдачи, взятое на
+ * @property {((event: Event, handoff: import('./MyContext.js').SubmenuHandoff) => void) | null} handoff действие отдачи, взятое на
  *   этом показе; `null` у всех, кто не отдаёт.
  * @property {string | null} key внутренний ключ пункта; у разделителя `null`.
  * @property {string | null} submenuId `id`, зарезервированный под подменю этого
@@ -473,7 +478,7 @@ function isSubmenuOwner(enabled, submenuItems) {
  * не здесь, а в органе показа, где у каждого своё тело.
  *
  * @param {boolean} enabled ответ `isEnabledOf` этому же пункту.
- * @param {((event: Event) => void) | null} handoff действие отдачи пункта.
+ * @param {((event: Event, handoff: import('./MyContext.js').SubmenuHandoff) => void) | null} handoff действие отдачи пункта.
  * @returns {boolean}
  */
 function handsOffOwner(enabled, handoff) {
@@ -502,7 +507,7 @@ function handsOffOwner(enabled, handoff) {
  * @property {boolean} handsOff отдаёт ли пункт управление наружу. **Решение**
  *   принимает `handsOffOwner` по той же причине, что `hasSubmenu` — про отключённый
  *   пункт должно быть известно и здесь, а разошлись бы ответы так же.
- * @property {((event: Event) => void) | null} handoff действие отдачи этого показа.
+ * @property {((event: Event, handoff: import('./MyContext.js').SubmenuHandoff) => void) | null} handoff действие отдачи этого показа.
  */
 
 /**

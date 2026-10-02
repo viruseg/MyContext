@@ -25,6 +25,8 @@ import { OPEN_GRACE_MS } from '../../src/constants.js';
  *   `null` если событие координат не несло.
  * @property {number} button кнопка события, `0` у наведения.
  * @property {boolean} menuOpen был ли этот экземпляр открыт на момент вызова.
+ * @property {GestureView | null} gesture описание живого жеста вторым аргументом;
+ *   `null`, если действие объявлено с одним параметром и второго не читает.
  */
 
 const STYLESHEET_PATH = '/styles/mycontext.css';
@@ -83,9 +85,10 @@ test.beforeEach(async ({ page }) => {
      *
      * @param {'hover' | 'press' | 'release'} how
      * @param {PointerEvent | MouseEvent | KeyboardEvent | null} event
+     * @param {GestureView | undefined} gesture
      * @returns {void}
      */
-    function handoff(how, event) {
+    function handoff(how, event, gesture) {
       // Событие активации может не нести ни координат, ни кнопки — на наведении их
       // нет, — и тогда оба поля становятся пустыми, а не выдуманными.
       const pointer = event !== null && 'clientX' in event ? event : null;
@@ -94,6 +97,7 @@ test.beforeEach(async ({ page }) => {
         point: pointer === null ? null : { x: pointer.clientX, y: pointer.clientY },
         button: event !== null && 'button' in event ? event.button : 0,
         menuOpen: document.querySelectorAll('.vc-menu:popover-open').length > 0,
+        gesture: gesture === undefined ? null : { button: gesture.button, held: gesture.held },
       });
       if (handoffThrows) {
         throw new Error('хендофф автора упал');
@@ -110,9 +114,12 @@ test.beforeEach(async ({ page }) => {
       /** @type {Record<string, unknown>} */
       const built = { labelAction: () => label };
       if (givesAway) {
-        built.handoffAction = (/** @type {PointerEvent} */ event) => handoff('hover', event);
+        built.handoffAction = (
+          /** @type {PointerEvent} */ event,
+          /** @type {GestureView} */ gesture,
+        ) => handoff('hover', event, gesture);
       } else {
-        built.action = () => handoffs.push({ how: 'release', point: null, button: 0, menuOpen: false });
+        built.action = () => handoffs.push({ how: 'release', point: null, button: 0, menuOpen: false, gesture: null });
       }
       if (!enabled) {
         built.isEnabledAction = () => false;
@@ -139,7 +146,7 @@ test.beforeEach(async ({ page }) => {
             item('Отключённый отдающий', true, false),
             {
               labelAction: () => 'Ветка',
-              action: () => handoffs.push({ how: 'release', point: null, button: 0, menuOpen: false }),
+              action: () => handoffs.push({ how: 'release', point: null, button: 0, menuOpen: false, gesture: null }),
               submenuAction: () => [item('Лист')],
             },
           ]),
@@ -191,11 +198,18 @@ test.beforeEach(async ({ page }) => {
  */
 
 /**
+ * @typedef {object} GestureView
+ * @property {'left' | 'middle' | 'right' | 'back' | 'forward' | null} button
+ * @property {boolean} held
+ */
+
+/**
  * @typedef {object} HandoffCallView
  * @property {'hover' | 'press' | 'release'} how
  * @property {{ x: number, y: number } | null} point
  * @property {number} button
  * @property {boolean} menuOpen
+ * @property {GestureView | null} gesture
  */
 
 /**
@@ -431,6 +445,98 @@ test.describe('пункт с handoffAction', () => {
     const after = await readMenu(page);
     expect(after.handoffs.length, 'хендофф позвали').toBe(1);
     expect(after.openCount, 'меню ушло').toBe(0);
+  });
+
+  test.describe('описание жеста вторым аргументом', () => {
+    // Второй аргумент `handoffAction` — ровно то, что Pielet ждёт третьим
+    // аргументом `openSubmenu`. Смысл в том, чтобы автору не пришлось знать, чем
+    // именно мы вооружены: он передаёт описание дальше, а ребёнок решает сам.
+
+    test('в удержании приходит живой жест с кнопкой', async ({ page }) => {
+      // На удержании жест вооружён, и отдать его некому: без второго аргумента
+      // Pielet не узнал бы, какую кнопку ему передавать, и закрылся бы прессой
+      // по своей конфигурации вместо отпускания.
+      await makeMenu(page, { pressAndHold: 'left', attach: false });
+      await openHeld(page);
+
+      const target = await centerOfItem(page, 'Отдать');
+      await page.mouse.move(target.x, target.y);
+      await page.waitForTimeout(OPEN_GRACE_MS + 100);
+
+      const during = await readMenu(page);
+      expect(during.handoffs.length, 'хендофф позвали').toBe(1);
+      expect(during.handoffs[0].gesture, 'жест назван').toEqual({ button: 'left', held: true });
+    });
+
+    test('внешнее вооружение при "any" приходит безымянным', async ({ page }) => {
+      // Пресета «любая кнопка» имя не называет, и handoff честно сообщает об этом
+      // `button: null`: ребёнку этого достаточно, чтобы принять отпускание любой
+      // кнопки, и выдумывать имя здесь нечего.
+      //
+      // Вооружение именно внешнее (`open(..., { armed: true })`), а не нажатием по
+      // якорю: при нажатии кнопка известна — та, которой жали, — и безымянным
+      // описание было бы только при `openAsSubmenu`/`openSubmenu` от Pielet.
+      await makeMenu(page, { pressAndHold: 'any', attach: false });
+      await openHeld(page);
+
+      const target = await centerOfItem(page, 'Отдать');
+      await page.mouse.move(target.x, target.y);
+      await page.waitForTimeout(OPEN_GRACE_MS + 100);
+
+      const during = await readMenu(page);
+      expect(during.handoffs.length, 'хендофф позвали').toBe(1);
+      expect(during.handoffs[0].gesture, 'кнопка не названа').toEqual({ button: null, held: true });
+    });
+
+    test('нажатие по якорю при "any" называет ту кнопку, которой жали', async ({ page }) => {
+      // Обратная сторона предыдущего: вооружение изнутри знает кнопку нажатия, и
+      // называть её «не названной» значило бы выдумать неопределённость там, где её
+      // нет. Ребёнку с именем работать проще, чем с безымянным.
+      await makeMenu(page, { pressAndHold: 'any', attach: true });
+      await page.mouse.move(PRESS_POINT.x, PRESS_POINT.y);
+      await page.mouse.down({ button: 'right' });
+      expect((await readMenu(page)).openCount, 'меню показано нажатием').toBe(1);
+
+      const target = await centerOfItem(page, 'Отдать');
+      await page.mouse.move(target.x, target.y);
+      await page.waitForTimeout(OPEN_GRACE_MS + 100);
+
+      const during = await readMenu(page);
+      expect(during.handoffs.length, 'хендофф позвали').toBe(1);
+      expect(during.handoffs[0].gesture, 'кнопка нажатия названа').toEqual({ button: 'right', held: true });
+      await page.mouse.up({ button: 'right' });
+    });
+
+    test('вне удержания по клику приходит held: false', async ({ page }) => {
+      // Меню без пресета удержания живёт по клику, и живого жеста у него нет.
+      // Сообщить `held: true` значило бы вооружить ребёнка отпусканием, которого не
+      // будет, и оставить его висеть. Кнопка при этом доезжает справочно: на показ
+      // ребёнка она не влияет, но автору в логе полезно знать, чем активирован.
+      await makeMenu(page, { pressAndHold: 'none', attach: true });
+      await page.mouse.click(PRESS_POINT.x, PRESS_POINT.y, { button: 'right' });
+
+      const target = await centerOfItem(page, 'Отдать');
+      await page.mouse.click(target.x, target.y);
+
+      const after = await readMenu(page);
+      expect(after.handoffs.length, 'хендофф позвали').toBe(1);
+      expect(after.handoffs[0].gesture, 'жеста нет, кнопка справочная').toEqual({ button: 'left', held: false });
+    });
+
+    test('по клавиатуре приходит held: false и button: null', async ({ page }) => {
+      // У `keydown` нет ни кнопки, ни координат. Выдумывать их нечем, и ребёнку
+      // по клавиатуре открывать нечего: отсюда и живого жеста, и названной кнопки.
+      await makeMenu(page, { pressAndHold: 'none', attach: true });
+      await page.mouse.click(PRESS_POINT.x, PRESS_POINT.y, { button: 'right' });
+
+      await page.keyboard.press('ArrowDown');
+      await page.keyboard.press('ArrowDown');
+      await page.keyboard.press('Enter');
+
+      const after = await readMenu(page);
+      expect(after.handoffs.length, 'хендофф позвали').toBe(1);
+      expect(after.handoffs[0].gesture, 'ни кнопки, ни жеста').toEqual({ button: null, held: false });
+    });
   });
 
   test('исключение хендоффа не оставляет меню висеть', async ({ page }) => {
