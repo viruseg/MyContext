@@ -271,6 +271,47 @@ test.describe('openAsSubmenu', () => {
     expect(after.errors, 'ошибок страницы нет').toEqual([]);
   });
 
+  test('"any": отпускание любой кнопки закрывает и исполняет действие', async ({ page }) => {
+    // Регрессия: pressButtonOf отдаёт `null` и для 'any', и для 'none', а
+    // `#armExternalPress` выходил по `null` до всякой работы. При 'none' это было
+    // законно — там выход верный, и `#assertOpenOptions` отвергает такой `armed`
+    // раньше. При 'any' выход был ошибкой: меню открывалось и не закрывалось ничем.
+    //
+    // Отпускание идёт по пункту намеренно. В пустоте страницы закрыло бы правило
+    // `dismissible`, и кейс прошёл бы на чужем механизме, не проверив вооружение.
+    await makeMenu(page, { pressAndHold: 'any', attach: false });
+    await page.mouse.move(PRESS_POINT.x, PRESS_POINT.y);
+    await page.mouse.down({ button: 'right' });
+    await openAsSubmenu(page, PRESS_POINT);
+    expect((await readMenu(page)).openCount, 'меню показано').toBe(1);
+
+    const target = await centerOfItem(page, 'Первый');
+    await page.mouse.move(target.x, target.y);
+    await page.mouse.up({ button: 'right' });
+
+    const after = await readMenu(page);
+    expect(after.calls, 'действие пункта исполнилось').toEqual(['Первый']);
+    expect(after.openCount, 'меню закрыто').toBe(0);
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
+  });
+
+  test('"any": средняя кнопка — тоже любая', async ({ page }) => {
+    // 'any' обещает любую кнопку, а не «любую из левой и правой»: средняя тоже
+    // держит жест, иначе слово «любая» было бы правдой лишь наполовину.
+    await makeMenu(page, { pressAndHold: 'any', attach: false });
+    await page.mouse.move(PRESS_POINT.x, PRESS_POINT.y);
+    await page.mouse.down({ button: 'middle' });
+    await openAsSubmenu(page, PRESS_POINT);
+
+    const target = await centerOfItem(page, 'Первый');
+    await page.mouse.move(target.x, target.y);
+    await page.mouse.up({ button: 'middle' });
+
+    const after = await readMenu(page);
+    expect(after.calls, 'действие пункта исполнилось').toEqual(['Первый']);
+    expect(after.openCount, 'меню закрыто').toBe(0);
+  });
+
   test('без удержания отклоняется', async ({ page }) => {
     // `armed` при `pressAndHold: 'none'` не имеет прочтения: закрывать меню будет
     // нечем, а молча не вооружённый жест оставил бы его висеть.
