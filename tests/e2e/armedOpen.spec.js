@@ -96,7 +96,10 @@ test.beforeEach(async ({ page }) => {
               submenuAction: () => [item('Лист')],
             },
           ],
-          { pressAndHold: /** @type {PressAndHoldMode} */ (input.pressAndHold) },
+          {
+            pressAndHold: /** @type {PressAndHoldMode} */ (input.pressAndHold),
+            destroyOnClose: input.destroyOnClose === true,
+          },
         );
         if (input.attach) {
           const surface = document.getElementById('surface');
@@ -124,6 +127,16 @@ test.beforeEach(async ({ page }) => {
         }
         menu.openAsSubmenu(point.x, point.y);
       },
+      /**
+       * @param {{ x: number, y: number }} point
+       * @param {SubmenuHandoff | undefined} handoff
+       */
+      openSubmenu(point, handoff) {
+        if (menu === null) {
+          throw new Error('меню не создано');
+        }
+        menu.openSubmenu(point.x, point.y, handoff);
+      },
       read() {
         return {
           openCount: document.querySelectorAll('.vc-menu:popover-open').length,
@@ -139,6 +152,22 @@ test.beforeEach(async ({ page }) => {
  * @typedef {object} ArmedInput
  * @property {string} pressAndHold
  * @property {boolean} attach
+ * @property {boolean} [destroyOnClose]
+ */
+
+/**
+ * @typedef {object} Point
+ * @property {number} x
+ * @property {number} y
+ */
+
+/**
+ * Описание жеста, каким нас открывают как сабменю. Имена кнопок пишутся прямо в
+ * объединении, а не ссылкой на тип пакета: контракт принадлежит обоим проектам,
+ * и тест не должен зависеть от того, объявлен ли тип в Pielet.
+ * @typedef {object} SubmenuHandoff
+ * @property {'left' | 'middle' | 'right' | 'back' | 'forward' | null} button
+ * @property {boolean} held
  */
 
 /**
@@ -146,6 +175,7 @@ test.beforeEach(async ({ page }) => {
  * @property {(input: ArmedInput) => void} make
  * @property {(point: { x: number, y: number }, armed?: boolean) => void} open
  * @property {(point: { x: number, y: number }) => void} openAsSubmenu
+ * @property {(point: { x: number, y: number }, handoff?: SubmenuHandoff) => void} openSubmenu
  * @property {() => ArmedSnapshot} read
  */
 
@@ -210,6 +240,214 @@ function openAsSubmenu(page, point) {
     scope.__armed.openAsSubmenu(anchor);
   }, point);
 }
+
+/**
+ * @param {import('@playwright/test').Page} page
+ * @param {{ x: number, y: number }} point
+ * @param {SubmenuHandoff | undefined} handoff
+ * @returns {Promise<void>}
+ */
+function openSubmenu(page, point, handoff) {
+  return page.evaluate(
+    /** @param {[Point, SubmenuHandoff | undefined]} args */
+    ([anchor, gesture]) => {
+      const scope = /** @type {{ __armed: ArmedProbe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__armed.openSubmenu(anchor, gesture);
+    },
+    /** @type {[Point, SubmenuHandoff | undefined]} */ ([point, handoff]),
+  );
+}
+
+test.describe('openSubmenu', () => {
+  // Приём контракта openSubmenu(x, y, handoff). Третий аргумент описывает живой
+  // жест: `held` решает, вооружать ли показ, `button` сужает, чьё отпускание его
+  // закончит. Кнопка пресета и кнопка, которой нас открыли, — разные вещи, и
+  // совпадать им не обязано.
+
+  test('held: true вооружает на переданную кнопку, а не на пресет', async ({ page }) => {
+    // Пресет называет left, а пришла передача с right: жест обязан принадлежать
+    // правой кнопке, иначе отпускание, которым меню открыли, его бы не закрыло.
+    // Отпускания идут по пункту — в пустоте закрыло бы правило dismissible, и кейс
+    // прошёл бы на чужом механизме.
+    await makeMenu(page, { pressAndHold: 'left', attach: false });
+    await page.mouse.move(PRESS_POINT.x, PRESS_POINT.y);
+    await page.mouse.down({ button: 'right' });
+    await openSubmenu(page, PRESS_POINT, { button: 'right', held: true });
+    expect((await readMenu(page)).openCount, 'меню показано').toBe(1);
+
+    const target = await centerOfItem(page, 'Первый');
+    await page.mouse.move(target.x, target.y);
+    await page.mouse.up({ button: 'left' });
+    const mid = await readMenu(page);
+    expect(mid.calls, 'чужое отпускание ничего не исполнило').toEqual([]);
+    expect(mid.openCount, 'чужое отпускание не закрыло').toBe(1);
+
+    await page.mouse.up({ button: 'right' });
+    const after = await readMenu(page);
+    expect(after.calls, 'действие пункта исполнилось').toEqual(['Первый']);
+    expect(after.openCount, 'переданное отпускание закрыло').toBe(0);
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
+  });
+
+  test('held: true с button: null — вооружает на любую кнопку', async ({ page }) => {
+    // Пресета «любая кнопка» нет, но контракт таким значением пользуется: так
+    // приходит handoff от меню с pressAndHold: 'any'.
+    await makeMenu(page, { pressAndHold: 'left', attach: false });
+    await page.mouse.down({ button: 'right' });
+    await openSubmenu(page, PRESS_POINT, { button: null, held: true });
+
+    const target = await centerOfItem(page, 'Первый');
+    await page.mouse.move(target.x, target.y);
+    await page.mouse.up({ button: 'right' });
+
+    const after = await readMenu(page);
+    expect(after.calls, 'любая кнопка закрыла и исполнила').toEqual(['Первый']);
+    expect(after.openCount, 'меню закрыто').toBe(0);
+  });
+
+  test('кнопка контракта не обязана быть в лексиконе пресета', async ({ page }) => {
+    // Пресет называет только left/right/middle, а контракт допускает ещё
+    // back/forward — их знает и Pielet, и отдаёт нам.
+    //
+    // Отпускание синтетическое: Playwright умеет нажимать только три кнопки, а
+    // суть кейса в коде 3, который не входит ни в один пресет. Живость жеста здесь
+    // и не нужна — вооружение снаружи существует как раз для того, чтобы кнопку
+    // держал вызывающий код.
+    await makeMenu(page, { pressAndHold: 'left', attach: false });
+    await openSubmenu(page, PRESS_POINT, { button: 'back', held: true });
+
+    const result = await page.evaluate(() => {
+      const items = document.querySelectorAll('.vc-item');
+      const target = items[0];
+      if (!(target instanceof HTMLElement)) {
+        return { calls: -1 };
+      }
+      const rect = target.getBoundingClientRect();
+      const options = {
+        bubbles: true,
+        cancelable: true,
+        button: 3,
+        clientX: rect.left + rect.width / 2,
+        clientY: rect.top + rect.height / 2,
+      };
+      // Нажатия не было — только отпускание, ровно как при `armed`.
+      target.dispatchEvent(new PointerEvent('pointerup', options));
+      return {
+        calls: document.querySelectorAll('.vc-menu:popover-open').length,
+      };
+    });
+    expect(result.calls, 'меню закрыто отпусканием back').toBe(0);
+    expect((await readMenu(page)).calls, 'действие пункта исполнилось').toEqual(['Первый']);
+  });
+
+  for (const [label, gesture] of /** @type {const} */ ([
+    ['без handoff', undefined],
+    ['held: false', { button: /** @type {'left'} */ ('left'), held: false }],
+  ])) {
+    test(`${label} — показа без жеста: кнопку держать некому`, async ({ page }) => {
+      // Показ без жеста живёт по своим правилам, и первое из них — «клик вне меню»
+      // от dismissible: пресса по странице уводит его сразу. Донести кнопку до
+      // пункта, не нажав по меню, не выходит ровно потому, что жеста нет. С
+      // `held: true` меню переживает прессу и достаёт до пункта отпусканием.
+      await makeMenu(page, { pressAndHold: 'left', attach: false });
+      await openSubmenu(page, PRESS_POINT, /** @type {SubmenuHandoff | undefined} */ (gesture));
+      expect((await readMenu(page)).openCount, 'меню показано').toBe(1);
+
+      await page.mouse.down({ button: 'left' });
+      await page.waitForFunction(() => {
+        return document.querySelectorAll('.vc-menu:popover-open').length === 0;
+      });
+      await page.mouse.up({ button: 'left' });
+
+      const after = await readMenu(page);
+      expect(after.calls, 'действие не исполнилось').toEqual([]);
+      expect(after.openCount, 'меню ушло с прессой').toBe(0);
+    });
+  }
+
+  test('показ без жеста всё равно поднимает правила закрытия', async ({ page }) => {
+    // Вторая половина пресета: непривязанный экземпляр без dismissible не закрылся
+    // бы ничем, и прокрутка или resize оставили бы его висеть поверх кольца,
+    // которое его же и закрывает.
+    await makeMenu(page, { pressAndHold: 'left', attach: false });
+    await openSubmenu(page, PRESS_POINT, undefined);
+    expect((await readMenu(page)).openCount, 'меню показано').toBe(1);
+
+    await page.setViewportSize({ width: VIEWPORT.width, height: VIEWPORT.height + 1 });
+    await page.waitForFunction(() => {
+      return document.querySelectorAll('.vc-menu:popover-open').length === 0;
+    });
+    expect((await readMenu(page)).openCount, 'resize закрыл показанное').toBe(0);
+  });
+
+  test('без удержания отклоняется', async ({ page }) => {
+    // Меню с pressAndHold: 'none' живёт по правому клику; показать его зажатой
+    // кнопкой нечем, а закрывать будет нечем. Молчаливый показ без жеста выдал бы
+    // handoff за принятый.
+    await makeMenu(page, { pressAndHold: 'none', attach: false });
+    const outcome = await page.evaluate(() => {
+      const scope = /** @type {{ __armed: ArmedProbe }} */ (/** @type {unknown} */ (globalThis));
+      try {
+        scope.__armed.openSubmenu({ x: 260, y: 120 }, { button: 'left', held: true });
+        return { threw: false, message: '' };
+      } catch (error) {
+        return { threw: true, message: error instanceof Error ? error.message : String(error) };
+      }
+    });
+    expect(outcome.threw, 'openSubmenu бросил ошибку').toBe(true);
+    expect(outcome.message).toContain('pressAndHold');
+    expect((await readMenu(page)).openCount, 'меню не показано').toBe(0);
+  });
+
+  test('форма handoff проверяется', async ({ page }) => {
+    // Проверяется по форме, а не по смыслу: негодное значение молча превратилось
+    // бы в показ без жеста, и меню открылось бы, но его отпускание закрывать
+    // ничего не стало бы.
+    await makeMenu(page, { pressAndHold: 'left', attach: false });
+    const messages = await page.evaluate(() => {
+      const scope = /** @type {{ __armed: ArmedProbe }} */ (/** @type {unknown} */ (globalThis));
+      /** @param {() => void} fn */
+      const message = (fn) => {
+        try {
+          fn();
+          return '';
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      };
+      const at = { x: 1, y: 1 };
+      return [
+        message(() => scope.__armed.openSubmenu(at, /** @type {never} */ (null))),
+        message(() => scope.__armed.openSubmenu(at, /** @type {never} */ ({}))),
+        message(() => scope.__armed.openSubmenu(at, /** @type {never} */ ({ button: 'left', held: 'yes' }))),
+        message(() => scope.__armed.openSubmenu(at, /** @type {never} */ ({ button: 'extra', held: true }))),
+      ];
+    });
+    expect(messages[0], 'null — не объект').toContain('handoff');
+    expect(messages[1], 'нет held').toContain('held');
+    expect(messages[2], 'held не логическое').toContain('held');
+    expect(messages[3], 'неизвестная кнопка').toContain('button');
+    expect((await readMenu(page)).openCount, 'ни один вызов не показал меню').toBe(0);
+  });
+
+  test('destroyOnClose: действие получает уже разобранный экземпляр', async ({ page }) => {
+    // Разбор отпускания стирает карту действий и разбирает одноразовый экземпляр,
+    // и потому действие исполняется уже после разбора. На пути контракта это
+    // верно так же, как на пути armed, и автору это тоже достаётся.
+    await makeMenu(page, { pressAndHold: 'left', attach: false, destroyOnClose: true });
+    await page.mouse.down({ button: 'left' });
+    await openSubmenu(page, PRESS_POINT, { button: 'left', held: true });
+
+    const target = await centerOfItem(page, 'Первый');
+    await page.mouse.move(target.x, target.y);
+    await page.mouse.up({ button: 'left' });
+
+    const after = await readMenu(page);
+    expect(after.calls, 'действие исполнилось').toEqual(['Первый']);
+    expect(after.openCount, 'меню закрыто и разобрано').toBe(0);
+    expect(after.errors, 'действие не звало разобранный экземпляр').toEqual([]);
+  });
+});
 
 test.describe('openAsSubmenu', () => {
   // Метод — пресет для чужого меню: `armed` плюс `dismissible`, и обе опции должны
@@ -326,7 +564,7 @@ test.describe('openAsSubmenu', () => {
       }
     });
     expect(outcome.threw, 'openAsSubmenu бросил ошибку').toBe(true);
-    expect(outcome.message).toContain('armed');
+    expect(outcome.message).toContain('pressAndHold');
   });
 });
 
