@@ -204,6 +204,32 @@ function readMenu(page) {
 }
 
 /**
+ * Меняет размер вьюпорта и дожидается, пока браузер **доставит** `resize`.
+ *
+ * `setViewportSize` возвращается сразу, а событие браузер отдаёт отдельной задачей.
+ * Пока оно не дошло, страница жива по-старому: меню, показанное сразу после смены
+ * размера, оказывается перед лицом `resize`, который гасит его как положено, и
+ * геометрия читается уже у гаснущего уровня — с незавершённым `@starting-style`
+ * вместо посчитанных координат. Ожидание не «пауза на всякий случай», а условие:
+ * событие пришло.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {{ width: number, height: number }} size
+ * @returns {Promise<void>}
+ */
+async function resizeViewport(page, size) {
+  const delivered = page.evaluate(() => {
+    return new Promise((resolve) => {
+      globalThis.addEventListener('resize', () => {
+        resolve(undefined);
+      }, { once: true });
+    });
+  });
+  await page.setViewportSize(size);
+  await delivered;
+}
+
+/**
  * @param {import('@playwright/test').Page} page
  * @param {{ x: number, y: number }} point
  * @returns {Promise<void>}
@@ -623,8 +649,10 @@ test.describe('приёмка по критериям готовности', () 
   test('критерий 2: меню не выходит за границы вьюпорта ни в одной точке сетки', async ({ page }) => {
     // Размер вьюпорта меняется до создания меню намеренно: `resize` — один из
     // глобальных событий закрытия, и смена размера после `attach` прогнала бы
-    // закрытие по ещё не открытому меню.
-    await page.setViewportSize(VIEWPORT);
+    // закрытие по ещё не открытому меню. Одного порядка мало: событие доставляется
+    // отдельной задачей и без `resizeViewport` приходило бы уже после показа, то
+    // есть закрывало бы открытое меню и ломало замер на каждой точке сетки.
+    await resizeViewport(page, VIEWPORT);
     await makeMenu(page, 'grid');
 
     // Контроль до обхода: положение меню обязано зависеть от точки вызова. Иначе
