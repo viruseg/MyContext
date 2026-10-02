@@ -141,7 +141,8 @@ test.beforeEach(async ({ page }) => {
         made.push(new MyContext(items(), {
           label: 'Меню',
           animationDuration: input.animationDuration,
-          autoHideDistance: 0,
+          autoHideDistance: input.autoHideDistance ?? 0,
+          pressAndHold: input.pressAndHold,
           destroyOnClose: input.destroyOnClose === true,
         }));
         if (input.attach === true) {
@@ -269,6 +270,9 @@ test.beforeEach(async ({ page }) => {
  * @property {boolean} [attach] привязать ли контейнер сразу при создании.
  * @property {boolean} [destroyOnClose] разбирать ли экземпляр при закрытии.
  * @property {number} [animationDuration] длительность входа и выхода, мс.
+ * @property {number} [autoHideDistance] порог автоскрытия, `0` — выключено.
+ * @property {import('../../src/constants.js').PressAndHoldMode} [pressAndHold] чем
+ *   открывается и когда закрывается меню; по умолчанию `'none'`.
  */
 
 /**
@@ -665,6 +669,48 @@ test.describe('опция destroyOnClose', () => {
       threw: true,
       message: DESTROYED_MESSAGE,
     });
+  });
+
+  test('автоскрытие разбирает одноразовый экземпляр', async ({ page }) => {
+    // Правило автоскрытия закрывает по движению курсора, и закрытие это то же
+    // тело, что у клика вне: разбор наступает и здесь. Проверяется потому, что
+    // автоскрытие — единственное правило, которое работает у непривязанного
+    // экземпляра лишь с `dismissible`, то есть самый короткий путь до разбора.
+    await makeMenu(page, { destroyOnClose: true, autoHideDistance: 200 });
+    await openMenu(page, SHOW_POINT, true);
+    expect((await readMenu(page)).openCount, 'меню показано').toBe(1);
+
+    await page.mouse.move(OUTSIDE_POINT.x, OUTSIDE_POINT.y);
+    await waitLevelsGone(page);
+
+    expect((await readMenu(page)).menuCount, 'уровни убраны').toBe(0);
+    expect(await tryOpenMenu(page), 'экземпляр разобран').toEqual({
+      threw: true,
+      message: DESTROYED_MESSAGE,
+    });
+    expect((await readMenu(page)).errors, 'ошибок страницы нет').toEqual([]);
+  });
+
+  test('удержание закрывает одноразовый экземпляр', async ({ page }) => {
+    // `pressAndHold` отвечает за то, чем закрывается меню, и разбор должен
+    // наступать на этом пути тоже: показ и отпускание — два разных события, и
+    // второе приходит из глобальной подписки, которую `attach()` держит между
+    // показами. Если бы разбор её не снял, отпускание после закрытия легло бы на
+    // уничтоженный экземпляр.
+    await makeMenu(page, { destroyOnClose: true, attach: true, pressAndHold: 'right' });
+    await page.mouse.move(SHOW_POINT.x, SHOW_POINT.y);
+    await page.mouse.down({ button: 'right' });
+    expect((await readMenu(page)).openCount, 'нажатие показало меню').toBe(1);
+
+    await page.mouse.up({ button: 'right' });
+    await waitLevelsGone(page);
+
+    expect((await readMenu(page)).menuCount, 'уровни убраны').toBe(0);
+    expect(await tryOpenMenu(page), 'экземпляр разобран').toEqual({
+      threw: true,
+      message: DESTROYED_MESSAGE,
+    });
+    expect((await readMenu(page)).errors, 'ошибок страницы нет').toEqual([]);
   });
 
   test('без опции закрытый экземпляр жив, а его уровень остаётся на странице', async ({ page }) => {
