@@ -1,4 +1,4 @@
-import { createReadStream, statSync } from 'node:fs';
+import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, resolve, sep } from 'node:path';
 
@@ -24,6 +24,22 @@ const MIME_TYPES = {
 };
 
 /**
+ * Соседний чекаут `Pielet` — второй корень раздачи под префиксом `/pielet/`.
+ *
+ * Нужен сквозным тестам контракта: единственная проверка «Pielet в режиме
+ * удержания открывает MyContext в режиме удержания» требует оба пакета в одном
+ * браузере, а зависимостью `Pielet` быть не может — пакеты независимы, и
+ * добавление одной в `dependencies` второго связало бы их навсегда.
+ *
+ * Ветка включается **только если рядом есть чекаут**. Без него `/pielet/...`
+ * отдаёт 404, а сквозной тест честно пропускается, так что в CI с одним
+ * репозиторием ничего не ломается.
+ */
+const SIBLING = resolve(ROOT, '..', 'Pielet');
+const SIBLING_PREFIX = '/pielet/';
+const SIBLING_MOUNTED = existsSync(resolve(SIBLING, 'src', 'index.js'));
+
+/**
  * Преобразует URL запроса в путь внутри репозитория.
  * Возвращает `null`, если путь выходит за пределы корня или URL не разбирается.
  *
@@ -38,9 +54,28 @@ function resolveFilePath(url) {
   } catch {
     return null;
   }
+  if (SIBLING_MOUNTED && pathname.startsWith(SIBLING_PREFIX)) {
+    return resolveSibling(pathname.slice(SIBLING_PREFIX.length));
+  }
   const relative = pathname.endsWith('/') ? `${pathname}index.html` : pathname;
   const filePath = resolve(join(ROOT, relative));
   if (filePath !== ROOT && !filePath.startsWith(ROOT + sep)) return null;
+  return filePath;
+}
+
+/**
+ * Путь внутри соседнего чекаута либо `null`, если он оттуда вышел.
+ *
+ * Проверка та же, что у своего корня: второй корень не должен стать путём на
+ * весь диск.
+ *
+ * @param {string} pathname путь после префикса `/pielet/`.
+ * @returns {string | null}
+ */
+function resolveSibling(pathname) {
+  const relative = pathname.endsWith('/') ? `${pathname}index.html` : pathname;
+  const filePath = resolve(join(SIBLING, relative));
+  if (filePath !== SIBLING && !filePath.startsWith(SIBLING + sep)) return null;
   return filePath;
 }
 
