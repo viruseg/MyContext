@@ -909,6 +909,24 @@ export class MyContext extends EventTarget {
   #destroyed = false;
 
   /**
+   * Идёт рассылка события `error`: признак держит разбор от реентрантности, когда
+   * подписчик `error` сам возвращает отклонённый промис. Подробности — у
+   * {@link MyContext.#reportFailure}.
+   *
+   * @type {boolean}
+   */
+  #reportingFailure = false;
+
+  /**
+   * Обёртки подписчиков, поднятых изнутри: `removeEventListener` обязан снимать
+   * подписку по исходной ссылке, а подписана обёртка. Ключ — функция-подписчик,
+   * значение — обёртка и имя события, под которым она подписана.
+   *
+   * @type {WeakMap<EventListener, Map<string, EventListener>>}
+   */
+  #listenerWrappers = new WeakMap();
+
+  /**
    * Вооружённое удержание: кнопка нажата, меню открыто, и отпускание разрешит этот
    * жест. `null` — либо режим выключен, либо жест уже разрешён, либо меню закрыто
    * раньше, чем кнопку отпустили.
@@ -2058,7 +2076,53 @@ export class MyContext extends EventTarget {
    * @returns {void}
    */
   addEventListener(type, listener, options) {
-    super.addEventListener(type, /** @type {EventListener} */ (/** @type {unknown} */ (listener)), options);
+    super.addEventListener(type, this.#wrapListener(type, listener), options);
+  }
+
+  /**
+   * Поднимает подписчика изнутри, чтобы его отказ стал виден.
+   *
+   * Отклонённый промис из обработчика `open` или `close` иначе пропал бы: браузер
+   * считает обработчик закончившимся, как только тот вернул значение, и никто не
+   * ждёт промис на выходе из него. Обёртка ловит отказ и зовёт `#reportFailure` с
+   * именем подписки вида `` `${type}:listener` `` — по нему автор видит, что отказ
+   * пришёл из его подписчика, а не из действия меню.
+   *
+   * Обёртка кладётся в `#listenerWrappers` под ключом подписчика, и `removeEventListener`
+   * достаёт её же: подписка должна сниматься по исходной ссылке, а подписана обёртка.
+   * Подписчик, подписанный дважды на одно событие, получает одну обёртку — вторая
+   * подписка отбрасывается платформой по той же ссылке, что и до обёртки.
+   *
+   * @param {string} type имя события.
+   * @param {((event: never) => void) | EventListenerOrEventListenerObject | null} listener
+   *   подписчик автора. Не функцию оборачивать нечего, и такой подпиской
+   *   управляет платформа: её снятие идёт по исходной ссылке и ничего не теряет.
+   * @returns {EventListener | EventListenerOrEventListenerObject | null}
+   */
+  #wrapListener(type, listener) {
+    if (typeof listener !== 'function') {
+      return /** @type {EventListenerOrEventListenerObject | null} */ (listener);
+    }
+    const source = /** @type {EventListener} */ (/** @type {unknown} */ (listener));
+    const byType = this.#listenerWrappers.get(source);
+    const existing = byType?.get(type);
+    if (existing !== undefined) {
+      return existing;
+    }
+    /** @type {EventListener} */
+    const wrapper = (event) => {
+      // Отказ подписчика ловится здесь же, а не в обработчике браузера: вернувшийся
+      // промис никто не ждёт, и иначе отказ не дошёл бы ни до события `error`, ни до
+      // страницы. Отменённый подписчиком `error` уходит на страницу сам, о чём
+      // сказано у `#reportFailure`.
+      this.#fireAndForget(source(event), `${type}:listener`);
+    };
+    if (byType === undefined) {
+      this.#listenerWrappers.set(source, new Map([[type, wrapper]]));
+    } else {
+      byType.set(type, wrapper);
+    }
+    return wrapper;
   }
 
   /**
@@ -2096,7 +2160,28 @@ export class MyContext extends EventTarget {
    * @returns {void}
    */
   removeEventListener(type, listener, options) {
-    super.removeEventListener(type, /** @type {EventListener} */ (/** @type {unknown} */ (listener)), options);
+    super.removeEventListener(
+      type,
+      typeof listener === 'function'
+        ? this.#unwrapListener(type, /** @type {EventListener} */ (listener))
+        : listener,
+      options,
+    );
+  }
+
+  /**
+   * Возвращает обёртку подписчика, поднятую {@link MyContext#addEventListener}.
+   *
+   * Обёртки нет — когда подписчик не был нашим или уже снят. Тогда снятие идёт по
+   * исходной ссылке и, как и прежде, ничего не делает: подписки не было.
+   *
+   * @param {string} type имя события.
+   * @param {EventListener} listener исходная ссылка подписчика.
+   * @returns {EventListener}
+   */
+  #unwrapListener(type, listener) {
+    const wrapper = this.#listenerWrappers.get(listener)?.get(type);
+    return wrapper ?? listener;
   }
 
   /**
@@ -3461,10 +3546,25 @@ export class MyContext extends EventTarget {
    * @returns {void}
    */
   #reportFailure(reason, source) {
+    // Подписчик `error`, сам вернувший отклонённый промис, привёл бы отказ сюда же и
+    // замкнул петлю. Рассылка помечена признаком, и повторный отказ изнутри неё уходит
+    // на страницу сразу: слать ему то же событие бессмысленно, его подписчик только
+    // что и отказался.
+    if (this.#reportingFailure) {
+      queueMicrotask(() => {
+        throw reason;
+      });
+      return;
+    }
+    this.#reportingFailure = true;
     /** @type {ErrorEventDetail} */
     const detail = { reason, source };
     const event = new CustomEvent('error', { detail, cancelable: true });
-    this.dispatchEvent(event);
+    try {
+      this.dispatchEvent(event);
+    } finally {
+      this.#reportingFailure = false;
+    }
     if (event.defaultPrevented) {
       return;
     }

@@ -62,6 +62,9 @@ import { expect, test } from '@playwright/test';
  * @property {import('../../src/constants.js').PressAndHoldMode} [pressAndHold]
  * @property {'allow' | 'deny' | 'throw'} [armable] ответ предиката
  *   `isArmableAction`: разрешить, отказать или бросить. Без поля предиката нет.
+ * @property {'removed' | 'twice' | 'rejecting'} [listener] подписка на `open`:
+ *   снять её по той же ссылке, подписать одну функцию дважды или вернуть отклонённый
+ *   промис.
  */
 
 /**
@@ -77,6 +80,7 @@ import { expect, test } from '@playwright/test';
  *   `error:…` — непойманная ошибка, `unhandledrejection:…` — отказ промиса.
  * @property {string[]} marks идентификаторы званных действий, по порядку.
  * @property {number} handoffCalls сколько раз звалась отдача.
+ * @property {number} listenerCalls сколько раз зван подписчик `open` из пробы.
  * @property {boolean} childVisible показан ли уровень чужого меню.
  * @property {string | null} childConfig значение `pressAndHold` чужого меню.
  */
@@ -154,6 +158,8 @@ async function setup(page, input = {}) {
     const marks = [];
     let errorPrevented = 0;
     let openCount = 0;
+    /** @type {number} */
+    let listenerCalls = 0;
     let closeCount = 0;
 
     // Настоящая задача, а не микротаска: микротаска не отдаёт управление наружу,
@@ -308,6 +314,7 @@ async function setup(page, input = {}) {
         errorMessages.length = 0;
         errorPrevented = 0;
         openCount = 0;
+        listenerCalls = 0;
         closeCount = 0;
         marks.length = 0;
         escapedBy.length = 0;
@@ -399,6 +406,27 @@ async function setup(page, input = {}) {
             }
           });
         }
+        // Подписка проверяется на ссылку: обёртка изнутри меняет то, чем
+        // `removeEventListener` ищет подписку, и снятие обязано её увидеть.
+        if (setup0.listener === 'removed') {
+          const named = () => {
+            listenerCalls += 1;
+          };
+          live.addEventListener('open', named);
+          live.removeEventListener('open', named);
+        } else if (setup0.listener === 'twice') {
+          const named = () => {
+            listenerCalls += 1;
+          };
+          live.addEventListener('open', named);
+          live.addEventListener('open', named);
+        } else if (setup0.listener === 'rejecting') {
+          live.addEventListener('open', async () => {
+            listenerCalls += 1;
+            await wait(delay);
+            throw new Error(failure);
+          });
+        }
       },
       setItems(specs) {
         // Состав хранится по ссылке, поэтому замена содержимого массива видна
@@ -462,6 +490,7 @@ async function setup(page, input = {}) {
       read() {
         return {
           openCount,
+          listenerCalls,
           closeCount,
           visible: document.querySelectorAll('.vc-menu:popover-open').length > 0,
           labels: Array.from(document.querySelectorAll('.vc-menu:popover-open .vc-label'))
@@ -926,5 +955,36 @@ test.describe('отдача управления', () => {
     await page.mouse.up({ button: 'right' });
     await page.waitForTimeout(80);
     expect((await read(page)).closeCount, 'отказ снял вооружение').toBe(0);
+  });
+});
+
+test.describe('подписки на события', () => {
+  test('removeEventListener снимает подписку, обёрнутую изнутри', async ({ page }) => {
+    await setup(page, { listener: 'removed' });
+    await openMenu(page);
+    const log = await read(page);
+    expect(log.listenerCalls, 'снятый подписчик не звался').toBe(0);
+    expect(log.openCount, 'показ состоялся один раз').toBe(1);
+  });
+
+  test('одна и та же функция, подписанная дважды, не вызывается дважды', async ({ page }) => {
+    await setup(page, { listener: 'twice' });
+    await openMenu(page);
+    const log = await read(page);
+    expect(log.listenerCalls, 'подписчик зван один раз').toBe(1);
+    expect(log.openCount, 'показ состоялся один раз').toBe(1);
+  });
+
+  test('отклонённый промис подписчика open доходит до error ровно один раз', async ({ page }) => {
+    await setup(page, { watch: true, listener: 'rejecting' });
+    await openMenu(page);
+    await expect
+      .poll(async () => {
+        return (await read(page)).errorMessages;
+      }, { message: 'отказ подписчика дошёл до подписчика error' })
+      .toEqual([FAILURE_TEXT]);
+    const log = await read(page);
+    expect(log.errorSources, 'отказ назван подпиской open').toEqual(['open:listener']);
+    expect(log.listenerCalls, 'подписчик зван один раз').toBe(1);
   });
 });
