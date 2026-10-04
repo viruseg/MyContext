@@ -858,6 +858,26 @@ test.describe('глобальные слушатели', () => {
     expect((await readMenu(page)).activeLabels, 'новый уход снова сбросил').toEqual([]);
   });
 
+  test('уход курсора снимает выделение и без привязки', async ({ page }) => {
+    // Привязки нет, а значит нет и глобальных слушателей: экземпляр, показанный из
+    // чужого обработчика, выделение наводит — уровень слушает движение сам, — но
+    // снять его без глобального правила было нечем, и отметка висела бы, пока
+    // курсор не вернётся в меню.
+    await makeMenu(page, 'first', 'chain', null);
+    await openAt(page, 'first', SURFACE_POINT);
+    await hoverItem(page, 'Заметки');
+    const marked = await readMenu(page);
+    expect(marked.activeLabels, 'выделение в меню есть').toEqual(['Заметки']);
+
+    await page.mouse.move(30, 70);
+    const after = await readMenu(page);
+    expect(after.activeLabels, 'выделение снято').toEqual([]);
+    // Меню на месте: снятие выделения и закрытие решают разные задачи, и уход
+    // курсора без привязки не закрывает ничего — глобальных правил у него нет.
+    expect(after.openCount, 'меню осталось открытым').toBe(1);
+    expect(after.errors, 'страница без ошибок').toEqual([]);
+  });
+
   test('Escape на самом контейнере закрывает меню', async ({ page }) => {
     await makeMenu(page, 'first', 'chain', 'surface');
     await openAt(page, 'first', SURFACE_POINT);

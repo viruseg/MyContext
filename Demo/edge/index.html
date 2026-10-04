@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>Стенд: меню из чужого обработчика</title>
+    <!-- Стенд собран из `viewer.html` стороннего проекта: из разметки оставлены
+         только стили библиотеки, стили кнопки и её контейнер. Кнопка приезжает
+         копией, вместе со `SvgHelper`, который она импортирует, — отсюда и
+         вложенный каталог, и дословность копий.
+         Левая кнопка показывает меню вызовом из своего обработчика, правая —
+         тем же вызовом с `dismissible`. Разница в одном аргументе. -->
+    <link rel="stylesheet" href="../../styles/mycontext.css" />
+    <link rel="stylesheet" href="./EdgeMenuButton/EdgeMenuButton.css" />
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: #14161a;
+        color: #e8e9ec;
+        font: 16px/1.5 system-ui, sans-serif;
+      }
+      .stand {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        padding: 24px 24px 24px 120px;
+      }
+      .stand button {
+        padding: 8px 14px;
+        border: 1px solid rgba(255, 255, 255, .22);
+        border-radius: 8px;
+        color: inherit;
+        font: inherit;
+        background: rgba(255, 255, 255, .06);
+        cursor: pointer;
+      }
+      .stand code {
+        color: #9aa0aa;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="stand">
+      <button type="button" id="bare">open({x, y})</button>
+      <button type="button" id="dismissible">open({x, y}, {dismissible: true})</button>
+      <p>
+        Под каждой кнопкой — <code>autoHideDistance: 50</code> без привязки.
+        Увести курсор от показанного меню: левая кнопка оставит и выделение, и
+        меню, правая — закроет.
+      </p>
+    </div>
+    <div id="mainMenuButton"></div>
+    <script type="module" src="./stand.js"></script>
+  </body>
+</html>

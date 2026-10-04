@@ -140,6 +140,24 @@ function openAt(page, point) {
 }
 
 /**
+ * Показ вызовом из чужого обработчика — как показывает кнопка на странице.
+ *
+ * Отдельный помощник, а не `openAt` с другим аргументом: правый клик открывает меню
+ * только по привязанному контейнеру, а кейс про непривязанный экземпляр кликом его
+ * не откроет, и проверял бы не то, что задумано.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {{ x: number, y: number }} point
+ * @returns {Promise<void>}
+ */
+function openFromForeignHandler(page, point) {
+  return page.evaluate((target) => {
+    const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+    return scope.__mc.open(target.x, target.y);
+  }, point);
+}
+
+/**
  * Точка на расстоянии `offset` от уровня в указанную сторону.
  *
  * Сторона задаётся смещением от середины рамки, а не координатой: уход должен
@@ -474,9 +492,9 @@ test.describe('границы правила', () => {
     // что вопрос этот и породил прежнюю безопасную область. Меню открыто в точке
     // вдали от курсора, и первое же движение мыши его убирает.
     //
-    // Привязка есть, и это не украшение: без неё глобальных слушателей на
-    // странице нет вовсе, и не сработало бы ни это правило, ни скролл, ни клик, —
-    // экземпляр без `attach` по договорённости пригоден лишь для `open()`.
+    // Привязка есть, и это не украшение: сама опция поднимает слушатель движения и
+    // без привязки, а скролл, клик и `resize` — нет, и не сработали бы ни они.
+    // Непривязанный экземпляр проверяет отдельный кейс ниже.
     await makeMenu(page, DISTANCE, 'surface');
     const idle = { x: 900, y: 600 };
     await page.mouse.move(idle.x, idle.y);
@@ -509,6 +527,29 @@ test.describe('границы правила', () => {
     const after = await readMenu(page);
     expect(after.openCount, 'по-прежнему закрыто').toBe(0);
     expect(after.errors).toEqual([]);
+  });
+
+  test('порог работает и на непривязанном экземпляре, показанном вызовом', async ({ page }) => {
+    // Привязки нет, а с ней нет и глобальных слушателей: автор, показавший меню из
+    // своего обработчика, задавал порог и получал опцию, которая молча ничего не
+    // делала. Порог — правило про курсор, и поднимать его должен сам.
+    await makeMenu(page, DISTANCE, null);
+    await openFromForeignHandler(page, OPEN_POINT);
+    const before = await readMenu(page);
+    expect(before.openCount, 'меню показано').toBe(1);
+
+    // Курсор сперва входит в меню, и уходит уже оттуда. Без этого шага кейс
+    // проверял бы не уход, а первое же движение страницы, а правило предыстории не
+    // имеет — оба состояния закрылись бы по одному и тому же пути.
+    const root = before.rects[0];
+    await page.mouse.move(root.left + root.width / 2, root.top + root.height / 2);
+    expect((await readMenu(page)).openCount, 'движение по меню не закрывает').toBe(1);
+
+    const away = beyondRect(root, { x: DISTANCE + 80, y: DISTANCE + 80 });
+    await page.mouse.move(away.x, away.y);
+    const after = await readMenu(page);
+    expect(after.openCount, 'меню закрылось').toBe(0);
+    expect(after.errors, 'страница без ошибок').toEqual([]);
   });
 
   test('выход за порог отменяет отложенное открытие подменю', async ({ page }) => {

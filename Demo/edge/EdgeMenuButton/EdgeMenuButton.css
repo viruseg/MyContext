@@ -1,0 +1,71 @@
+.emb-button
+{
+    --emb-size: 50px;
+    --emb-inset: 35px;
+    position: fixed;
+    top: var(--emb-inset);
+    left: 0;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--emb-size);
+    height: var(--emb-size);
+    margin: 0;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, .22);
+    border-radius: 10px;
+    color: #fff;
+    font: inherit;
+    background: linear-gradient(180deg, rgba(12, 14, 18, .08), rgba(12, 14, 18, .045));
+    backdrop-filter: blur(10px) saturate(1.25);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .66), inset 0 1px 0 rgba(255, 255, 255, .28);
+    cursor: pointer;
+    touch-action: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    transform: translate3d(-100%, 0, 0);
+    visibility: hidden;
+    pointer-events: none;
+    transition: transform 260ms cubic-bezier(.2, .8, .2, 1), visibility 0s linear 260ms;
+}
+
+.emb-button.emb-open
+{
+    transform: translate3d(var(--emb-inset), 0, 0);
+    visibility: visible;
+    pointer-events: auto;
+    transition: transform 260ms cubic-bezier(.2, .8, .2, 1), visibility 0s;
+}
+
+.emb-button:hover
+{
+    background: linear-gradient(180deg, rgba(12, 14, 18, .16), rgba(12, 14, 18, .09));
+}
+
+.emb-button.emb-press
+{
+    background: linear-gradient(180deg, rgba(12, 14, 18, .24), rgba(12, 14, 18, .14));
+}
+
+.emb-button:focus-visible
+{
+    outline: 2px solid rgba(255, 255, 255, .75);
+    outline-offset: 2px;
+}
+
+.emb-button > svg
+{
+    display: block;
+    width: 22px;
+    height: 22px;
+}
+
+@media (prefers-reduced-motion: reduce)
+{
+    .emb-button,
+    .emb-button.emb-open
+    {
+        transition-duration: .01ms;
+    }
+}

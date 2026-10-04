@@ -8,8 +8,11 @@ import { expect, test } from '@playwright/test';
  * прокрутка и `resize` его не гасят, и оно висит до `close()`, `Escape`, `Tab` или
  * клика по пункту. `dismissible` поднимает правила на время показа.
  *
- * Кейсы ниже проверяют контракт `dismissible` и границы его действия: работа
- * самих правил закрытия покрыта `pressAndHold.spec.js` и `globals.spec.js`.
+ * Два правила из этого списка поднимают то, что нужно, сами, и потому привязки не
+ * требуют: снятие выделения при уходе курсора слушает уровень, а
+ * `autoHideDistance` — своя строка движения, общая с общим списком. Кейсы файла
+ * проверяют, что `dismissible` поверх них ничего не дублирует; сами правила покрыты
+ * `autoHide.spec.js` и `globals.spec.js`.
  *
  * @typedef {import('../../src/MyContext.js').MenuItem} MenuItem
  */
@@ -438,29 +441,30 @@ test.describe('open с dismissible', () => {
     expect((await readMenu(page)).openCount, 'привязка и дальше закрывает кликом вне').toBe(0);
   });
 
-  test('dismissible поднимает и autoHideDistance', async ({ page }) => {
-    // Строка автоскрытия лежит в той же таблице слушателей, что и остальные правила,
-    // поэтому непривязанный экземпляр, который прежде автоскрытия не знал, после
-    // `dismissible` спрячется по первому движению курсора. Это заявлено в README, и
-    // кейс падает, если правило уедет за пределы привязки.
+  test('порт поднимает ровно свою строку, и dismissible её не дублирует', async ({ page }) => {
+    // Автоскрытие живёт на глобальном движении, а глобальные слушатели заводит
+    // `attach()`. Поэтому порог поднимает свою строку сам, и поднимает ровно одну:
+    // у него нет других правил, за которыми пришлось бы тянуть весь набор закрытия.
+    await makeMenu(page, { attach: false, autoHideDistance: 200 });
+    await openMenu(page, SHOW_POINT);
+    const portOnly = await subscriptionCount(page);
+    expect(portOnly, 'порт поднял одну строку').toBe(1);
+
+    // Обратный случай: без порога `dismissible` поднимает весь набор, и строка
+    // движения в нём уже есть.
+    await makeMenu(page, { attach: false });
+    await openMenu(page, SHOW_POINT, true);
+    const closersOnly = await subscriptionCount(page);
+
+    // Оба вместе: строка движения общая, и вторая копия была бы молчаливым двойным
+    // срабатыванием правила — на каждый шаг мыши по странице.
     await makeMenu(page, { attach: false, autoHideDistance: 200 });
     await openMenu(page, SHOW_POINT, true);
-    expect((await readMenu(page)).openCount, 'меню показано').toBe(1);
+    expect(await subscriptionCount(page), 'две подписки на движение').toBe(closersOnly);
 
     await page.mouse.move(OUTSIDE_POINT.x, OUTSIDE_POINT.y);
     expect((await readMenu(page)).openCount, 'уход курсора закрыл меню').toBe(0);
-  });
-
-  test('без dismissible автоскрытия у непривязанного экземпляра нет', async ({ page }) => {
-    // Контроль к предыдущему кейсу: тот же порог, тот же уход курсора, но без опции.
-    // Правило не поднято, и меню остаётся — иначе кейс выше проверял бы не опцию, а
-    // само автоскрытие.
-    await makeMenu(page, { attach: false, autoHideDistance: 200 });
-    await openMenu(page, SHOW_POINT, false);
-    expect((await readMenu(page)).openCount, 'меню показано').toBe(1);
-
-    await page.mouse.move(OUTSIDE_POINT.x, OUTSIDE_POINT.y);
-    expect((await readMenu(page)).openCount, 'меню осталось висеть').toBe(1);
+    expect(await subscriptionCount(page), 'закрытие снесло подписку').toBe(0);
   });
 
   test('dismissible: не-логическое значение отклоняется', async ({ page }) => {
