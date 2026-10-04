@@ -163,6 +163,18 @@ import { assertItems } from './renderer.js';
  */
 
 /**
+ * `detail` события `error` — отказ действия автора.
+ *
+ * @typedef {object} ErrorEventDetail
+ * @property {unknown} reason отказ как его бросил автор: `Error`, иное значение или
+ *   не-`Error`. Приводить к строке нельзя — потерялся бы стек и всё, что автор
+ *   различал своими типами.
+ * @property {string} source имя авторской точки входа, отказ которой пришёл: `action`,
+ *   `handoffAction`, `isArmableAction`, `open()` или `open:listener`. Служит целям
+ *   навигации по сообщению, а не разбору отказа: разбором занимается `reason`.
+ */
+
+/**
  * Опции экземпляра: то же, что задал автор, но с подставленными дефолтами.
  *
  * Отдельный тип от `Required<MyContextOptions>` — из-за предиката: дефолта у него
@@ -951,7 +963,7 @@ export class MyContext extends EventTarget {
       this.#showWhatItemLeadsTo(rendered, event);
       return;
     }
-    this.#runItemAction(rendered, event);
+    this.#fireAndForget(this.#runItemAction(rendered, event), 'action');
   };
 
   /**
@@ -962,14 +974,14 @@ export class MyContext extends EventTarget {
    *
    * @param {RenderedItem} rendered доступный пункт без подменю.
    * @param {MouseEvent | PointerEvent} event событие, которым действие вызвано.
-   * @returns {void}
+   * @returns {Promise<void>}
    */
-  #runItemAction(rendered, event) {
+  async #runItemAction(rendered, event) {
     const item = this.#actionFor(rendered);
     if (item === null) {
       return;
     }
-    this.#invokeItemAction(item, event);
+    await this.#invokeItemAction(item, event);
   }
 
   /**
@@ -1016,28 +1028,25 @@ export class MyContext extends EventTarget {
    * @param {MenuItem} item пункт с прочитанным действием.
    * @param {MouseEvent | KeyboardEvent} event отпускание или активация, которой
    *   пункт выбран: `action` контрактом принимает именно их.
-   * @returns {void}
+   * @returns {Promise<void>}
    */
-  #invokeItemAction(item, event) {
-    // Поколение показов читается до действия: действие вправе открыть меню в
-    // другом месте, и тогда закрытие, начатое по этому же клику, убило бы то, что
-    // только что открыто.
+  async #invokeItemAction(item, event) {
+    // Поколение читается до действия: действие вправе открыть меню в другом месте,
+    // и тогда закрытие, начатое по этому же клику, убило бы то, что только что
+    // открыто. Проверка уезжает после `await` — иначе асинхронное действие
+    // переоткрывало бы меню уже после того, как `finally` его закрыл, и переоткрытие
+    // из `await` работало бы иначе, чем без него.
     const serial = this.#openSerial;
     try {
-      // Обработчика может не быть, и это не повод оставить меню висеть: клик по
-      // доступному пункту закрывает меню всегда, а наличие `action` — свойство
-      // пункта, а не условие закрытия.
-      item.action?.(event);
+      await item.action?.(event);
+    } catch (reason) {
+      // Отказ разбирается здесь, а не уходит из тела: дальше его некому ждать —
+      // действие зовут из обработчика DOM, и бросок наружу ушёл бы в отчёт
+      // браузера мимо библиотеки. Само `finally` от него не зависит: пропуск
+      // закрытия не имеет права глушить ошибку.
+      this.#reportFailure(reason, 'action');
     } finally {
-      // Закрытие обязано быть в `finally`, а не после вызова: обработчик, бросивший
-      // исключение, иначе оставил бы меню висеть. Само исключение наружу не уходит
-      // пойманным — его получает вызывающий, как и любую другую ошибку его
-      // обработчика. Пропуск закрытия не имеет права глушить его, поэтому обе
-      // проверки сведены в одну положительную: `return` из `finally` заменил бы
-      // висящее исключение своим значением. Действие, уничтожившее экземпляр, уже
-      // снесло меню, и `close()` после `destroy()` бросил бы ошибку поверх результата
-      // действия.
-      if (this.#openSerial === serial && !this.#destroyed) {
+      if (!this.#showCancelled(serial)) {
         this.close();
       }
     }
@@ -1575,7 +1584,7 @@ export class MyContext extends EventTarget {
     if (item === null) {
       return;
     }
-    this.#invokeItemAction(item, event);
+    this.#fireAndForget(this.#invokeItemAction(item, event), 'action');
   };
 
   /**
@@ -3288,6 +3297,71 @@ export class MyContext extends EventTarget {
     if (this.#destroyed) {
       throw new Error(DESTROYED_MESSAGE);
     }
+  }
+
+  /**
+   * Разбор отказа действия автора: событие `error`, а если подписчик его не
+   * отменил — непойманная ошибка страницы.
+   *
+   * Событие отменяемо потому, что отказ автора — его дело: приложение может знать,
+   * что отказ действия «Сохранить» ничего не значит, и молчать о нём. Но молчание
+   * должно быть решением подписчика, а не следствием того, что библиотека некуда
+   * деть отказ: без `cancelable` подписчик был бы уведомлён и бессилен, и «ошибку,
+   * которую видно и на которую нельзя повлиять» пришлось бы фильтровать своим
+   * `preventDefault` на каждом событии подряд.
+   *
+   * @param {unknown} reason отказ как его бросил автор.
+   * @param {string} source имя авторской точки входа, отказ которой пришёл.
+   * @returns {void}
+   */
+  #reportFailure(reason, source) {
+    /** @type {ErrorEventDetail} */
+    const detail = { reason, source };
+    const event = new CustomEvent('error', { detail, cancelable: true });
+    this.dispatchEvent(event);
+    if (event.defaultPrevented) {
+      return;
+    }
+    // Необработанный отказ уходит наружу тем же путём, каким уходит синхронный бросок
+    // из обработчика DOM: браузер показывает его как непойманную ошибку страницы, и
+    // страница ловит его `window.onerror`. Отдельное хранилище ошибок завело бы
+    // второй, невидимый для страницы канал утечки, и `onerror` перестал бы видеть
+    // поломки автора.
+    queueMicrotask(() => {
+      throw reason;
+    });
+  }
+
+  /**
+   * Привязывает отказ промиса, который некому ждать, и забывает его.
+   *
+   * Единственное место, где отказ библиотека берёт на себя: обработчики DOM не
+   * возвращают промис вызывающему, а ждать его там нечем. Публичные методы, у
+   * которых есть вызывающий, промис возвращают и разбор отдают ему.
+   *
+   * @param {unknown} result промис либо что угодно: `Promise.resolve` делает
+   *   значение безопасным входом, и вызывающий не обязан знать, асинхронно ли оно.
+   * @param {string} source имя авторской точки входа, отказ которой пришёл.
+   * @returns {void}
+   */
+  #fireAndForget(result, source) {
+    Promise.resolve(result).catch((reason) => {
+      this.#reportFailure(reason, source);
+    });
+  }
+
+  /**
+   * Отменён ли показ, начатый при поколении `serial`.
+   *
+   * Показ ждёт данные, и за это время его могут отменить: закрытием, разбором или
+   * новым показом. Признак один на все три, потому что решение у них одно — не
+   * достраивать меню для состояния, которого больше нет.
+   *
+   * @param {number} serial поколение, прочитанное до ожидания данных.
+   * @returns {boolean}
+   */
+  #showCancelled(serial) {
+    return this.#destroyed || this.#openSerial !== serial;
   }
 
   /**
