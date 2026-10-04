@@ -60,6 +60,8 @@ import { expect, test } from '@playwright/test';
  *   умолчанию: открыть чужое меню после ожидания, бросить или просто считать вызовы.
  * @property {boolean} [attached] привязать ли меню к контейнеру.
  * @property {import('../../src/constants.js').PressAndHoldMode} [pressAndHold]
+ * @property {'allow' | 'deny' | 'throw'} [armable] ответ предиката
+ *   `isArmableAction`: разрешить, отказать или бросить. Без поля предиката нет.
  */
 
 /**
@@ -340,33 +342,48 @@ async function setup(page, input = {}) {
             }),
           ];
         }
-        menu = new MyContext(items);
-        if (setup0.attached === true) {
-          const surface = document.getElementById('surface');
-          if (surface instanceof HTMLElement) {
-            menu.attach(surface);
-          }
-        }
-        if (setup0.pressAndHold !== undefined) {
-          // Опция читается только в конструкторе, поэтому пресет задаётся новым
-          // экземпляром: смена после создания была бы молчаливым игнором.
-          menu.destroy();
-          menu = new MyContext(items, { pressAndHold: setup0.pressAndHold });
+        /**
+         * Опции читаются только в конструкторе, поэтому пресет и предикат задаются
+         * одним новым экземпляром: смена после создания была бы молчаливым игнором.
+         *
+         * @param {Partial<import('../../src/MyContext.js').MyContextOptions>} options
+         * @returns {InstanceType<typeof MyContext>}
+         */
+        const build0 = (options) => {
+          menu?.destroy();
+          const built = new MyContext(items, options);
+          menu = built;
           if (setup0.attached === true) {
             const surface = document.getElementById('surface');
             if (surface instanceof HTMLElement) {
-              menu.attach(surface);
+              built.attach(surface);
             }
           }
+          return built;
+        };
+        /** @type {Partial<import('../../src/MyContext.js').MyContextOptions>} */
+        const options = {};
+        if (setup0.pressAndHold !== undefined) {
+          options.pressAndHold = setup0.pressAndHold;
         }
-        menu.addEventListener('open', () => {
+        if (setup0.armable !== undefined) {
+          options.isArmableAction = async () => {
+            await wait(delay);
+            if (setup0.armable === 'throw') {
+              throw new Error(failure);
+            }
+            return setup0.armable === 'allow';
+          };
+        }
+        const live = build0(options);
+        live.addEventListener('open', () => {
           openCount += 1;
         });
-        menu.addEventListener('close', () => {
+        live.addEventListener('close', () => {
           closeCount += 1;
         });
         if (setup0.watch === true) {
-          menu.addEventListener('error', (event) => {
+          live.addEventListener('error', (event) => {
             const custom = /** @type {CustomEvent<ErrorEventDetail>} */ (
               /** @type {unknown} */ (event)
             );
@@ -854,5 +871,60 @@ test.describe('отдача управления', () => {
     await activateItem(page);
     await page.waitForTimeout(80);
     expect((await read(page)).handoffCalls, 'отдача сработала один раз').toBe(1);
+  });
+
+  test('асинхронный предикат, разрешивший нажатие, показывает меню', async ({ page }) => {
+    await setup(page, { attached: true, pressAndHold: 'right', armable: 'allow' });
+    await page.mouse.move(OPEN_POINT.x, OPEN_POINT.y);
+    await page.mouse.down({ button: 'right' });
+    await expect
+      .poll(async () => {
+        return (await read(page)).visible;
+      }, { message: 'меню показано по решению предиката' })
+      .toBe(true);
+  });
+
+  test('асинхронный предикат, отказавший, не показывает меню и снимает вооружение', async ({ page }) => {
+    await setup(page, { attached: true, pressAndHold: 'right', armable: 'deny' });
+    await page.mouse.move(OPEN_POINT.x, OPEN_POINT.y);
+    await page.mouse.down({ button: 'right' });
+    // Пауза заведомо длиннее задержки предиката: к моменту опроса ответ уже есть.
+    await page.waitForTimeout(120);
+    expect((await read(page)).visible, 'меню не показано').toBe(false);
+    // Откат виден по отпусканию: у оставшегося вооружения оно закрыло бы меню.
+    await page.mouse.up({ button: 'right' });
+    await page.waitForTimeout(80);
+    expect((await read(page)).closeCount, 'откат снял вооружение, отпускание ничем не кончилось').toBe(0);
+  });
+
+  test('отпускание в промежутке ожидания предиката не открывает меню под отпущенной кнопкой', async ({ page }) => {
+    await setup(page, { attached: true, pressAndHold: 'right', armable: 'allow' });
+    await page.mouse.move(OPEN_POINT.x, OPEN_POINT.y);
+    await page.mouse.down({ button: 'right' });
+    await page.mouse.up({ button: 'right' });
+    // Пауза заведомо длиннее задержки предиката: к моменту опроса он ответил, но
+    // жест к тому моменту уже отпущен, и открывать нечего.
+    await page.waitForTimeout(120);
+    const log = await read(page);
+    expect(log.visible, 'меню не показано под отпущенной кнопкой').toBe(false);
+    expect(log.openCount, 'показа не случилось вовсе').toBe(0);
+    expect(log.closeCount, 'отменённый жест не открывал, а потому и не закрывал').toBe(0);
+  });
+
+  test('отказ предиката не открывает меню и доходит до error', async ({ page }) => {
+    await setup(page, { watch: true, attached: true, pressAndHold: 'right', armable: 'throw' });
+    await page.mouse.move(OPEN_POINT.x, OPEN_POINT.y);
+    await page.mouse.down({ button: 'right' });
+    await expect
+      .poll(async () => {
+        return (await read(page)).errorMessages;
+      }, { message: 'отказ предиката дошёл до подписчика' })
+      .toEqual([FAILURE_TEXT]);
+    const log = await read(page);
+    expect(log.errorSources, 'отказ назван своим предикатом').toHaveLength(1);
+    expect(log.visible, 'меню не показано').toBe(false);
+    await page.mouse.up({ button: 'right' });
+    await page.waitForTimeout(80);
+    expect((await read(page)).closeCount, 'отказ снял вооружение').toBe(0);
   });
 });

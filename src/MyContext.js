@@ -119,15 +119,25 @@ import { assertItems } from './renderer.js';
  *   действие. Значение называет кнопку, а не включает жест, — см.
  *   [`pressAndHold`](README.md#pressandhold). Действует всё время жизни меню, и
  *   программный `open()` под ним не меняется.
- * @property {(event: PointerEvent) => boolean} [isArmableAction] предикат, решающий,
- *   вооружать ли нажатие жест удержания. Зовется на каждом нажатии подходящей
- *   кнопки до показа меню и получает живой `PointerEvent` нажатия, а ответ не из
- *   `true` оставляет меню закрытым. Смысл в том, что автор узнаёт цель нажатия
- *   раньше показа: подписи и доступность пунктов читаются при показе, и без
- *   предиката они отвечали бы на предыдущий показ. Осмысленна только при
- *   `pressAndHold`, отличном от `'none'`: при `'none'` жеста нажатия нет, и опция
- *   молчала бы. Исключение из предиката не гасится и уходит из обработчика
- *   нажатия. См. [`isArmableAction`](README.md#isarmableaction).
+ * @property {(event: PointerEvent) => boolean | Promise<boolean>} [isArmableAction]
+ *   предикат, решающий, вооружать ли нажатие жест удержания. Зовется на каждом
+ *   нажатии подходящей кнопки до показа меню и получает живой `PointerEvent`
+ *   нажатия, а ответ не из `true` оставляет меню закрытым. Ответом может быть
+ *   промис: меню показывается, когда предикат ответит. Смысл в том, что автор
+ *   узнаёт цель нажатия раньше показа: подписи и доступность пунктов читаются при
+ *   показе, и без предиката они отвечали бы на предыдущий показ. Осмысленна только
+ *   при `pressAndHold`, отличном от `'none'`: при `'none'` жеста нажатия нет, и опция
+ *   молчала бы. Отказ предиката не открывает меню, снимает вооружение и приходит
+ *   событием `error` с `source` `'isArmableAction'`; неотменённый подписчиком уходит
+ *   на страницу как непойманная ошибка. См.
+ *   [`isArmableAction`](README.md#isarmableaction).
+ *
+ *   **Асинхронный предикат гасит выделение текста на каждом нажатии.** Решение о
+ *   `pressAndHold: 'left'` принимается синхронно, до ответа предиката: иначе
+ *   протяжка курсора к пункту начала бы выделять текст под меню. Плата за это —
+ *   при `pressAndHold: 'left'` с асинхронным предикатом выделение подавляется
+ *   вообще на каждом нажатии в контейнере, включая те, где предикат ответит
+ *   `false`.
  * @property {boolean} [destroyOnClose] разбирать ли экземпляр при закрытии,
  *   `false` по умолчанию. Нужен меню, которое автор заводит на один показ: ссылки
  *   на такой экземпляр ни у кого нет, а `destroy()` звать некому, и без опции он
@@ -188,7 +198,8 @@ import { assertItems } from './renderer.js';
  * @property {number} autoHideDistance
  * @property {number} scale
  * @property {PressAndHoldMode} pressAndHold
- * @property {((event: PointerEvent) => boolean) | undefined} isArmableAction
+ * @property {((event: PointerEvent) => boolean | Promise<boolean>) | undefined}
+ *   isArmableAction
  * @property {boolean} destroyOnClose
  */
 
@@ -1485,9 +1496,14 @@ export class MyContext extends EventTarget {
       return;
     }
     if (this.#armsPress(event)) {
+      // Решение о `pressAndHold: 'left'` принимается здесь, до всякого ожидания:
+      // `preventDefault()` после `await` уже не мешает выделению текста. Поэтому
+      // предикат, ответивший асинхронно, не может отменить подавление — и обратной
+      // стороной здесь становится откат вооружения в `#armPress`.
       event.preventDefault();
-      this.#armedPress = { button: event.button, pointerId: event.pointerId };
-      this.#fireAndForget(this.open({ x: event.clientX, y: event.clientY }), 'open()');
+      const press = { button: event.button, pointerId: event.pointerId };
+      this.#armedPress = press;
+      this.#fireAndForget(this.#armPress(event, press), 'isArmableAction');
       return;
     }
     if (event.button !== PRIMARY_MOUSE_BUTTON) {
@@ -1515,6 +1531,10 @@ export class MyContext extends EventTarget {
    * привязанного контейнера ответ одинаков, и лишний вызов только достал бы
    * автора вопросом, на который у него нет ответа.
    *
+   * Предикат автора здесь не спрашивается: его ответ может прийти промисом, а
+   * решение об `event.preventDefault()` принимать надо сейчас. Синхронный разбор цели
+   * и кнопки остаётся здесь, ответ предиката уезжает в `#armPress`.
+   *
    * @param {PointerEvent} event
    * @returns {boolean}
    */
@@ -1527,10 +1547,35 @@ export class MyContext extends EventTarget {
     if (button !== null && event.button !== button) {
       return false;
     }
-    if (!this.#isInsideAnchor(event.target)) {
-      return false;
+    return this.#isInsideAnchor(event.target);
+  }
+
+  /**
+   * Асинхронное тело вооружения: спрашивает предикат и показывает меню.
+   *
+   * Вооружение ставится вызывающим до `await`, иначе нажатие успело бы отпустить
+   * раньше, чем предикат ответит, и жест потерял бы смысл. Отсюда и откат: ответ
+   * `false` или отказ снимают **только** то вооружение, которое поставил этот
+   * вызов, — по кнопке и указателю, иначе откат погасил бы чужое. Жест, отпущенный
+   * за время ожидания, откатом не трогается: `#onGlobalPointerRelease` уже снял
+   * вооружение сам, а вооружать по отпущенной кнопке нельзя.
+   *
+   * @param {PointerEvent} event нажатие, ради которого вооружают.
+   * @param {{ button: number; pointerId: number }} press вооружение этого вызова.
+   * @returns {Promise<void>}
+   */
+  async #armPress(event, press) {
+    const serial = this.#openSerial;
+    if (!(await this.#isArmable(event))) {
+      if (this.#armedPress === press) {
+        this.#armedPress = null;
+      }
+      return;
     }
-    return this.#isArmable(event);
+    if (this.#destroyed || this.#armedPress !== press || serial !== this.#openSerial) {
+      return;
+    }
+    await this.open({ x: event.clientX, y: event.clientY });
   }
 
   /**
@@ -1538,16 +1583,18 @@ export class MyContext extends EventTarget {
    *
    * Без опции ответ безусловен: предиката нет, значит и спросить некого, а жест
    * остаётся прежним. Сравнение строгое, `=== true`, — как у `isEnabledAction`:
-   * предикат, не ответивший на заданный вопрос, не отвечал на него.
+   * предикат, не ответивший на заданный вопрос, не отвечал на него. Ответ-объект
+   * раскрывается до `true` ровно один раз, синхронный ответ проверяется так же, как
+   * и ждавший: `Promise.resolve` без ожидания не меняет смысла.
    *
    * @param {PointerEvent} event нажатие, ради которого спрашивают.
-   * @returns {boolean}
+   * @returns {Promise<boolean>}
    */
-  #isArmable(event) {
+  async #isArmable(event) {
     if (this.#options.isArmableAction === undefined) {
       return true;
     }
-    return this.#options.isArmableAction(event) === true;
+    return (await this.#options.isArmableAction(event)) === true;
   }
 
   /**
