@@ -207,6 +207,39 @@ test.describe('валидация опции autoHideDistance', () => {
   });
 });
 
+test.describe('валидация опции scale', () => {
+  test('не число отклоняется', () => {
+    // Правило проверки то же, что у `animationDuration`: `NaN` в сравнении с
+    // числом всегда `false`, а в `calc()` он дал бы `calc(28px * NaN)` — и
+    // негодная опция выдала бы себя за заданную.
+    expect(() => menuWithOptions({ scale: '1.5' })).toThrow(TypeError);
+    expect(() => menuWithOptions({ scale: '1.5' })).toThrow('options.scale');
+    expect(() => menuWithOptions({ scale: Number.NaN })).toThrow('options.scale');
+    expect(() => menuWithOptions({ scale: Number.POSITIVE_INFINITY })).toThrow('options.scale');
+    expect(() => menuWithOptions({ scale: null })).toThrow('options.scale');
+  });
+
+  test('ноль и отрицательный множитель отклоняются', () => {
+    // Ноль схлопывает меню до нулевых габаритов, и кликать по нему нечем, — а
+    // отрицательный множитель переворачивает раскладку наизнанку. Оба значения
+    // не имеют прочтения, поэтому отвергаются, а не трактуются как «единица».
+    expect(() => menuWithOptions({ scale: 0 })).toThrow('options.scale');
+    expect(() => menuWithOptions({ scale: -1 })).toThrow('options.scale');
+  });
+
+  test('единица, дробное и большее единицы значение принимаются', () => {
+    // Меньше единицы — не поломка, а заявленный случай: уменьшить меню автору
+    // тоже нужно. Верхней границы нет и быть не должно: предельные `max-width`
+    // и `max-height` всё равно не дадут меню выйти за вьюпорт, и значение больше
+    // единицы означает лишь длинный список, а не ошибку.
+    expect(() => menuWithOptions({ scale: 1 })).not.toThrow();
+    expect(() => menuWithOptions({ scale: 0.5 })).not.toThrow();
+    expect(() => menuWithOptions({ scale: 1.5 })).not.toThrow();
+    expect(() => menuWithOptions({ scale: 0.75 })).not.toThrow();
+    expect(() => menuWithOptions({ scale: 4 })).not.toThrow();
+  });
+});
+
 test.describe('валидация опции pressAndHold', () => {
   test('неизвестное значение отклоняется', () => {
     // Негодное значение молча превратилось бы в «удержание не настроено», то

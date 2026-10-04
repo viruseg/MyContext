@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { OPEN_GRACE_MS, SAFETY_PADDING } from '../../src/constants.js';
+import { DEFAULT_ITEM_HEIGHT, OPEN_GRACE_MS, SAFETY_PADDING } from '../../src/constants.js';
 
 /**
  * Кейсы демонстрационной страницы. В отличие от файлов Tasks 4–11 здесь ничего не
@@ -130,6 +130,7 @@ const SCENARIO_IDS = [
   'disabled',
   'icons',
   'long',
+  'scale',
   'autohide',
   'press',
   'press-left',
@@ -144,6 +145,7 @@ const SCENARIO_TITLES = {
   disabled: 'Отключённые пункты',
   icons: 'Иконки',
   long: 'Длинный список',
+  scale: 'Масштаб меню',
   autohide: 'Автоскрытие',
   press: 'Удержание кнопки',
   'press-left': 'Удержание левой кнопки',
@@ -158,6 +160,7 @@ const SCENARIO_SHAPE = {
   disabled: { first: 'Доступно', last: 'Доступный владелец', count: 4 },
   icons: { first: 'Эмодзи', last: 'Ещё растр', count: 6 },
   long: { first: 'Пункт 1', last: 'Пункт 40', count: 40 },
+  scale: { first: 'Открыть', last: 'Удалить', count: 3 },
   autohide: { first: 'Открыть', last: 'Удалить', count: 4 },
   press: { first: 'Новый', last: 'Отключённый пункт', count: 4 },
   'press-left': { first: 'Новый', last: 'Отключённый пункт', count: 4 },
@@ -228,6 +231,10 @@ const DISMISSIBLE_HINT =
   + 'меню обычные правила — клик мимо, прокрутка, resize. Без `dismissible` оно висело бы '
   + 'до Escape.';
 
+const SCALE_HINT =
+  'Ползунок задаёт `scale` в конструкторе и пересобирает меню: величина задаётся один раз, '
+  + 'поэтому сменить её на лету нельзя. Подменю масштабируется тем же множителем.';
+
 /**
  * Ожидаемая подсказка каждого блока. Таблица, а не условие по `id` в кейсе: подсказка
  * объявлена в описании сценария, и сверять её надо со всем списком, иначе
@@ -241,6 +248,7 @@ const SCENARIO_HINTS = {
   disabled: HINT,
   icons: HINT,
   long: HINT,
+  scale: SCALE_HINT,
   autohide: AUTO_HIDE_HINT,
   press: PRESS_HOLD_HINT,
   'press-left': PRESS_LEFT_HINT,
@@ -1650,4 +1658,124 @@ test('демо: пункт меню, открытого кнопкой, испо
 
   expect(await logLines(page, 'dismissible'), 'действие исполнилось').toEqual(['Первый']);
   expect((await readMenu(page)).openCount, 'меню закрылось').toBe(0);
+});
+
+/**
+ * Открывает подменю пункта наведением и дожидается его показа.
+ *
+ * Наведением, а не клавишей: блок демо открыт правым кликом, и его подменю
+ * показывается тем же путём, каким читатель демо его откроет.
+ *
+ * @param {Page} page
+ * @param {string} levelId уровень, из которого открывается подменю.
+ * @param {string} label подпись пункта-владельца.
+ * @returns {Promise<string>} `id` показанного уровня-подменю.
+ */
+async function openSubmenuByHover(page, levelId, label) {
+  await hoverItem(page, levelId, label);
+  await waitForSubmenu(page, levelId, label);
+  return page.evaluate((input) => {
+    const level = /** @type {HTMLElement} */ (document.getElementById(input.level));
+    for (const item of level.querySelectorAll('.vc-item')) {
+      const text = item.querySelector('.vc-label');
+      if (text === null || text.textContent !== input.label) {
+        continue;
+      }
+      const owns = item.getAttribute('aria-owns');
+      if (owns === null) {
+        throw new Error(`у пункта «${input.label}» нет адреса подменю`);
+      }
+      return owns;
+    }
+    throw new Error(`в уровне «${input.level}» нет пункта «${input.label}»`);
+  }, { level: levelId, label });
+}
+
+/**
+ * Ставит ползунок блока `scale` в новое положение и дожидается пересборки.
+ *
+ * Событие `input` шлётся прямо в узел, а не через `locator.fill()`: у ползунка
+ * нет текстового значения, и `fill` им не оперирует. Пересборка экземпляра
+ * синхронна, но следующий кадр нужен всё равно — блок и его журнал должны успеть
+ * перерисоваться до замера.
+ *
+ * @param {Page} page
+ * @param {string} value новое значение множителя.
+ * @returns {Promise<void>}
+ */
+async function setScaleControl(page, value) {
+  await page.evaluate((next) => {
+    const control = document.querySelector('[data-scenario="scale"] .demo-scale__range');
+    if (!(control instanceof HTMLInputElement)) {
+      throw new Error('в блоке «scale» нет ползунка масштаба');
+    }
+    control.value = next;
+    control.dispatchEvent(new Event('input', { bubbles: true }));
+  }, value);
+}
+
+/**
+ * Высота первого пункта уровня, px.
+ *
+ * Отдельная величина, а не высота из `readItem`: та снимок для доступности, и
+ * геометрии в ней нет — а предмет этих кейсов именно размер.
+ *
+ * @param {Page} page
+ * @param {string} levelId
+ * @returns {Promise<number>}
+ */
+async function firstItemHeight(page, levelId) {
+  return page.evaluate((level) => {
+    const item = document.getElementById(level)?.querySelector('.vc-item');
+    if (!(item instanceof HTMLElement)) {
+      throw new Error(`в уровне «${level}» нет ни одного пункта`);
+    }
+    return item.getBoundingClientRect().height;
+  }, levelId);
+}
+
+test('демо: блок масштаба открывает меню в заданном размере', async ({ page }) => {
+  await setScaleControl(page, '1.5');
+  const rootId = await openScenario(page, 'scale');
+
+  expect(await firstItemHeight(page, rootId), 'высота пункта увеличена в полтора раза')
+    .toBeCloseTo(DEFAULT_ITEM_HEIGHT * 1.5, 1);
+});
+
+test('демо: ползунок масштаба пересобирает меню, а не добавляет второе', async ({ page }) => {
+  await setScaleControl(page, '0.5');
+  const rootId = await openScenario(page, 'scale');
+
+  expect(await firstItemHeight(page, rootId), 'высота пункта уменьшена вдвое')
+    .toBeCloseTo(DEFAULT_ITEM_HEIGHT * 0.5, 1);
+  // Пересборка обязана снимать прежний экземпляр, а не подкладывать новый рядом:
+  // два слушателя `contextmenu` на одном блоке открыли бы два меню, и «открылся
+  // один уровень» перестало бы быть проверкой.
+  expect((await readMenu(page)).openCount, 'открыт ровно один уровень').toBe(1);
+});
+
+test('демо: подменю блока масштаба масштабируется тем же множителем', async ({ page }) => {
+  await setScaleControl(page, '1.5');
+  const rootId = await openScenario(page, 'scale');
+  const submenuId = await openSubmenuByHover(page, rootId, 'Экспорт');
+
+  expect(
+    await firstItemHeight(page, submenuId),
+    'пункт подменя увеличен так же, как пункт корня',
+  ).toBeCloseTo(DEFAULT_ITEM_HEIGHT * 1.5, 1);
+});
+
+test('демо: пересборка не стирает журнал кликов блока', async ({ page }) => {
+  await setScaleControl(page, '0.5');
+  const rootId = await openScenario(page, 'scale');
+  await clickItem(page, rootId, 'Открыть');
+  expect(await logLines(page, 'scale'), 'клик до пересборки записан').toEqual(['Открыть']);
+
+  await page.keyboard.press('Escape');
+  await setScaleControl(page, '2');
+
+  // Пересборка не должна перерисовывать блок: журнал накопленное переживает
+  // смену размера, иначе ползунок был бы не «поменять размер», а «начать блок
+  // заново», и читатель демо потерял бы историю без предупреждения.
+  expect(await logLines(page, 'scale'), 'журнал пережил пересборку').toEqual(['Открыть']);
 });

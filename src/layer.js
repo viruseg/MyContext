@@ -2,7 +2,7 @@ import { DEFAULT_ANIMATION_DURATION, SAFETY_PADDING } from './constants.js';
 import { calculateMenuPosition, calculateSubmenuPosition } from './positioner.js';
 import { renderLevel, refreshItems, submenuHashOf } from './renderer.js';
 import { createScrollZones } from './scrollZones.js';
-import { applyAnimationDuration, applyTheme } from './theme.js';
+import { applyAnimationDuration, applyScale, applyTheme } from './theme.js';
 
 /**
  * Управление Top Layer: создание уровней, показ, скрытие, замер вслепую и
@@ -188,6 +188,13 @@ import { applyAnimationDuration, applyTheme } from './theme.js';
  *   лишнюю величину или приводить тип. Уходит в `--vc-animation-duration`
  *   элементов и в задержку отложенного закрытия, и потому обязана быть одной
  *   величиной.
+ * @property {number} [scale] множитель размеров всех уровней слоя, `1` по
+ *   умолчанию. Уходит в `--vc-scale` каждого уровня при его создании, а не на
+ *   корне: уровни лежат в `<body>` соседями, а не внутри друг друга, и множитель
+ *   на корне до подменю не дошёл бы. Тот же дефолт, что и у публичной опции
+ *   `MyContextOptions.scale`, и он назван числом здесь по той же причине, что и
+ *   `animationDuration`: слой документирует величину по умолчанию и подставляет
+ *   свою, а не требует от вызывающего кода лишнего значения.
  * @property {Map<string, MenuItem>} actions общая для всех уровней **одного**
  *   экземпляра, передаваемая по ссылке. Картой владеет экземпляр меню: слой отдаёт
  *   её рендереру и не копирует, а очищает её целиком `MyContext.destroy()` — в том
@@ -383,6 +390,7 @@ export function createLayer(options) {
     label,
     theme,
     animationDuration = DEFAULT_ANIMATION_DURATION,
+    scale = 1,
     actions,
     schedule = defaultSchedule,
     cancel = defaultCancel,
@@ -439,6 +447,7 @@ export function createLayer(options) {
     const rendered = renderLevel(items, context);
     applyTheme(rendered.element, theme);
     applyAnimationDuration(rendered.element, animationDuration);
+    applyScale(rendered.element, scale);
     /** @type {LevelEntry} */
     const entry = {
       element: rendered.element,

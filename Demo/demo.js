@@ -1,5 +1,9 @@
 import { MyContext } from '../src/index.js';
-import { DEFAULT_AUTO_HIDE_DISTANCE, DEFAULT_PRESS_AND_HOLD } from '../src/constants.js';
+import {
+  DEFAULT_AUTO_HIDE_DISTANCE,
+  DEFAULT_PRESS_AND_HOLD,
+  DEFAULT_SCALE,
+} from '../src/constants.js';
 import { scenarios } from './scenarios.js';
 
 /**
@@ -27,6 +31,17 @@ const SEPARATOR_TYPE = 'separator';
  * остальные, и различается только составом меню.
  */
 const DEFAULT_HINT = 'Правый клик по блоку открывает его меню.';
+
+/**
+ * Границы ползунка множителя размеров в блоке `scale`.
+ *
+ * Нижняя граница меньше единицы намеренно: уменьшить меню автору нужно не реже,
+ * чем увеличить, и ползунок, начинающийся с единицы, половину своего диапазона
+ * не давал бы. Верхняя граница — `2`, а не «сколько влезет»: за ней начинается
+ * длинный список, и ползунок, уводящий меню за пределы экрана, показывал бы не
+ * размер, а прокрутку.
+ */
+const SCALE_RANGE = { min: 0.5, max: 2, step: 0.1 };
 
 /**
  * Тема страницы, записанная в разметку. Значение по умолчанию продублировано в
@@ -186,6 +201,71 @@ function withItemActions(scenarioId, items) {
 }
 
 /**
+ * Заводит экземпляр меню сценария.
+ *
+ * Единственное место страницы, где зовётся `new MyContext`: блок с ползунком
+ * размера пересобирает меню, и второй вызов конструктора разошёлся бы с первым
+ * по составу опций — читатель увидел бы в одном блоке меню, часть которого
+ * простроена иначе.
+ *
+ * `animationDuration` оставлен по умолчанию: он совпадает с
+ * `--vc-animation-duration` из `styles/mycontext.css`, и подставлять рядом
+ * второе значение того же самого числа незачем.
+ *
+ * `autoHideDistance` и `scale` наоборот проставлены всем, включая нулевой и
+ * единичный: у всех блоков кроме одного ноль — это «выключено», а у всех кроме
+ * одного единица — это «не увеличено», то есть ровно то же поведение, что при
+ * отсутствии поля, — но читатель видит, чем блок `autohide` отличается от
+ * остальных и чем `scale` — от всех, не разбирая описания сценариев. Вендорить
+ * поле ради одного блока значило бы спрятать отличие туда, где его искать не
+ * приходит в голову.
+ *
+ * @param {Scenario} scenario описание сценария.
+ * @param {number} scale множитель размеров меню.
+ * @returns {MyContext}
+ */
+function createMenu(scenario, scale) {
+  return new MyContext(withItemActions(scenario.id, scenario.items), {
+    theme: 'auto',
+    label: scenario.title,
+    autoHideDistance: scenario.autoHideDistance ?? DEFAULT_AUTO_HIDE_DISTANCE,
+    pressAndHold: scenario.pressAndHold ?? DEFAULT_PRESS_AND_HOLD,
+    scale,
+  });
+}
+
+/**
+ * Ползунок множителя размеров и его числовой отклик.
+ *
+ * `output` вместо простого `span` — из-за встроенной живой области: смена
+ * величины читатель иначе не узнал бы, а блок показывает ровно эту величину.
+ * Подпись оборачивает ползунок, а не соседствует с ним, — имя элемента управления
+ * читается и с клавиатуры, и мышью, и не требует `aria-label`.
+ *
+ * @returns {{ root: HTMLLabelElement, range: HTMLInputElement, readout: HTMLOutputElement }}
+ */
+function scaleControl() {
+  const root = document.createElement('label');
+  root.className = 'demo-scale';
+
+  const caption = textElement('span', 'demo-scale__caption', 'Масштаб');
+  const range = document.createElement('input');
+  range.className = 'demo-scale__range';
+  range.type = 'range';
+  range.min = String(SCALE_RANGE.min);
+  range.max = String(SCALE_RANGE.max);
+  range.step = String(SCALE_RANGE.step);
+  range.value = String(DEFAULT_SCALE);
+
+  const readout = document.createElement('output');
+  readout.className = 'demo-scale__value';
+  readout.value = String(DEFAULT_SCALE);
+
+  root.append(caption, range, readout);
+  return { root, range, readout };
+}
+
+/**
  * Наполняет блок сценария и заводит для него собственный экземпляр меню.
  *
  * Экземпляр на сценарий, а не один на страницу: у каждого блока своя привязка
@@ -194,9 +274,12 @@ function withItemActions(scenarioId, items) {
  *
  * @param {Scenario} scenario описание сценария.
  * @param {HTMLElement} block блок сценария в разметке.
- * @returns {MyContext} экземпляр меню сценария. Возвращается нарочно: возврат
- *   делает жизненный цикл экземпляра видимым в подписи функции, а хранить его
- *   странице незачем — привязка живёт в слушателях, и `destroy()` демо не зовёт.
+ * @returns {MyContext} начальный экземпляр меню сценария. Возвращается нарочно:
+ *   возврат делает жизненный цикл экземпляра видимым в подписи функции, а хранить
+ *   его странице незачем — привязка живёт в слушателях, и `destroy()` демо не зовёт.
+ *   У блока с ползунком возвращённый экземпляр устаревает после первого движения
+ *   ползунка: пересборка заводит новый, и держаться за старый было бы держаться
+ *   разобранного.
  */
 function buildScenario(scenario, block) {
   // Ровно три узла, и все напечатаны здесь. Журнал наполняется по клику, но
@@ -208,21 +291,7 @@ function buildScenario(scenario, block) {
     textElement('p', 'demo-scenario__hint', scenario.hint ?? DEFAULT_HINT),
     logElement(),
   );
-  // `animationDuration` оставлен по умолчанию: он совпадает с
-  // `--vc-animation-duration` из `styles/mycontext.css`, и подставлять рядом
-  // второе значение того же самого числа незачем.
-  //
-  // `autoHideDistance` наоборот проставлен всем, включая нулевой: у всех блоков
-  // кроме одного ноль — это «выключено», то есть ровно то же поведение, что при
-  // отсутствии поля, — но читатель видит, чем блок `autohide` отличается от
-  // остальных, не разбирая описания сценариев. Вендорить поле ради одного блока
-  // значило бы спрятать отличие туда, где его искать не приходит в голову.
-  const menu = new MyContext(withItemActions(scenario.id, scenario.items), {
-    theme: 'auto',
-    label: scenario.title,
-    autoHideDistance: scenario.autoHideDistance ?? DEFAULT_AUTO_HIDE_DISTANCE,
-    pressAndHold: scenario.pressAndHold ?? DEFAULT_PRESS_AND_HOLD,
-  });
+  let menu = createMenu(scenario, DEFAULT_SCALE);
   if (scenario.openFromButton === true) {
     // Привязки нет намеренно: блок с этим сценарием показывает показ из чужого кода,
     // а правила закрытия поднимает сам показ. Привязанный блок открыл бы меню ещё и
@@ -237,6 +306,23 @@ function buildScenario(scenario, block) {
     return menu;
   }
   menu.attach(block);
+  if (scenario.scaleControl === true) {
+    const control = scaleControl();
+    // Пересборка вместо правки величины на ходу: `scale` задан в конструкторе
+    // один раз, и менять его на лету у библиотеки нечем. Прежний экземпляр
+    // обязательно разбирается — два слушателя `contextmenu` на одном блоке
+    // открыли бы два меню.
+    //
+    // Блок при этом не перерисовывается: журнал кликов накопленное переживает
+    // смену размера, и `logIn` ищет его по блоку в момент клика.
+    control.range.addEventListener('input', () => {
+      menu.destroy();
+      menu = createMenu(scenario, Number(control.range.value));
+      menu.attach(block);
+      control.readout.value = control.range.value;
+    });
+    block.appendChild(control.root);
+  }
   return menu;
 }
 

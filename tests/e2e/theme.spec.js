@@ -1111,8 +1111,11 @@ test.describe('прокручиваемый список', () => {
     // «конец списка» перестал бы означать конец.
     expect(zone, 'зона не растягивается').toContain('flex: none');
     // Высота зоны берётся из токена, а не пишется числом: иначе тема не смогла
-    // бы подобрать зону под своё меню.
-    expect(zone, 'высота зоны взята из токена').toContain('height: var(--vc-scroll-zone-height)');
+    // бы подобрать зону под своё меню. Множитель `--vc-scale` внутри `calc` —
+    // часть той же догадки, а не отдельная величина: без него увеличенное меню
+    // сохранило бы базовую зону, и рамка поехала бы мимо неё.
+    expect(zone, 'высота зоны взята из токена')
+      .toContain('height: calc(var(--vc-scroll-zone-height) * var(--vc-scale))');
 
     // Показ — единственное правило с атрибутом уровня: два показа по двум
     // селекторам разошлись бы с правкой одного.
@@ -1139,8 +1142,10 @@ test.describe('прокручиваемый список', () => {
     // вместе с цветом зоны, который меняет и приглушение упора, и наведение.
     // Сам угол общий у обеих зон, а поворот — единственное, чем они разошлись.
     const glyph = readRule(css, '.vc-scroll-zone::before');
-    expect(glyph, 'глиф зоны — срезанный угол').toContain('border-right: 1.5px solid currentColor');
-    expect(glyph, 'глиф зоны — срезанный угол').toContain('border-bottom: 1.5px solid currentColor');
+    expect(glyph, 'глиф зоны — срезанный угол')
+      .toContain('border-right: calc(1.5px * var(--vc-scale)) solid currentColor');
+    expect(glyph, 'глиф зоны — срезанный угол')
+      .toContain('border-bottom: calc(1.5px * var(--vc-scale)) solid currentColor');
     expect(readRule(css, '.vc-scroll-zone-up::before'), 'верхняя зона смотрит вверх')
       .toContain('transform: rotate(225deg)');
     expect(readRule(css, '.vc-scroll-zone-down::before'), 'нижняя зона смотрит вниз')

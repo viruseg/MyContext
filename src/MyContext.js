@@ -1,4 +1,4 @@
-import { DEFAULT_ANIMATION_DURATION, DEFAULT_AUTO_HIDE_DISTANCE, DEFAULT_MENU_LABEL, DEFAULT_PRESS_AND_HOLD, PRESS_AND_HOLD_MODES } from './constants.js';
+import { DEFAULT_ANIMATION_DURATION, DEFAULT_AUTO_HIDE_DISTANCE, DEFAULT_MENU_LABEL, DEFAULT_PRESS_AND_HOLD, DEFAULT_SCALE, PRESS_AND_HOLD_MODES } from './constants.js';
 import { nearestRectDistance } from './geometry.js';
 import { createHoverIntent } from './hoverIntent.js';
 import { createKeyboard } from './keyboard.js';
@@ -102,6 +102,15 @@ import { assertItems } from './renderer.js';
  *   цепочки, то есть уход в сторону закрывает меню, а уход в сторону открытого
  *   подменю — нет. Требуется конечное неотрицательное число: `NaN` в сравнении
  *   ложен всегда, и правило молча превратилось бы в «не скрываться никогда».
+ * @property {number} [scale] множитель размеров меню, `DEFAULT_SCALE` по умолчанию.
+ *   Увеличивает или уменьшает целиком: высоту пункта, кегль, иконки, шевроны,
+ *   отступы, скругления, рамку, разделители и зоны прокрутки, — и делает это на
+ *   каждом уровне, включая подменю. Требуется конечное число больше нуля: ноль
+ *   схлопнул бы меню до негодных габаритов, а `NaN` дал бы в `calc()` раскладку,
+ *   которой нет, и обе поломки не обратимы без единой ошибки. Верхней границы
+ *   нет: предельные `max-width` и `max-height` не дают меню выйти за вьюпорт, так
+ *   что большое значение означает длинный список, а не поломку. Значения меньше
+ *   единицы уменьшают меню — см. [`scale`](README.md#scale).
  * @property {PressAndHoldMode} [pressAndHold] чем меню открывается и когда
  *   закрывается, `DEFAULT_PRESS_AND_HOLD` по умолчанию. `'none'` — прежнее
  *   поведение: показ по правому клику, закрытие как угодно. Любое другое значение
@@ -165,6 +174,7 @@ import { assertItems } from './renderer.js';
  * @property {number} animationDuration
  * @property {string} label
  * @property {number} autoHideDistance
+ * @property {number} scale
  * @property {PressAndHoldMode} pressAndHold
  * @property {((event: PointerEvent) => boolean) | undefined} isArmableAction
  * @property {boolean} destroyOnClose
@@ -1850,6 +1860,7 @@ export class MyContext extends EventTarget {
       animationDuration: options.animationDuration ?? DEFAULT_ANIMATION_DURATION,
       label: options.label ?? DEFAULT_MENU_LABEL,
       autoHideDistance: options.autoHideDistance ?? DEFAULT_AUTO_HIDE_DISTANCE,
+      scale: options.scale ?? DEFAULT_SCALE,
       pressAndHold: options.pressAndHold ?? DEFAULT_PRESS_AND_HOLD,
       isArmableAction: options.isArmableAction,
       destroyOnClose: options.destroyOnClose ?? false,
@@ -1865,6 +1876,7 @@ export class MyContext extends EventTarget {
       label: this.#options.label,
       theme: this.#options.theme,
       animationDuration: this.#options.animationDuration,
+      scale: this.#options.scale,
       actions: this.#actions,
       onLevelsDiscarded: (entries) => {
         this.#forgetLevels(entries);
@@ -3339,6 +3351,7 @@ export class MyContext extends EventTarget {
       animationDuration,
       label,
       autoHideDistance,
+      scale,
       pressAndHold,
       isArmableAction,
       destroyOnClose,
@@ -3379,6 +3392,20 @@ export class MyContext extends EventTarget {
       }
       if (autoHideDistance < 0) {
         throw new TypeError(`${path}.autoHideDistance: расстояние не может быть отрицательным`);
+      }
+    }
+    // Множитель масштаба проверяется по трём признакам сразу, а не по двум, как
+    // `animationDuration` и `autoHideDistance`. Конечность отсекает `NaN`, который
+    // в сравнении с числом ложен всегда и в `calc()` дал бы `calc(28px * NaN)` —
+    // то есть раскладку, которой нет, без единой ошибки. Ноль отклоняется
+    // отдельно от отрицательного: у него есть своё прочтение, «меню не показывать
+    // вовсе», и оно принадлежит не опции размера, а вызову `close()`.
+    if (scale !== undefined) {
+      if (typeof scale !== 'number' || !Number.isFinite(scale)) {
+        throw new TypeError(`${path}.scale: множитель должен быть конечным числом`);
+      }
+      if (scale <= 0) {
+        throw new TypeError(`${path}.scale: множитель должен быть больше нуля`);
       }
     }
     // Кнопка удержания проверяется по списку значений, а не по форме: любое
