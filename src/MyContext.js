@@ -2347,6 +2347,11 @@ export class MyContext extends EventTarget {
    * это время наведение на пункт-владелец успело запланировать показ подменю. Оно
    * относится к меню, которого ещё нет, и с новой постановкой несовместимо.
    *
+   * Поколение читается до первого `await` и сверяется после каждого: сбор данных
+   * пунктов занимает время, и за это время показ могут отменить — закрытием, разбором
+   * или новым показом. Показ, доигравший после отмены, поднял бы меню поверх того,
+   * что его отменило.
+   *
    * @param {Point} params точка вызова в координатах вьюпорта, px.
    * @returns {Promise<void>}
    */
@@ -2357,10 +2362,17 @@ export class MyContext extends EventTarget {
     // самой отдачи, и снятая там метка отдала бы `click`, пришедший следом, вторым
     // вызовом по уже ушедшему меню.
     this.#handoffDone = null;
+    const serial = this.#openSerial;
     const root = await this.#ensureLevel(this.#items, null, 0, null);
+    if (this.#showCancelled(serial)) {
+      return;
+    }
     this.#root = root;
     this.#chain.push(root);
     await this.#leadAhead(root);
+    if (this.#showCancelled(serial)) {
+      return;
+    }
     this.#layer.showRoot(root, params);
     // Позиция страницы запоминается после показа, а не до: событие `scroll` может
     // прийти уже после того, как меню встало на место, и сверять его надо с тем, что
@@ -2369,6 +2381,9 @@ export class MyContext extends EventTarget {
     // На каждый показ, а не на первый: после закрытия реестр движка пуст, и без
     // этого вызова меню было бы открытым и мёртвым для клавиатуры.
     this.#keyboard.registerLevel(root, { focus: true });
+    if (this.#showCancelled(serial)) {
+      return;
+    }
     // Событие последним, а не сразу после `showRoot`: подписчик вправе мерить меню прямо
     // в обработчике, и на этом шаге уровень уже в Top Layer, а цепочка и реестр движка
     // приведены в показанное состояние. Раньше рассылать нельзя, позже — незачем.
@@ -2739,12 +2754,16 @@ export class MyContext extends EventTarget {
     if (this.#destroyed) {
       return;
     }
+    const serial = this.#openSerial;
     const parent = entry.parent;
     if (parent !== null) {
       this.#truncateChain(parent);
     }
     this.#layer.showSubmenu(entry);
     await this.#leadAhead(entry);
+    if (this.#showCancelled(serial)) {
+      return;
+    }
     this.#chain.push(entry);
     this.#keyboard.registerLevel(entry, { focus: false });
   }
@@ -2805,6 +2824,7 @@ export class MyContext extends EventTarget {
     if (this.#destroyed) {
       return;
     }
+    const serial = this.#openSerial;
     // Правило доступности повторяется здесь намеренно. Вызывающие фильтруют её по
     // своей нужде — подпиской на показ и активацией пункта, — но путь показа,
     // оставленный без собственной проверки, откроет то, к чему ведёт отключённый
@@ -2831,7 +2851,14 @@ export class MyContext extends EventTarget {
     if (parent === undefined || submenuItems === null) {
       return;
     }
-    await this.#openSubmenu(await this.#ensureSubmenuLevel(submenuItems, parent, rendered));
+    const entry = await this.#ensureSubmenuLevel(submenuItems, parent, rendered);
+    // Пока собирались данные подменю, курсор мог уйти на соседний пункт, а меню —
+    // закрыться. Показ, доигравший после этого, открыл бы подменю у того, кто уже
+    // передумал, а в цепочке появился бы уровень без показавшего его уровня.
+    if (this.#showCancelled(serial) || !this.#chain.includes(parent)) {
+      return;
+    }
+    await this.#openSubmenu(entry);
   }
 
   /**
@@ -3056,8 +3083,13 @@ export class MyContext extends EventTarget {
    * @returns {Promise<LevelEntry>}
    */
   async #ensureLevel(items, parent, levelIndex, ownerItem) {
+    const serial = this.#openSerial;
     const entry = await this.#layer.ensureLevel(items, parent, levelIndex, ownerItem);
-    if (this.#levels.has(entry.element)) {
+    if (this.#showCancelled(serial) || this.#levels.has(entry.element)) {
+      // Отменённый показ оставляет уровень собранным, но не показанным и без
+      // обработчиков. Сносить его незачем: следующий показ того же состава получит
+      // тот же уровень из слоя, и второй не появится. Показан он не был ни разу, то
+      // есть и в DOM не входил; разбирается он вместе с экземпляром.
       return entry;
     }
     this.#levels.set(entry.element, entry);
@@ -3131,6 +3163,7 @@ export class MyContext extends EventTarget {
    * @returns {Promise<void>}
    */
   async #leadAhead(entry) {
+    const serial = this.#openSerial;
     for (const rendered of entry.items) {
       const leadsSomewhere = rendered.hasSubmenu || rendered.handsOff;
       if (!leadsSomewhere || !rendered.focusable) {
@@ -3156,6 +3189,9 @@ export class MyContext extends EventTarget {
         // Ведётся по частям: подписки на пункт не ждут данных подменю, а ждать их
         // пришлось бы ради одного уровня, который к показу может и не дойти.
         await this.#ensureSubmenuLevel(rendered.submenuItems, entry, rendered);
+        if (this.#showCancelled(serial)) {
+          return;
+        }
       }
     }
     // Второй проход — по доступным пунктам без подменю: в первом на них явно вызвано

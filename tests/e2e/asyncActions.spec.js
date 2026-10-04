@@ -667,3 +667,68 @@ test.describe('показ подменю', () => {
     expect(await page.locator('.vc-menu:popover-open').count(), 'подменю не показалось').toBe(1);
   });
 });
+
+test.describe('отмена висящего показа', () => {
+  test('закрытие во время сбора данных отменяет показ', async ({ page }) => {
+    await setup(page, { items: [{ id: 'Первый', label: 'Первый', slow: ['label'] }] });
+    const opening = page.evaluate(() => {
+      const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.openNow(400, 300);
+    });
+    await page.evaluate(() => {
+      const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__mc.closeMenu();
+    });
+    await opening;
+    const log = await read(page);
+    expect(log.visible, 'меню не появилось').toBe(false);
+    expect(log.openCount, 'событие open не рассылалось').toBe(0);
+  });
+
+  test('destroy во время сбора данных не оставляет уровней в документе', async ({ page }) => {
+    await setup(page, { items: [{ id: 'Первый', label: 'Первый', slow: ['label'] }] });
+    const opening = page.evaluate(() => {
+      const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.openNow(400, 300);
+    });
+    await page.evaluate(() => {
+      const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__mc.destroyMenu();
+    });
+    await opening;
+    await expect(page.locator('.vc-menu')).toHaveCount(0);
+    expect((await read(page)).openCount, 'событие open не рассылалось').toBe(0);
+  });
+
+  test('два показа подряд показывают только последний', async ({ page }) => {
+    await setup(page, { items: [{ id: 'Первый', label: 'Первый', slow: ['label'] }] });
+    // Оба вызова в одном evaluate: разнесённые по двум заходам они успели бы
+    // разойтись по времени, и кейс проверял бы скорость машины, а не отмену.
+    await page.evaluate(() => {
+      const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+      void scope.__mc.openNow(400, 300);
+      void scope.__mc.openNow(200, 150);
+    });
+    await page.waitForTimeout(120);
+    const log = await read(page);
+    expect(log.labels, 'показан последний состав').toEqual(['Первый']);
+    expect(log.openCount, 'показ состоялся один раз').toBe(1);
+  });
+
+  test('отпускание до готовности данных не показывает вооружённое меню', async ({ page }) => {
+    // `pressAndHold: 'left'`, подпись ждёт задачу: палец успевает отпустить
+    // раньше, чем меню появится.
+    await setup(page, { pressAndHold: 'left', attached: true, items: [{ id: 'Первый', label: 'Первый', slow: ['label'] }] });
+    await page.mouse.move(200, 150);
+    await page.mouse.down({ button: 'left' });
+    await page.waitForTimeout(5);
+    await page.mouse.up({ button: 'left' });
+    await page.waitForTimeout(120);
+    const log = await read(page);
+    expect(log.visible, 'меню не появилось').toBe(false);
+    expect(await page.evaluate(() => {
+      const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.readArmed();
+    }), 'жест погашен').toBe(false);
+  });
+});
