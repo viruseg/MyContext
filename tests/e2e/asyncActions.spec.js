@@ -39,6 +39,8 @@ import { expect, test } from '@playwright/test';
  * @property {Array<ItemSpec>} [submenu] состав подменю.
  * @property {boolean} [enabled] ответ предиката доступности.
  * @property {number} [version] метка состава, заставляющая перестроить уровень.
+ * @property {'slow-open' | 'throw' | 'count'} [handoff] вид отдачи пункта:
+ *   открыть чужое меню после ожидания, бросить или просто считать вызовы.
  * @property {Array<'label' | 'icon' | 'submenu' | 'enabled'>} [slow] поля,
  *   которые страница обернёт в `async` с настоящей задержкой.
  * @property {boolean} [fail] ронять ли `labelAction` этого пункта. Отказ нельзя
@@ -54,6 +56,8 @@ import { expect, test } from '@playwright/test';
  * @property {boolean} [reopen] звать ли `open()` из действия изнутри.
  * @property {ItemSpec[]} [items] пункты меню; без них заводится один пункт с
  *   действием по `mode`.
+ * @property {'slow-open' | 'throw' | 'count'} [handoff] вид отдачи пункта по
+ *   умолчанию: открыть чужое меню после ожидания, бросить или просто считать вызовы.
  * @property {boolean} [attached] привязать ли меню к контейнеру.
  * @property {import('../../src/constants.js').PressAndHoldMode} [pressAndHold]
  */
@@ -70,6 +74,9 @@ import { expect, test } from '@playwright/test';
  * @property {string[]} escapedBy каналы, по которым отказ ушёл на страницу:
  *   `error:…` — непойманная ошибка, `unhandledrejection:…` — отказ промиса.
  * @property {string[]} marks идентификаторы званных действий, по порядку.
+ * @property {number} handoffCalls сколько раз звалась отдача.
+ * @property {boolean} childVisible показан ли уровень чужого меню.
+ * @property {string | null} childConfig значение `pressAndHold` чужого меню.
  */
 
 /**
@@ -80,6 +87,7 @@ import { expect, test } from '@playwright/test';
  * @property {(x: number, y: number) => Promise<void>} openNow
  * @property {() => void} activate
  * @property {() => void} closeMenu
+ * @property {(index: number) => void} hoverItem
  * @property {(index: number) => void} showSubmenuAt
  * @property {() => void} closeSubmenu
  * @property {() => void} destroyMenu
@@ -186,6 +194,10 @@ async function setup(page, input = {}) {
       /** @type {Record<string, unknown>} */
       const item = {};
       const text = String(spec.id ?? spec.label ?? 'Пункт');
+      // Отдача по умолчанию выключена: пункт без `handoff` обязан остаться
+      // обычным и вызывать своё `action` по клику. Вид отдачи берётся из поля
+      // `handoff` только когда его назвали явно.
+      const handoffKind = spec.handoff ?? 'none';
       const slow = spec.slow ?? [];
       /**
        * @param {'label' | 'icon' | 'submenu' | 'enabled'} field
@@ -232,9 +244,43 @@ async function setup(page, input = {}) {
       item.action = () => {
         marks.push(text);
       };
+      if (handoffKind === 'slow-open') {
+        item.handoffAction = async (
+          /** @type {Event} */ _event,
+          /** @type {import('../../src/MyContext.js').SubmenuHandoff} */ handoff,
+        ) => {
+          handoffCalls += 1;
+          await wait(delay);
+          // Ребёнок заводится здесь же и сразу же вооружается на переданную
+          // кнопку: его `pressAndHold` назван явно, чтобы вооружение не зависело
+          // от пресета ребёнка.
+          const button = handoff.button ?? 'right';
+          const child = new MyContext([{ labelAction: () => 'Ребёнок' }], {
+            pressAndHold: /** @type {import('../../src/constants.js').PressAndHoldMode} */ (button),
+          });
+          childConfig = String(handoff.button);
+          childOpen = child;
+          await child.openSubmenu(220, 170, handoff);
+        };
+      } else if (handoffKind === 'throw') {
+        item.handoffAction = async () => {
+          handoffCalls += 1;
+          await wait(delay);
+          throw new Error(failure);
+        };
+      } else if (handoffKind === 'count') {
+        item.handoffAction = () => {
+          handoffCalls += 1;
+        };
+      }
       return /** @type {MenuItem} */ (item);
     }
 
+    let handoffCalls = 0;
+    /** @type {string | null} */
+    let childConfig = null;
+    /** @type {InstanceType<typeof MyContext> | null} */
+    let childOpen = null;
     /** @type {MenuItem[]} */
     let items = [];
     /** @type {InstanceType<typeof MyContext> | null} */
@@ -250,6 +296,12 @@ async function setup(page, input = {}) {
 
     scope.__mc = {
       make(setup0) {
+        handoffCalls = 0;
+        childConfig = null;
+        if (childOpen !== null) {
+          childOpen.destroy();
+          childOpen = null;
+        }
         errorSources.length = 0;
         errorMessages.length = 0;
         errorPrevented = 0;
@@ -264,20 +316,19 @@ async function setup(page, input = {}) {
         if (setup0.items !== undefined) {
           items = setup0.items.map((spec) => build(spec));
         } else {
-          const instance = { labelAction: () => 'Пункт' };
+          // Пункт идёт через `build`, чтобы получил отдачу по `setup0.handoff`,
+          // а действие подменяется ниже: `mode` — про действие, а не про пункт.
+          const base = build({ id: 'Пункт', label: 'Пункт', handoff: setup0.handoff });
           items = [
-            mode === 'ok'
-              ? /** @type {MenuItem} */ ({
-                ...instance,
-                action: () => {
+            /** @type {MenuItem} */ ({
+              ...base,
+              action: mode === 'ok'
+                ? () => {
                   if (setup0.reopen === true) {
                     menu?.open({ x: 200, y: 200 });
                   }
-                },
-              })
-              : /** @type {MenuItem} */ ({
-                ...instance,
-                action: async () => {
+                }
+                : async () => {
                   await wait(delay);
                   if (mode === 'async-throw') {
                     throw new Error(failure);
@@ -286,7 +337,7 @@ async function setup(page, input = {}) {
                     await menu?.open({ x: 200, y: 200 });
                   }
                 },
-              }),
+            }),
           ];
         }
         menu = new MyContext(items);
@@ -362,6 +413,13 @@ async function setup(page, input = {}) {
         }
         menu.close();
       },
+      hoverItem(index) {
+        const item = document.querySelectorAll('.vc-item')[index];
+        if (!(item instanceof HTMLElement)) {
+          throw new Error('пункт не показан');
+        }
+        item.dispatchEvent(new PointerEvent('pointerenter', { bubbles: false }));
+      },
       showSubmenuAt(index) {
         const item = document.querySelectorAll('.vc-item')[index];
         if (!(item instanceof HTMLElement)) {
@@ -382,6 +440,7 @@ async function setup(page, input = {}) {
       },
       destroyMenu() {
         menu?.destroy();
+        childOpen?.destroy();
       },
       read() {
         return {
@@ -395,6 +454,16 @@ async function setup(page, input = {}) {
           errorPrevented,
           escapedBy: escapedBy.slice(),
           marks: marks.slice(),
+          handoffCalls,
+          // Видимость ребёнка читается по его подписи: у него нет ни класса, ни
+          // адреса, доступных снаружи, а подпись у него своя.
+          // Видимость ребёнка читается по его подписи **в показанных** уровнях:
+          // закрытый уровень остаётся в DOM до конца выхода, и подпись в нём есть
+          // даже когда меню давно ушло с экрана.
+          childVisible: Array.from(
+            document.querySelectorAll('.vc-menu:popover-open .vc-item .vc-label'),
+          ).some((node) => String(node.textContent) === 'Ребёнок'),
+          childConfig: childOpen === null ? null : childConfig,
         };
       },
       readArmed() {
@@ -459,9 +528,10 @@ test.describe('отказы действий', () => {
     await setup(page, { mode: 'async-throw', watch: true });
     await openMenu(page);
     await activateItem(page);
-    await page.waitForTimeout(120);
+    await expect.poll(async () => {
+      return (await read(page)).errorMessages;
+    }, { message: 'отказ дошёл до подписчика' }).toEqual([FAILURE_TEXT])
     const log = await read(page);
-    expect(log.errorMessages, 'отказ дошёл до подписчика').toEqual([FAILURE_TEXT]);
     expect(log.errorSources, 'отказ назван своим действием').toHaveLength(1);
     expect(log.visible, 'меню закрыто, несмотря на отказ').toBe(false);
   });
@@ -470,9 +540,10 @@ test.describe('отказы действий', () => {
     await setup(page, { mode: 'async-throw', watch: true, preventDefault: true });
     await openMenu(page);
     await activateItem(page);
-    await page.waitForTimeout(120);
+    await expect.poll(async () => {
+      return (await read(page)).errorPrevented;
+    }, { message: 'подписчик отменил отказ' }).toBe(1)
     const log = await read(page);
-    expect(log.errorPrevented, 'подписчик отменил отказ').toBe(1);
     expect(log.escapedBy, 'наружу ничего не ушло').toEqual([]);
   });
 
@@ -495,9 +566,10 @@ test.describe('переоткрытие из действия', () => {
     await setup(page, { mode: 'async-ok', reopen: true });
     await openMenu(page);
     await activateItem(page);
-    await page.waitForTimeout(150);
+    await expect.poll(async () => {
+      return (await read(page)).openCount;
+    }, { message: 'меню переоткрылось вторым показом' }).toBe(2)
     const log = await read(page);
-    expect(log.openCount, 'меню переоткрылось вторым показом').toBe(2);
     // Переоткрытие намеренно отменяет закрытие — так оно вело себя и для
     // синхронного действия. Значит `close` не рассылается вовсе.
     expect(log.closeCount, 'закрытие отменено переоткрытием').toBe(0);
@@ -508,9 +580,10 @@ test.describe('переоткрытие из действия', () => {
     await setup(page, { mode: 'ok', reopen: true });
     await openMenu(page);
     await activateItem(page);
-    await page.waitForTimeout(150);
+    await expect.poll(async () => {
+      return (await read(page)).openCount;
+    }, { message: 'синхронное действие переоткрыло меню' }).toBe(2)
     const log = await read(page);
-    expect(log.openCount).toBe(2);
     expect(log.closeCount).toBe(0);
     expect(log.visible).toBe(true);
   });
@@ -602,8 +675,9 @@ test.describe('читающие действия', () => {
       scope.__mc.setItems([{ id: 'Первый', label: 'Первый', version: 1 }]);
       return scope.__mc.openNow(400, 300);
     });
-    await page.waitForTimeout(150);
-    expect((await read(page)).labels).toEqual(['Первый']);
+    await expect.poll(async () => {
+      return (await read(page)).labels.join(',');
+    }, { message: 'на экране подпись нового уровня' }).toBe('Первый')
     expect(
       await page.evaluate(() => {
         const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
@@ -631,8 +705,9 @@ test.describe('читающие действия', () => {
       scope.__mc.setItems([{ id: 'Второй', label: 'Второй' }]);
       return scope.__mc.openNow(400, 300);
     });
-    await page.waitForTimeout(80);
-    expect((await read(page)).labels).toEqual(['Второй']);
+    await expect.poll(async () => {
+      return (await read(page)).labels.join(',');
+    }, { message: 'следующий показ прошёл целиком' }).toBe('Второй')
     expect(
       await page.evaluate(() => {
         const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
@@ -730,5 +805,54 @@ test.describe('отмена висящего показа', () => {
       const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
       return scope.__mc.readArmed();
     }), 'жест погашен').toBe(false);
+  });
+});
+
+test.describe('отдача управления', () => {
+  test('асинхронная отдача вооружает чужое меню на переданную кнопку', async ({ page }) => {
+    await setup(page, { pressAndHold: 'right', attached: true, handoff: 'slow-open' });
+    await page.mouse.move(200, 150);
+    await page.mouse.down({ button: 'right' });
+    // Вход в пункт задаётся пробой, а не движением курсора: кейс проверяет жест
+    // отдачи и её вооружение, а попадание курсора в показанный пункт — отдельное
+    // дело, зависящее от раскладки и угла появления меню.
+    await page.evaluate(() => {
+      const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__mc.hoverItem(0);
+    });
+    await page.waitForTimeout(400);
+    const log = await read(page);
+    expect(log.childConfig, 'ребёнок принял переданную кнопку').toBe('right');
+    expect(log.childVisible, 'меню ребёнка показано').toBe(true);
+    // Отпускание обязано закрыть ребёнка: вооружение перешло к нему вместе с
+    // жестом, и без этого отпускания меню осталось бы висеть.
+    await page.mouse.up({ button: 'right' });
+    await page.waitForTimeout(80);
+    expect((await read(page)).childVisible, 'отпускание закрыло ребёнка').toBe(false);
+  });
+
+  test('отказ асинхронной отдачи доходит до error', async ({ page }) => {
+    await setup(page, { watch: true, handoff: 'throw' });
+    await openMenu(page);
+    await activateItem(page);
+    await page.waitForTimeout(80);
+    const log = await read(page);
+    expect(log.errorMessages).toEqual([FAILURE_TEXT]);
+    expect(log.visible, 'родитель ушёл с экрана до действия').toBe(false);
+  });
+
+  test('асинхронная отдача не срабатывает дважды на одно наведение', async ({ page }) => {
+    await setup(page, { handoff: 'slow-open' });
+    await openMenu(page);
+    // Наведение планирует отдачу, нажатие показывает её немедленно, а `click`
+    // после нажатия приходит третьим. Метка на пункте держит отдачу от повтора.
+    await page.evaluate(() => {
+      const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__mc.hoverItem(0);
+    });
+    await page.waitForTimeout(400);
+    await activateItem(page);
+    await page.waitForTimeout(80);
+    expect((await read(page)).handoffCalls, 'отдача сработала один раз').toBe(1);
   });
 });

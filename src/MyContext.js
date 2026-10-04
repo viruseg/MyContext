@@ -2704,7 +2704,9 @@ export class MyContext extends EventTarget {
         return this.#openSubmenuFromKeyboard(entry);
       },
       handOver: (rendered, event) => {
-        this.#handOverTo(rendered, event);
+        // Движок отдачу не ждёт: она уводит наше меню с экрана и открывает чужое,
+        // а движку после этого делать нечего. Отказ разбирает сама `#handOverTo`.
+        void this.#handOverTo(rendered, event);
       },
       closeCurrentLevel: (entry) => {
         this.#closeCurrentLevel(entry);
@@ -2833,7 +2835,7 @@ export class MyContext extends EventTarget {
       return;
     }
     if (rendered.handsOff) {
-      this.#handOverTo(rendered, event);
+      await this.#handOverTo(rendered, event);
       return;
     }
     if (!rendered.hasSubmenu) {
@@ -2918,9 +2920,9 @@ export class MyContext extends EventTarget {
    *
    * @param {RenderedItem} rendered пункт, отдающий управление.
    * @param {Event} event событие активации.
-   * @returns {void}
+   * @returns {Promise<void>}
    */
-  #handOverTo(rendered, event) {
+  async #handOverTo(rendered, event) {
     const handoff = rendered.handoff;
     if (handoff === null || this.#handoffDone === rendered.element) {
       return;
@@ -2933,7 +2935,15 @@ export class MyContext extends EventTarget {
     // успеть сменить состояние.
     const gesture = this.#handoffFor(event);
     this.close();
-    handoff(event, gesture);
+    // Охраны поколения здесь нет: метка `#handoffDone` ставится до ожидания, и она
+    // же отсекает повторный вызов по `click`. А вот `try/catch` обязателен — ждать
+    // отказ некому, вызывающий `#handOverTo` живёт в обработчике DOM, и без него
+    // отказ ушёл бы в `unhandledrejection` мимо разбора.
+    try {
+      await handoff(event, gesture);
+    } catch (reason) {
+      this.#reportFailure(reason, 'handoffAction');
+    }
   }
 
   /**
