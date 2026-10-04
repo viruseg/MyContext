@@ -53,7 +53,7 @@ import { OPEN_GRACE_MS } from '../../src/constants.js';
 /**
  * @typedef {object} McProbe
  * @property {(autoHideDistance: number, containerId: string | null) => void} make
- * @property {(x: number, y: number) => void} open
+ * @property {(x: number, y: number) => Promise<void>} open
  * @property {() => Snapshot} read
  */
 
@@ -218,11 +218,11 @@ test.beforeEach(async ({ page }) => {
           menu.attach(container);
         }
       },
-      open(x, y) {
+      async open(x, y) {
         if (menu === null) {
           throw new Error('меню не создано');
         }
-        menu.open({ x, y });
+        await menu.open({ x, y });
       },
       read() {
         const rects = Array.from(document.querySelectorAll('.vc-menu')).map((element) => {
@@ -480,9 +480,9 @@ test.describe('границы правила', () => {
     await makeMenu(page, DISTANCE, 'surface');
     const idle = { x: 900, y: 600 };
     await page.mouse.move(idle.x, idle.y);
-    await page.evaluate((point) => {
+    await page.evaluate(async (point) => {
       const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
-      scope.__mc.open(point.x, point.y);
+      await scope.__mc.open(point.x, point.y);
     }, { x: 100, y: 100 });
     const before = await readMenu(page);
     expect(before.openCount, 'меню показано').toBe(1);

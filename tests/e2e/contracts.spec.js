@@ -43,7 +43,7 @@ import { expect, test } from '@playwright/test';
  * @property {() => void} makeBadTheme
  * @property {() => void} makeNaNDuration
  * @property {() => void} makeEmptyLabel
- * @property {(x: number, y: number) => void} open
+ * @property {(x: number, y: number) => Promise<void>} open
  * @property {(label: string) => void} activateWithKeyboard
  * @property {(kind: BrokenKind) => void} installBroken подмена одного действия
  *   пункта на действие, возвращающее негодное значение.
@@ -130,9 +130,9 @@ function makeWithBadOption(page, factory) {
  * @returns {Promise<void>}
  */
 function openAt(page, point) {
-  return page.evaluate((payload) => {
+  return page.evaluate(async (payload) => {
     const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
-    scope.__mc.open(payload.x, payload.y);
+    await scope.__mc.open(payload.x, payload.y);
   }, point);
 }
 
@@ -408,11 +408,11 @@ test.beforeEach(async ({ page }) => {
     makeEmptyLabel() {
       build([{ labelAction: () => 'Пункт' }], { label: '' });
     },
-    open(x, y) {
+    async open(x, y) {
       if (menu === null) {
         throw new Error('меню не создано');
       }
-      menu.open({ x, y });
+      await menu.open({ x, y });
     },
     activateWithKeyboard(name) {
       if (menu === null) {
@@ -531,11 +531,11 @@ test('подпись, иконка и подменю обязаны вернут
   /** @param {BrokenKind} kind */
     const openWithBroken = async (kind) => {
     await makeMenu(page, 'plain');
-    return page.evaluate((broken) => {
+    return page.evaluate(async (broken) => {
       const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
       scope.__mc.installBroken(broken);
       try {
-        scope.__mc.open(200, 200);
+        await scope.__mc.open(200, 200);
         return null;
       } catch (error) {
         return error instanceof Error ? error.message : String(error);
