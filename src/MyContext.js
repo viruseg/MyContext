@@ -2036,13 +2036,18 @@ export class MyContext extends EventTarget {
    * `dispatchEvent` на экземпляре доступен автору и без подписки — звать его вручную
    * незачем, и никакого контракта это не расширяет.
    *
-   * Обработчик вызывается синхронно, в том же стеке, что и действие меню. Ошибка,
-   * брошенная из него, не прерывает ни показ, ни закрытие: браузер сам отдаёт её
-   * обработчику ошибок страницы, и следующий обработчик всё равно будет вызван.
+   * Обработчик вызывается синхронно, в том же стеке, что и действие меню, и может
+   * вернуть промис: ждать его некому, поэтому подписчик поднимается обёрткой, а его
+   * отказ приходит событием `error` с `source` `` `${type}:listener` ``.
+   *
+   * Подписка и снятие идут по исходной ссылке, а не по обёртке: обёртка лежит в
+   * `#listenerWrappers` и достаётся оттуда обеими операциями, иначе `removeEventListener`
+   * перестал бы снимать подписку. Нефункциональный аргумент подпиской не оборачивается:
+   * оборачивать нечего, и платформа управляет им сама.
    *
    * @overload
    * @param {'open'} type
-   * @param {(event: CustomEvent<OpenEventDetail>) => void} listener
+   * @param {(event: CustomEvent<OpenEventDetail>) => void | Promise<void>} listener
    * @param {AddEventListenerOptions | boolean} [options]
    * @returns {void}
    */
@@ -2050,7 +2055,7 @@ export class MyContext extends EventTarget {
   /**
    * @overload
    * @param {'close'} type
-   * @param {(event: Event) => void} listener
+   * @param {(event: Event) => void | Promise<void>} listener
    * @param {AddEventListenerOptions | boolean} [options]
    * @returns {void}
    */
@@ -2071,7 +2076,7 @@ export class MyContext extends EventTarget {
    * причине.
    *
    * @param {string} type
-   * @param {((event: never) => void) | EventListenerOrEventListenerObject | null} listener
+   * @param {((event: never) => void | Promise<void>) | EventListenerOrEventListenerObject | null} listener
    * @param {AddEventListenerOptions | boolean} [options]
    * @returns {void}
    */
@@ -2094,7 +2099,7 @@ export class MyContext extends EventTarget {
    * подписка отбрасывается платформой по той же ссылке, что и до обёртки.
    *
    * @param {string} type имя события.
-   * @param {((event: never) => void) | EventListenerOrEventListenerObject | null} listener
+   * @param {((event: never) => void | Promise<void>) | EventListenerOrEventListenerObject | null} listener
    *   подписчик автора. Не функцию оборачивать нечего, и такой подпиской
    *   управляет платформа: её снятие идёт по исходной ссылке и ничего не теряет.
    * @returns {EventListener | EventListenerOrEventListenerObject | null}
@@ -2140,7 +2145,7 @@ export class MyContext extends EventTarget {
   /**
    * @overload
    * @param {'close'} type
-   * @param {(event: Event) => void} listener
+   * @param {(event: Event) => void | Promise<void>} listener
    * @param {AddEventListenerOptions | boolean} [options]
    * @returns {void}
    */
@@ -2155,7 +2160,7 @@ export class MyContext extends EventTarget {
 
   /**
    * @param {string} type
-   * @param {((event: never) => void) | EventListenerOrEventListenerObject | null} listener
+   * @param {((event: never) => void | Promise<void>) | EventListenerOrEventListenerObject | null} listener
    * @param {AddEventListenerOptions | boolean} [options]
    * @returns {void}
    */

@@ -301,9 +301,11 @@ async function buildScenario(scenario, block) {
     // правым кликом, и `dismissible` ничего бы не менял.
     const opener = textElement('button', 'demo-scenario__opener', 'Открыть меню');
     opener.type = 'button';
-    opener.addEventListener('click', () => {
+    opener.addEventListener('click', async () => {
       const rect = opener.getBoundingClientRect();
-      menu.open({ x: rect.right, y: rect.top }, { dismissible: true });
+      // Промис ждётся: показ возвращает его, а данные пунктов могут читаться
+      // асинхронно, и «открыто» без ожидания значило бы «начали открывать».
+      await menu.open({ x: rect.right, y: rect.top }, { dismissible: true });
     });
     block.appendChild(opener);
     return menu;

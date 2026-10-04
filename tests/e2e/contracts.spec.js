@@ -230,13 +230,21 @@ test.beforeEach(async ({ page }) => {
      * @returns {MenuItem}
      */
     function brokenItem(kind, broken) {
-      if (kind === 'label') {
-        return { labelAction: /** @type {() => string} */ (broken) };
-      }
-      if (kind === 'icon') {
-        return { labelAction: () => 'Пункт', iconAction: /** @type {() => IconConfig} */ (broken) };
-      }
-      return { labelAction: () => 'Пункт', submenuAction: /** @type {() => MenuItem[]} */ (broken) };
+// Приведения объявляют ту же сигнатуру, что и контракт, иначе подмена
+     // асинхронным чтением не прошла бы проверку типов и обесценила бы её.
+     if (kind === 'label') {
+       return { labelAction: /** @type {() => string | Promise<string>} */ (broken) };
+     }
+     if (kind === 'icon') {
+       return {
+         labelAction: () => 'Пункт',
+         iconAction: /** @type {() => IconConfig | Promise<IconConfig>} */ (broken),
+       };
+     }
+     return {
+       labelAction: () => 'Пункт',
+       submenuAction: /** @type {() => MenuItem[] | Promise<MenuItem[]>} */ (broken),
+     };
     }
 
   globalThis.addEventListener('error', (event) => {
