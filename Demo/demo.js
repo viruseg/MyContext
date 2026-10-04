@@ -148,18 +148,18 @@ function isSeparator(item) {
  * работающим меню.
  *
  * @param {string} scenarioId значение `data-scenario` у блока.
- * @param {() => string} readLabel чтение подписи пункта в момент клика.
+ * @param {() => string | Promise<string>} readLabel чтение подписи пункта в момент клика.
  * @returns {NonNullable<MenuItem['action']>}
  * @throws {Error} если блока или его журнала нет на странице.
  */
 function logIn(scenarioId, readLabel) {
-  return () => {
+  return async () => {
     const block = document.querySelector(`[data-scenario="${scenarioId}"]`);
     const log = block === null ? null : block.querySelector('.demo-log');
     if (!(log instanceof HTMLElement)) {
       throw new Error(`демо: у блока «${scenarioId}» нет журнала кликов`);
     }
-    log.appendChild(textElement('li', 'demo-log__item', readLabel()));
+    log.appendChild(textElement('li', 'demo-log__item', await readLabel()));
   };
 }
 
@@ -179,11 +179,13 @@ function logIn(scenarioId, readLabel) {
  * разошлась бы с той, что вернул `submenuAction`.
  *
  * @param {string} scenarioId значение `data-scenario` у блока.
- * @param {Array<MenuItem | SeparatorItem>} items пункты одного уровня.
- * @returns {Array<MenuItem | SeparatorItem>} копия уровня с действиями.
+ * @param {Array<MenuItem | SeparatorItem> | Promise<Array<MenuItem | SeparatorItem>>} items
+ *   пункты одного уровня; `submenuAction` вправе отдать промис.
+ * @returns {Promise<Array<MenuItem | SeparatorItem>>} копия уровня с действиями.
  */
-function withItemActions(scenarioId, items) {
-  return items.map((item) => {
+async function withItemActions(scenarioId, items) {
+  const level = await items;
+  return level.map((item) => {
     if (isSeparator(item)) {
       return item;
     }
@@ -193,8 +195,8 @@ function withItemActions(scenarioId, items) {
       action: logIn(scenarioId, labelAction),
       submenuAction: submenuAction === undefined
         ? undefined
-        : () => {
-          return withItemActions(scenarioId, submenuAction());
+        : async () => {
+          return withItemActions(scenarioId, await submenuAction());
         },
     };
   });
@@ -222,10 +224,11 @@ function withItemActions(scenarioId, items) {
  *
  * @param {Scenario} scenario описание сценария.
  * @param {number} scale множитель размеров меню.
- * @returns {MyContext}
+ * @returns {Promise<MyContext>} демо собирает пункты до создания меню: `submenuAction`
+ *   вправе отдать промис, а разворачивать его надо с ожиданием.
  */
-function createMenu(scenario, scale) {
-  return new MyContext(withItemActions(scenario.id, scenario.items), {
+async function createMenu(scenario, scale) {
+  return new MyContext(await withItemActions(scenario.id, scenario.items), {
     theme: 'auto',
     label: scenario.title,
     autoHideDistance: scenario.autoHideDistance ?? DEFAULT_AUTO_HIDE_DISTANCE,
@@ -274,14 +277,14 @@ function scaleControl() {
  *
  * @param {Scenario} scenario описание сценария.
  * @param {HTMLElement} block блок сценария в разметке.
- * @returns {MyContext} начальный экземпляр меню сценария. Возвращается нарочно:
+ * @returns {Promise<MyContext>} начальный экземпляр меню сценария. Возвращается нарочно:
  *   возврат делает жизненный цикл экземпляра видимым в подписи функции, а хранить
  *   его странице незачем — привязка живёт в слушателях, и `destroy()` демо не зовёт.
  *   У блока с ползунком возвращённый экземпляр устаревает после первого движения
  *   ползунка: пересборка заводит новый, и держаться за старый было бы держаться
  *   разобранного.
  */
-function buildScenario(scenario, block) {
+async function buildScenario(scenario, block) {
   // Ровно три узла, и все напечатаны здесь. Журнал наполняется по клику, но
   // дописывает строки в себя сам и структуру блока не меняет — благодаря этому
   // кейс о списке сценариев, читающий дерево блока, остаётся в силе и после
@@ -291,7 +294,7 @@ function buildScenario(scenario, block) {
     textElement('p', 'demo-scenario__hint', scenario.hint ?? DEFAULT_HINT),
     logElement(),
   );
-  let menu = createMenu(scenario, DEFAULT_SCALE);
+  let menu = await createMenu(scenario, DEFAULT_SCALE);
   if (scenario.openFromButton === true) {
     // Привязки нет намеренно: блок с этим сценарием показывает показ из чужого кода,
     // а правила закрытия поднимает сам показ. Привязанный блок открыл бы меню ещё и
@@ -315,9 +318,9 @@ function buildScenario(scenario, block) {
     //
     // Блок при этом не перерисовывается: журнал кликов накопленное переживает
     // смену размера, и `logIn` ищет его по блоку в момент клика.
-    control.range.addEventListener('input', () => {
+    control.range.addEventListener('input', async () => {
       menu.destroy();
-      menu = createMenu(scenario, Number(control.range.value));
+      menu = await createMenu(scenario, Number(control.range.value));
       menu.attach(block);
       control.readout.value = control.range.value;
     });
@@ -379,12 +382,12 @@ function bindThemeToggle() {
 }
 
 /**
- * @returns {void}
+ * @returns {Promise<void>}
  * @throws {Error} если число блоков на странице не совпадает с числом сценариев:
  *   лишний блок остался бы неоткрывающимся, а пропущенный сценарий выпал бы из
  *   демо вместе со своей проверкой.
  */
-function buildScenarios() {
+async function buildScenarios() {
   const blocks = document.querySelectorAll(BLOCK_SELECTOR);
   if (blocks.length !== scenarios.length) {
     throw new Error(
@@ -393,9 +396,9 @@ function buildScenarios() {
     );
   }
   for (const scenario of scenarios) {
-    buildScenario(scenario, scenarioBlock(scenario.id));
+    await buildScenario(scenario, scenarioBlock(scenario.id));
   }
 }
 
 bindThemeToggle();
-buildScenarios();
+await buildScenarios();

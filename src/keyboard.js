@@ -140,7 +140,7 @@
  *   `closeAll()`, и оба вызова совпадают по цели, так что второй лишний. На уходе
  *   клавишей с не-корневого уровня закрывает `closeCurrentLevel`, и возвращать фокус
  *   после него обязан вызывающий код.
- * @property {(entry: LevelEntry) => LevelEntry} openSubmenu показывает
+ * @property {(entry: LevelEntry) => Promise<LevelEntry>} openSubmenu показывает
  *   уровень-подменю и не трогает фокус: перенос на первый доступный пункт нового
  *   уровня делает сам движок сразу после вызова, и второй перенос означал бы два
  *   места показа, разошедшихся по мышиному и клавиатурному пути. Обязан быть уже
@@ -538,9 +538,9 @@ export function createKeyboard(host) {
 
   /**
    * @param {KeyboardEvent} event
-   * @returns {void}
+   * @returns {Promise<void>}
    */
-  function handleKeydown(event) {
+  async function handleKeydown(event) {
     const target = event.target;
     if (!(target instanceof Element)) {
       return;
@@ -596,8 +596,13 @@ export function createKeyboard(host) {
         if (submenu === null) {
           break;
         }
-        moveTo(host.openSubmenu(submenu), 0);
-        break;
+        // Отмена уходит здесь, а не в хвосте функции: показ подменю ждёт ответов
+        // действий его пунктов, а после ожидания событие уже разобрано, и
+        // `preventDefault` в хвосте не действовал бы — `ArrowRight` прокрутил бы
+        // страницу вбок вместо входа в подменю.
+        event.preventDefault();
+        moveTo(await host.openSubmenu(submenu), 0);
+        return;
       }
       case 'ArrowLeft': {
         leaveLevel(current);
@@ -616,7 +621,10 @@ export function createKeyboard(host) {
         if (active.hasSubmenu) {
           const submenu = submenuOf(entry, active);
           if (submenu !== null) {
-            moveTo(host.openSubmenu(submenu), 0);
+            // Отмена переносится внутрь ветки по той же причине, что в `ArrowRight`.
+            event.preventDefault();
+            moveTo(await host.openSubmenu(submenu), 0);
+            return;
           }
           break;
         }

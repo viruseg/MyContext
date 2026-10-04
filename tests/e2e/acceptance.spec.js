@@ -235,9 +235,9 @@ async function resizeViewport(page, size) {
  * @returns {Promise<void>}
  */
 function openAt(page, point) {
-  return page.evaluate((value) => {
+  return page.evaluate(async (value) => {
     const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
-    scope.__mc.open(value.x, value.y);
+    await scope.__mc.open(value.x, value.y);
   }, point);
 }
 
@@ -534,7 +534,7 @@ test.beforeEach(async ({ page }) => {
           if (menu === null) {
             throw new Error('меню не создано');
           }
-          menu.open({ x, y });
+          return menu.open({ x, y });
         },
         close() {
           if (menu === null) {
@@ -634,7 +634,7 @@ test.describe('приёмка по критериям готовности', () 
       // то, что файл разобрался, но и что вся цепочка импортов внутри него
       // (иконки, рендерер, слой, клавиатура, hover intent) доступна без сборки.
       const menu = new module.MyContext([{ labelAction: () => 'Пункт' }], { label: 'Меню без сборки' });
-      menu.open({ x: 40, y: 40 });
+      await menu.open({ x: 40, y: 40 });
       const shown = document.querySelectorAll('.vc-menu:popover-open').length;
       const label = document.querySelector('.vc-menu:popover-open .vc-label');
       menu.destroy();

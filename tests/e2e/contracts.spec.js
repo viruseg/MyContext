@@ -341,16 +341,16 @@ test.beforeEach(async ({ page }) => {
       },
       openBrokenSubmenu(kind, value) {
         build([brokenItem(kind, () => value)]);
-        menu?.open({ x: 200, y: 200 });
+        return menu?.open({ x: 200, y: 200 });
       },
       openThrowing() {
-      build([{
-        labelAction: () => {
-          throw new Error('автор бросил сам');
-        },
-      }]);
-      menu?.open({ x: 200, y: 200 });
-    },
+        build([{
+          labelAction: () => {
+            throw new Error('автор бросил сам');
+          },
+        }]);
+        return menu?.open({ x: 200, y: 200 });
+      },
       readCalls() {
         return calls;
       },
@@ -408,11 +408,11 @@ test.beforeEach(async ({ page }) => {
     makeEmptyLabel() {
       build([{ labelAction: () => 'Пункт' }], { label: '' });
     },
-    async open(x, y) {
+    open(x, y) {
       if (menu === null) {
         throw new Error('меню не создано');
       }
-      await menu.open({ x, y });
+      return menu.open({ x, y });
     },
     activateWithKeyboard(name) {
       if (menu === null) {
@@ -559,10 +559,12 @@ test('пустая подпись и пустое подменю отклоня�
    */
   const openWith = async (kind, value) => {
       await makeMenu(page, 'plain');
-    return page.evaluate((input) => {
+    return page.evaluate(async (input) => {
       const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
       try {
-        scope.__mc.openBrokenSubmenu(input.kind, input.value);
+        // Отказ действия летит из промиса `open()`, а не бросается: ловить его
+        // обязан тот, кто ждёт показ.
+        await scope.__mc.openBrokenSubmenu(input.kind, input.value);
         return null;
       } catch (error) {
         return error instanceof Error ? error.message : String(error);
@@ -574,12 +576,12 @@ test('пустая подпись и пустое подменю отклоня�
   expect(await openWith('submenu', []), 'пустое подменю').toContain('.submenuAction');
 });
 
-test('исключение из действия уходит из open() вызывающему', async ({ page }) => {
+test('исключение из действия уходит из await open() вызывающему', async ({ page }) => {
   await makeMenu(page, 'plain');
-  const message = await page.evaluate(() => {
+  const message = await page.evaluate(async () => {
     const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
     try {
-      scope.__mc.openThrowing();
+      await scope.__mc.openThrowing();
       return null;
     } catch (error) {
       return error instanceof Error ? error.message : String(error);

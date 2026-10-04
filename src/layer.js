@@ -222,12 +222,17 @@ import { applyAnimationDuration, applyScale, applyTheme } from './theme.js';
  * Слой меню: владение DOM уровней, их геометрией и порядком отрисовки.
  *
  * @typedef {object} MenuLayer
- * @property {(items: Array<MenuItem | SeparatorItem>, parent: LevelEntry | null, levelIndex: number, ownerItem: RenderedItem | null) => LevelEntry} ensureLevel
+ * @property {(items: Array<MenuItem | SeparatorItem>, parent: LevelEntry | null, levelIndex: number, ownerItem: RenderedItem | null) => Promise<LevelEntry>} ensureLevel
  *   Возвращает уровень для этого состава, создавая его при первом обращении.
  *   Идентичность уровня задают родитель и пункт-владелец, а не ссылка на массив
  *   пунктов. `parent` и `ownerItem` обязаны быть одновременно `null` (корень) или
  *   одновременно заданы (подменю), а `ownerItem` обязан быть владельцем непустого
  *   подменю — иначе создание бросает `Error`.
+ *
+ *   Промис, а не уровень: ответы действий пункта могут быть асинхронными, и до
+ *   их получения уровня не существует. Негодный состав отвергается отказом промиса,
+ *   а не броском, — иначе вызывающий, ждущий промис, поймал бы отказ как ошибку
+ *   программы, а не как результат своего же `open()`.
  *
  *   Уровень, который уже построен, приводится к предъявленному составу: тот же
  *   отпечаток — обновляются ответы действий его пунктов, другой — уровень
@@ -439,35 +444,36 @@ export function createLayer(options) {
    * @param {number} levelIndex
    * @param {RenderedItem | null} ownerItem
    * @param {string} menuId
-   * @returns {LevelEntry}
+   * @returns {Promise<LevelEntry>}
    */
   function createEntry(items, parent, levelIndex, ownerItem, menuId) {
     /** @type {RenderContext} */
     const context = { levelIndex, menuId, label, actions };
-    const rendered = renderLevel(items, context);
-    applyTheme(rendered.element, theme);
-    applyAnimationDuration(rendered.element, animationDuration);
-    applyScale(rendered.element, scale);
-    /** @type {LevelEntry} */
-    const entry = {
-      element: rendered.element,
-      items: rendered.items,
-      parent,
-      ownerItem,
-      children: [],
-      open: false,
-      itemsHash: submenuHashOf(items),
-      generation: 0,
-      activeIndex: -1,
-    };
-    levels.push(entry);
-    zones.set(entry, createScrollZones({
-      list: rendered.scroll.list,
-      level: entry.element,
-      up: rendered.scroll.up,
-      down: rendered.scroll.down,
-    }));
-    return entry;
+    return renderLevel(items, context).then((rendered) => {
+      applyTheme(rendered.element, theme);
+      applyAnimationDuration(rendered.element, animationDuration);
+      applyScale(rendered.element, scale);
+      /** @type {LevelEntry} */
+      const entry = {
+        element: rendered.element,
+        items: rendered.items,
+        parent,
+        ownerItem,
+        children: [],
+        open: false,
+        itemsHash: submenuHashOf(items),
+        generation: 0,
+        activeIndex: -1,
+      };
+      levels.push(entry);
+      zones.set(entry, createScrollZones({
+        list: rendered.scroll.list,
+        level: entry.element,
+        up: rendered.scroll.up,
+        down: rendered.scroll.down,
+      }));
+      return entry;
+    });
   }
 
 /**
@@ -486,7 +492,7 @@ export function createLayer(options) {
    * @param {LevelEntry} entry уровень, построенный ранее.
    * @param {Array<MenuItem | SeparatorItem>} items новый состав того же уровня.
    * @param {number} levelIndex
-   * @returns {LevelEntry} тот же уровень, если состав не изменился, и новый иначе.
+   * @returns {Promise<LevelEntry>} тот же уровень, если состав не изменился, и новый иначе.
    */
   function reconcile(entry, items, levelIndex) {
     const hash = submenuHashOf(items);
@@ -494,19 +500,29 @@ export function createLayer(options) {
       // Повторный показ — единственное время, когда состояние пунктов ещё можно
       // догнать: автор выключает действие между показами, и без этого прохода
       // поле действовало бы только на первом.
-      refreshItems(items, entry.items, entry.element.id, actions);
-      return entry;
+      return refreshItems(items, entry.items, entry.element.id, actions, () => {
+        return levels.includes(entry);
+      }).then(() => {
+        // Пока шли ответы, уровень могли снести — и вернуть его после было бы
+        // некем: показывать отцепленный уровень нельзя, а следующий показ искал бы
+        // уровень заново и завёл бы второй. Мёртвый уровень заводится начисто.
+        if (!levels.includes(entry)) {
+          return ensureLevel(items, entry.parent, levelIndex, entry.ownerItem);
+        }
+        return entry;
+      });
     }
     const menuId = entry.element.id;
     const parent = entry.parent;
     discardLevels(entry);
-    const fresh = createEntry(items, parent, levelIndex, entry.ownerItem, menuId);
-    if (parent === null) {
-      root = fresh;
-    } else {
-      parent.children.push(fresh);
-    }
-    return fresh;
+    return createEntry(items, parent, levelIndex, entry.ownerItem, menuId).then((fresh) => {
+      if (parent === null) {
+        root = fresh;
+      } else {
+        parent.children.push(fresh);
+      }
+      return fresh;
+    });
   }
 
   /**
@@ -559,26 +575,28 @@ export function createLayer(options) {
    * @param {LevelEntry | null} parent уровень, из которого открывается этот.
    * @param {number} levelIndex глубина уровня, начиная с 0; идёт в `aria-level`.
    * @param {RenderedItem | null} ownerItem пункт-владелец; `null` у корня.
-   * @returns {LevelEntry}
+   * @returns {Promise<LevelEntry>}
    */
   function ensureLevel(items, parent, levelIndex, ownerItem) {
     if (destroyed) {
-      throw new Error('MyContext: слой уничтожен');
+      return Promise.reject(new Error('MyContext: слой уничтожен'));
     }
     if (parent === null) {
       if (ownerItem !== null) {
-        throw new Error('MyContext: у корневого уровня нет пункта-владельца');
+        return Promise.reject(new Error('MyContext: у корневого уровня нет пункта-владельца'));
       }
       if (root === null) {
-        root = createEntry(items, null, levelIndex, ownerItem, `${menuIdPrefix}-0`);
-        return root;
+        return createEntry(items, null, levelIndex, ownerItem, `${menuIdPrefix}-0`).then((fresh) => {
+          root = fresh;
+          return fresh;
+        });
       }
       return reconcile(root, items, levelIndex);
     }
     // Уровень без пункта-владельца некуда вешать: `aria-owns` и `aria-expanded`
     // живут на пункте, и подменю без пункта осталось бы связанным с миром.
     if (ownerItem === null) {
-      throw new Error('MyContext: у уровня-подменя обязан быть пункт-владелец');
+      return Promise.reject(new Error('MyContext: у уровня-подменя обязан быть пункт-владелец'));
     }
     // Идентичность уровня — пара «родитель, владелец». Сравнение по ссылке на
     // `RenderedItem` устойчиво к перестроению разметки: элемент пункта
@@ -589,9 +607,11 @@ export function createLayer(options) {
     if (existing !== undefined) {
       return reconcile(existing, items, levelIndex);
     }
-    const entry = createEntry(items, parent, levelIndex, ownerItem, reservedSubmenuId(ownerItem));
-    parent.children.push(entry);
-    return entry;
+    const menuId = reservedSubmenuId(ownerItem);
+    return createEntry(items, parent, levelIndex, ownerItem, menuId).then((entry) => {
+      parent.children.push(entry);
+      return entry;
+    });
   }
 
   /**

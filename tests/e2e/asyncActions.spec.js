@@ -3,18 +3,19 @@ import { expect, test } from '@playwright/test';
 /**
  * Асинхронные пользовательские действия.
  *
- * Автор отдаёт библиотеке функции, и любая из них может оказаться `async`:
- * подпись пункта ждёт сеть, действие пишет в файл, отдача управления зовёт чужое
- * меню. Библиотека обязана это разбирать — ждать действия там, где её решение
- * зависит от его результата, и не терять отказ там, где ждать некому.
+ * Автор отдаёт библиотеке функции, и любая из них может оказаться `async`: подпись
+ * пункта ждёт сеть, действие пишет в файл, отдача управления зовёт чужое меню.
+ * Библиотека обязана это разбирать — ждать действия там, где её решение зависит от
+ * его результата, и не терять отказ там, где ждать некому.
  *
  * Набор разбит по месту поломки, а не по виду действия: одно и то же асинхронное
- * `action` ломается по-разному на клике (неверно считается закрытие) и на
- * отпускании (теряется жест), и проверять его двумя кейсами дешевле, чем искать
- * поломку по симптому.
+ * `action` ломается по-разному на клике (неверно считается закрытие) и на отпускании
+ * (теряется жест), и проверять его двумя кейсами дешевле, чем искать поломку по
+ * симптому.
  *
  * @typedef {import('../../src/MyContext.js').MenuItem} MenuItem
  * @typedef {import('../../src/MyContext.js').ErrorEventDetail} ErrorEventDetail
+ * @typedef {import('../../src/icons.js').IconConfig} IconConfig
  */
 
 /**
@@ -26,11 +27,35 @@ import { expect, test } from '@playwright/test';
  */
 
 /**
+ * Описание строящегося пункта — целиком из значений: `page.evaluate` не везёт
+ * функции в аргумент, поэтому «медленное» действие задаётся именем поля в
+ * `slow`, а саму функцию собирает уже страница.
+ *
+ * @typedef {object} ItemSpec
+ * @property {string} [id] авторский идентификатор: попадает в `data-id` и в
+ *   отпечаток состава, и потому годен для перестройки уровня без смены подписи.
+ * @property {string} [label] подпись пункта.
+ * @property {IconConfig} [icon] описание иконки.
+ * @property {Array<ItemSpec>} [submenu] состав подменю.
+ * @property {boolean} [enabled] ответ предиката доступности.
+ * @property {number} [version] метка состава, заставляющая перестроить уровень.
+ * @property {Array<'label' | 'icon' | 'submenu' | 'enabled'>} [slow] поля,
+ *   которые страница обернёт в `async` с настоящей задержкой.
+ * @property {boolean} [fail] ронять ли `labelAction` этого пункта. Отказ нельзя
+ *   задать значением поля, потому что значение едет в аргумент
+ *   `page.evaluate`, а функции там не перевозятся.
+ */
+
+/**
  * @typedef {object} ActionInput
  * @property {ActionMode} [mode] что делает действие пункта.
  * @property {boolean} [watch] подписан ли кто-нибудь на `error`.
  * @property {boolean} [preventDefault] вызывает ли подписчик `error` `preventDefault()`.
  * @property {boolean} [reopen] звать ли `open()` из действия изнутри.
+ * @property {ItemSpec[]} [items] пункты меню; без них заводится один пункт с
+ *   действием по `mode`.
+ * @property {boolean} [attached] привязать ли меню к контейнеру.
+ * @property {import('../../src/constants.js').PressAndHoldMode} [pressAndHold]
  */
 
 /**
@@ -38,20 +63,29 @@ import { expect, test } from '@playwright/test';
  * @property {number} openCount событий `open`.
  * @property {number} closeCount событий `close`.
  * @property {boolean} visible показан ли хоть один уровень.
-* @property {string[]} errorSources `source` из событий `error`, по порядку.
+ * @property {string[]} labels подписи пунктов показанного корня, по порядку.
+ * @property {string[]} errorSources `source` из событий `error`, по порядку.
  * @property {string[]} errorMessages сообщения отказов из событий `error`.
  * @property {number} errorPrevented сколько раз подписчик отменил отказ.
  * @property {string[]} escapedBy каналы, по которым отказ ушёл на страницу:
  *   `error:…` — непойманная ошибка, `unhandledrejection:…` — отказ промиса.
+ * @property {string[]} marks идентификаторы званных действий, по порядку.
  */
 
 /**
  * @typedef {object} AsyncProbe
  * @property {(input: ActionInput) => void} make
+ * @property {(specs: ItemSpec[]) => void} setItems
  * @property {(x: number, y: number) => Promise<void>} open
+ * @property {(x: number, y: number) => Promise<void>} openNow
  * @property {() => void} activate
  * @property {() => void} closeMenu
+ * @property {(index: number) => void} showSubmenuAt
+ * @property {() => void} closeSubmenu
+ * @property {() => void} destroyMenu
  * @property {() => ActionLog} read
+ * @property {() => boolean} readArmed
+ * @property {() => Promise<boolean>} readLabelMatchesAction
  */
 
 const STYLESHEET_PATH = '/styles/mycontext.css';
@@ -73,7 +107,7 @@ const VIEWPORT = { width: 1000, height: 700 };
 const OPEN_POINT = { x: 400, y: 300 };
 const FAILURE_TEXT = 'сломалось';
 /** Задержка действия внутри страницы, мс. */
-const ACTION_DELAY = 20;
+const DELAY = 20;
 
 /**
  * @param {import('@playwright/test').Page} page
@@ -93,134 +127,294 @@ async function setup(page, input = {}) {
     STYLESHEET_PATH,
     { timeout: 5000 },
   );
-  // Под `reduce` показ переоткрытия проходит за один такт, иначе кейс на
-  // переоткрытие измерял бы задержку анимации вместо порядка событий.
+  // Под `reduce` показ переоткрытия проходит за один такт, иначе кейсы на
+  // переоткрытие мерили бы задержку анимации вместо порядка событий.
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.evaluate(
-    async (payload) => {
-      const { MyContext } = await import('../../src/index.js');
-      const scope = /** @type {{ __mc?: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+  await page.evaluate(async (config) => {
+    const { MyContext } = await import('../../src/index.js');
+    const scope = /** @type {{ __mc?: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
 
-      /** @type {string[]} */
-      const errorSources = [];
-      /** @type {string[]} */
-      const errorMessages = [];
-      /** @type {string[]} */
-      const escapedBy = [];
-      let errorPrevented = 0;
-      let openCount = 0;
-      let closeCount = 0;
+    /** @type {string[]} */
+    const errorSources = [];
+    /** @type {string[]} */
+    const errorMessages = [];
+    /** @type {string[]} */
+    const escapedBy = [];
+    /** @type {string[]} */
+    const marks = [];
+    let errorPrevented = 0;
+    let openCount = 0;
+    let closeCount = 0;
 
-      // Настоящая задача, а не микротаска: микротаска не отдаёт управление
-      // наружу, и тест на `await` не отличил бы ожидание от его отсутствия.
-      const delay = 20;
-      const failure = 'сломалось';
+    // Настоящая задача, а не микротаска: микротаска не отдаёт управление наружу,
+    // и тест на `await` не отличил бы ожидание от его отсутствия.
+    const delay = 20;
+    const failure = 'сломалось';
 
-      // Канал ухода отказа различается намеренно: отказ промиса, который никто не
-      // держит, попадает в `unhandledrejection`, а непойманная ошибка — в `error`.
-      // Синхронный бросок из обработчика сегодня уходит вторым, и отказ действия
-      // должен уходить так же, а не первым.
-      globalThis.addEventListener('error', (event) => {
-        escapedBy.push(`error:${String(event.message)}`);
+    // Канал ухода отказа различается намеренно: отказ промиса, который никто не
+    // держит, попадает в `unhandledrejection`, а непойманная ошибка — в `error`.
+    // Синхронный бросок из обработчика сегодня уходит вторым, и отказ действия
+    // должен уходить так же, а не первым.
+    globalThis.addEventListener('error', (event) => {
+      escapedBy.push(`error:${String(event.message)}`);
+    });
+    globalThis.addEventListener('unhandledrejection', (event) => {
+      const reason = /** @type {{ message?: unknown }} */ (/** @type {unknown} */ (event.reason));
+      escapedBy.push(`unhandledrejection:${String(reason.message)}`);
+    });
+
+    /**
+     * @param {number} ms
+     * @returns {Promise<void>}
+     */
+    function wait(ms) {
+      return new Promise((resolve) => {
+        setTimeout(resolve, ms);
       });
-      globalThis.addEventListener('unhandledrejection', (event) => {
-        const reason = /** @type {{ message?: unknown }} */ (/** @type {unknown} */ (event.reason));
-        escapedBy.push(`unhandledrejection:${String(reason.message)}`);
-      });
+    }
 
-      /** @type {InstanceType<typeof MyContext> | null} */
-      let menu = null;
-
-      scope.__mc = {
-        make(config) {
-          errorSources.length = 0;
-          errorMessages.length = 0;
-          errorPrevented = 0;
-          openCount = 0;
-          closeCount = 0;
-          if (menu !== null) {
-            menu.destroy();
-          }
-          const mode = config.mode ?? 'ok';
-          const instance = new MyContext([
-            {
-              labelAction: () => 'Пункт',
-              action: mode === 'ok' ? () => {
-                if (config.reopen === true) {
-                  instance.open({ x: 200, y: 200 });
-                }
-              } : async () => {
-                await new Promise((resolve) => {
-                  setTimeout(resolve, delay);
-                });
-                if (mode === 'async-throw') {
-                  throw new Error(failure);
-                }
-                if (config.reopen === true) {
-                  await instance.open({ x: 200, y: 200 });
-                }
-              },
-            },
-          ]);
-          instance.addEventListener('open', () => {
-            openCount += 1;
-          });
-          instance.addEventListener('close', () => {
-            closeCount += 1;
-          });
-          if (config.watch === true) {
-            instance.addEventListener('error', (event) => {
-              const custom = /** @type {CustomEvent<ErrorEventDetail>} */ (
-                /** @type {unknown} */ (event)
-              );
-              errorSources.push(custom.detail.source);
-              errorMessages.push(
-                custom.detail.reason instanceof Error
-                  ? custom.detail.reason.message
-                  : String(custom.detail.reason),
-              );
-              if (config.preventDefault === true) {
-                event.preventDefault();
-                errorPrevented += 1;
-              }
-            });
-          }
-          menu = instance;
-        },
-        async open(x, y) {
-          if (menu === null) {
-            throw new Error('меню не создано');
-          }
-          await menu.open({ x, y });
-        },
-        activate() {
-          const item = document.querySelector('.vc-item');
-          if (!(item instanceof HTMLElement)) {
-            throw new Error('пункт не показан');
-          }
-          item.click();
-        },
-        closeMenu() {
-          if (menu === null) {
-            throw new Error('меню не создано');
-          }
-          menu.close();
-        },
-        read() {
-          return {
-            openCount,
-            closeCount,
-            visible: document.querySelectorAll('.vc-menu:popover-open').length > 0,
-            errorSources: errorSources.slice(),
-            errorMessages: errorMessages.slice(),
-            errorPrevented,
-            escapedBy: escapedBy.slice(),
-          };
-        },
+    /**
+     * Описание пункта превращается в пункт контракта. Каждое поле-функция
+     * получает задержку: без неё тест не отличил бы ожидание от его отсутствия.
+     * Действие пункта отмечает себя `id` — по нему видно, чей это пункт, и так
+     * ловится подмена записи карты действий на пункт другого уровня.
+     *
+     * @param {ItemSpec} spec
+     * @returns {MenuItem}
+     */
+    function build(spec) {
+      /** @type {Record<string, unknown>} */
+      const item = {};
+      const text = String(spec.id ?? spec.label ?? 'Пункт');
+      const slow = spec.slow ?? [];
+      /**
+       * @param {'label' | 'icon' | 'submenu' | 'enabled'} field
+       * @returns {boolean}
+       */
+      const isSlow = (field) => slow.includes(field);
+      if (spec.fail === true) {
+        item.labelAction = async () => {
+          await wait(delay);
+          throw new Error(failure);
+        };
+      } else if (isSlow('label')) {
+        item.labelAction = async () => {
+          await wait(delay);
+          return spec.label ?? text;
+        };
+      } else {
+        item.labelAction = () => spec.label ?? text;
+      }
+      if (spec.icon !== undefined) {
+        const icon = spec.icon;
+        item.iconAction = isSlow('icon')
+          ? async () => { await wait(delay); return icon; }
+          : () => icon;
+      }
+      if (spec.submenu !== undefined) {
+        const submenu = spec.submenu;
+        item.submenuAction = isSlow('submenu')
+          ? async () => { await wait(delay); return submenu.map((child) => build(child)); }
+          : () => submenu.map((child) => build(child));
+      }
+      if (spec.enabled !== undefined) {
+        const enabled = spec.enabled;
+        item.isEnabledAction = isSlow('enabled')
+          ? async () => { await wait(delay); return enabled; }
+          : () => enabled;
+      }
+      if (spec.id !== undefined) {
+        item.id = spec.id;
+      }
+      if (spec.version !== undefined) {
+        item.version = spec.version;
+      }
+      item.action = () => {
+        marks.push(text);
       };
-    },
-    input,
-  );
+      return /** @type {MenuItem} */ (item);
+    }
+
+    /** @type {MenuItem[]} */
+    let items = [];
+    /** @type {InstanceType<typeof MyContext> | null} */
+    let menu = null;
+    /** Вооружение приватно, и снаружи его не прочитать: признак держит проба. */
+    let armed = false;
+    globalThis.addEventListener('pointerup', () => {
+      armed = false;
+    });
+    globalThis.addEventListener('pointerdown', () => {
+      armed = true;
+    });
+
+    scope.__mc = {
+      make(setup0) {
+        errorSources.length = 0;
+        errorMessages.length = 0;
+        errorPrevented = 0;
+        openCount = 0;
+        closeCount = 0;
+        marks.length = 0;
+        escapedBy.length = 0;
+        if (menu !== null) {
+          menu.destroy();
+        }
+        const mode = setup0.mode ?? 'ok';
+        if (setup0.items !== undefined) {
+          items = setup0.items.map((spec) => build(spec));
+        } else {
+          const instance = { labelAction: () => 'Пункт' };
+          items = [
+            mode === 'ok'
+              ? /** @type {MenuItem} */ ({
+                ...instance,
+                action: () => {
+                  if (setup0.reopen === true) {
+                    menu?.open({ x: 200, y: 200 });
+                  }
+                },
+              })
+              : /** @type {MenuItem} */ ({
+                ...instance,
+                action: async () => {
+                  await wait(delay);
+                  if (mode === 'async-throw') {
+                    throw new Error(failure);
+                  }
+                  if (setup0.reopen === true) {
+                    await menu?.open({ x: 200, y: 200 });
+                  }
+                },
+              }),
+          ];
+        }
+        menu = new MyContext(items);
+        if (setup0.attached === true) {
+          const surface = document.getElementById('surface');
+          if (surface instanceof HTMLElement) {
+            menu.attach(surface);
+          }
+        }
+        if (setup0.pressAndHold !== undefined) {
+          // Опция читается только в конструкторе, поэтому пресет задаётся новым
+          // экземпляром: смена после создания была бы молчаливым игнором.
+          menu.destroy();
+          menu = new MyContext(items, { pressAndHold: setup0.pressAndHold });
+          if (setup0.attached === true) {
+            const surface = document.getElementById('surface');
+            if (surface instanceof HTMLElement) {
+              menu.attach(surface);
+            }
+          }
+        }
+        menu.addEventListener('open', () => {
+          openCount += 1;
+        });
+        menu.addEventListener('close', () => {
+          closeCount += 1;
+        });
+        if (setup0.watch === true) {
+          menu.addEventListener('error', (event) => {
+            const custom = /** @type {CustomEvent<ErrorEventDetail>} */ (
+              /** @type {unknown} */ (event)
+            );
+            errorSources.push(custom.detail.source);
+            errorMessages.push(
+              custom.detail.reason instanceof Error
+                ? custom.detail.reason.message
+                : String(custom.detail.reason),
+            );
+            if (setup0.preventDefault === true) {
+              event.preventDefault();
+              errorPrevented += 1;
+            }
+          });
+        }
+      },
+      setItems(specs) {
+        // Состав хранится по ссылке, поэтому замена содержимого массива видна
+        // следующему показу — как это делают остальные пробы проекта.
+        items.splice(0, items.length, ...specs.map((spec) => build(spec)));
+      },
+      async open(x, y) {
+        if (menu === null) {
+          throw new Error('меню не создано');
+        }
+        await menu.open({ x, y });
+      },
+      async openNow(x, y) {
+        if (menu === null) {
+          throw new Error('меню не создано');
+        }
+        await menu.open({ x, y });
+      },
+      activate() {
+        const item = document.querySelector('.vc-item');
+        if (!(item instanceof HTMLElement)) {
+          throw new Error('пункт не показан');
+        }
+        item.click();
+      },
+      closeMenu() {
+        if (menu === null) {
+          throw new Error('меню не создано');
+        }
+        menu.close();
+      },
+      showSubmenuAt(index) {
+        const item = document.querySelectorAll('.vc-item')[index];
+        if (!(item instanceof HTMLElement)) {
+          throw new Error('пункт не показан');
+        }
+        item.dispatchEvent(new PointerEvent('pointerenter', { bubbles: false }));
+      },
+      closeSubmenu() {
+        const owner = document.querySelector('.vc-item[aria-expanded="true"]');
+        const level = owner === null ? null : owner.closest('.vc-menu');
+        void level;
+        if (owner instanceof HTMLElement) {
+          const next = owner.nextElementSibling;
+          if (next instanceof HTMLElement) {
+            next.dispatchEvent(new PointerEvent('pointerenter', { bubbles: false }));
+          }
+        }
+      },
+      destroyMenu() {
+        menu?.destroy();
+      },
+      read() {
+        return {
+          openCount,
+          closeCount,
+          visible: document.querySelectorAll('.vc-menu:popover-open').length > 0,
+          labels: Array.from(document.querySelectorAll('.vc-menu:popover-open .vc-label'))
+            .map((node) => String(node.textContent)),
+          errorSources: errorSources.slice(),
+          errorMessages: errorMessages.slice(),
+          errorPrevented,
+          escapedBy: escapedBy.slice(),
+          marks: marks.slice(),
+        };
+      },
+      readArmed() {
+        return armed;
+      },
+      async readLabelMatchesAction() {
+        const label = document.querySelector('.vc-menu:popover-open .vc-label');
+        if (!(label instanceof HTMLElement)) {
+          return false;
+        }
+        marks.length = 0;
+        const item = label.closest('.vc-item');
+        if (item instanceof HTMLElement) {
+          item.click();
+        }
+        await wait(delay);
+        return marks.length === 1 && marks[0] === String(label.textContent);
+      },
+    };
+  }, input);
   await page.evaluate((config) => {
     const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
     scope.__mc.make(config);
@@ -256,7 +450,7 @@ function openMenu(page) {
 function activateItem(page) {
   return page.evaluate(() => {
     const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
-    return scope.__mc.activate();
+    scope.__mc.activate();
   });
 }
 
@@ -319,5 +513,157 @@ test.describe('переоткрытие из действия', () => {
     expect(log.openCount).toBe(2);
     expect(log.closeCount).toBe(0);
     expect(log.visible).toBe(true);
+  });
+});
+
+test.describe('читающие действия', () => {
+  test('асинхронный labelAction рисует подпись после сбора данных', async ({ page }) => {
+    await setup(page, {
+      items: [{ id: 'Первый', label: 'Первый', slow: ['label'] }],
+    });
+    await openMenu(page);
+    const log = await read(page);
+    expect(log.labels).toEqual(['Первый']);
+    expect(log.visible).toBe(true);
+  });
+
+  test('асинхронный iconAction рисует иконку', async ({ page }) => {
+    await setup(page, {
+      items: [{ id: 'Первый', icon: { type: 'emoji', value: '★' }, slow: ['icon'] }],
+    });
+    await openMenu(page);
+    await expect(page.locator('.vc-icon')).toHaveCount(1);
+  });
+
+  test('асинхронный submenuAction раскрывает подменю с шевроном и aria-owns', async ({ page }) => {
+    await setup(page, {
+      items: [
+        { id: 'Ветка', label: 'Ветка', submenu: [{ id: 'Лист', label: 'Лист' }], slow: ['submenu'] },
+      ],
+    });
+    await openMenu(page);
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
+    await expect(page.locator('.vc-menu:popover-open')).toHaveCount(2);
+    await expect(page.locator('.vc-item[aria-expanded="true"]')).toHaveCount(1);
+  });
+
+  test('асинхронный isEnabledAction гасит пункт в кольцо роуминга', async ({ page }) => {
+    await setup(page, {
+      items: [
+        { id: 'Первый', label: 'Первый' },
+        { id: 'Второй', label: 'Второй', enabled: false, slow: ['enabled'] },
+      ],
+    });
+    await openMenu(page);
+    await expect(page.locator('.vc-item[aria-disabled="true"]')).toHaveCount(1);
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowDown');
+    await expect(page.locator('.vc-item[data-active] .vc-label')).toHaveText('Первый');
+  });
+
+  test('отказ читающего действия отклоняет промис open и не показывает меню', async ({ page }) => {
+    await setup(page, {
+      items: [{ id: 'Первый', label: 'Первый', slow: ['label'], fail: true }],
+    });
+    await expect(
+      page.evaluate(() => {
+        const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+        return scope.__mc.open(400, 300);
+      }),
+    ).rejects.toThrow(FAILURE_TEXT);
+    expect((await read(page)).visible, 'меню не показано').toBe(false);
+  });
+
+  test('отказ читающего действия через contextmenu приходит в error', async ({ page }) => {
+    await setup(page, {
+      attached: true,
+      watch: true,
+      items: [{ id: 'Первый', label: 'Первый', slow: ['label'], fail: true }],
+    });
+    await page.mouse.click(200, 200, { button: 'right' });
+    await page.waitForTimeout(120);
+    const log = await read(page);
+    expect(log.errorMessages).toEqual([FAILURE_TEXT]);
+  });
+
+  test('уровень, снесённый во время перечитывания, не принимает ответы и не перебивает запись карты', async ({ page }) => {
+    await setup(page, { items: [{ id: 'Первый', label: 'Первый' }] });
+    await openMenu(page);
+    // Тот же отпечаток состава — значит `refreshItems`, а не перестройка. Пока
+    // ответы идут, третий показ меняет `version` и сносит уровень начисто.
+    await page.evaluate(() => {
+      const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__mc.setItems([{ id: 'Первый', label: 'Второй', slow: ['label'] }]);
+      return scope.__mc.openNow(400, 300);
+    });
+    await page.evaluate(() => {
+      const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__mc.setItems([{ id: 'Первый', label: 'Первый', version: 1 }]);
+      return scope.__mc.openNow(400, 300);
+    });
+    await page.waitForTimeout(150);
+    expect((await read(page)).labels).toEqual(['Первый']);
+    expect(
+      await page.evaluate(() => {
+        const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+        return scope.__mc.readLabelMatchesAction();
+      }),
+      'подпись и действие принадлежат одному пункту',
+    ).toBe(true);
+  });
+
+  test('отказ читающего действия при перечитывании оставляет показанное меню с прежними данными', async ({ page }) => {
+    await setup(page, { items: [{ id: 'Первый', label: 'Первый' }] });
+    await openMenu(page);
+    const failed = page.evaluate(() => {
+      const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__mc.setItems([{ id: 'Первый', label: 'Первый', slow: ['label'], fail: true }]);
+      return scope.__mc.openNow(400, 300);
+    });
+    await expect(failed).rejects.toThrow(FAILURE_TEXT);
+    expect((await read(page)).visible, 'меню ушло вместе с переоткрытием').toBe(false);
+    // Проверяется не развал, а целостность: следующий успешный показ читает уже
+    // новые ответы и зовёт действие своего пункта. Полуразобранный уровень после
+    // отказа выдал бы здесь чужую подпись или чужое действие.
+    await page.evaluate(() => {
+      const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__mc.setItems([{ id: 'Второй', label: 'Второй' }]);
+      return scope.__mc.openNow(400, 300);
+    });
+    await page.waitForTimeout(80);
+    expect((await read(page)).labels).toEqual(['Второй']);
+    expect(
+      await page.evaluate(() => {
+        const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+        return scope.__mc.readLabelMatchesAction();
+      }),
+      'подпись и действие принадлежат одному пункту',
+    ).toBe(true);
+  });
+});
+test.describe('показ подменю', () => {
+  test('переход на соседний пункт отменяет ещё не состоявшийся показ подменю', async ({ page }) => {
+    await setup(page, {
+      items: [
+        { id: 'Ветка', label: 'Ветка', submenu: [{ id: 'Лист', label: 'Лист' }], slow: ['submenu'] },
+        { id: 'Соседний', label: 'Соседний' },
+      ],
+    });
+    await openMenu(page);
+    // Наведение на владельца планирует показ по `OPEN_GRACE_MS`, и таймер уводится
+    // вперёд вручную: пока идут данные подменю, курсор успевает уйти на соседа.
+    await page.evaluate(() => {
+      const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__mc.showSubmenuAt(0);
+    });
+    await page.clock.install();
+    await page.clock.runFor(400);
+    await page.evaluate(() => {
+      const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__mc.closeSubmenu();
+    });
+    await page.waitForTimeout(120);
+    expect(await page.locator('.vc-menu:popover-open').count(), 'подменю не показалось').toBe(1);
   });
 });

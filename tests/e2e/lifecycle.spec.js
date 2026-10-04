@@ -327,10 +327,30 @@ function detachMenu(page) {
  * @returns {Promise<Snapshot>}
  */
 function openMenu(page, x, y) {
+  return page.evaluate(async (point) => {
+    const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+    await scope.__mc.open(point.x, point.y);
+    return scope.__mc.read();
+  }, { x, y });
+}
+
+/**
+ * Показ, обещанный, но не дожданный: снимок снимается в окне между сокрытием
+ * прежнего уровня и показом нового.
+ *
+ * Ждать промис `open()` здесь нельзя — к моменту его разрешения меню уже стоит в
+ * новой точке, и окна, ради которого кейс написан, уже нет. Отказ не ловится:
+ * действия в этих кейсах синхронны, и `open()` не может отклониться.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {number} x
+ * @param {number} y
+ * @returns {Promise<void>}
+ */
+function startShow(page, x, y) {
   return page.evaluate((point) => {
     const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
-    scope.__mc.open(point.x, point.y);
-    return scope.__mc.read();
+    void scope.__mc.open(point.x, point.y);
   }, { x, y });
 }
 
@@ -347,9 +367,9 @@ function openMenu(page, x, y) {
  * @returns {Promise<Snapshot>}
  */
 function reopenMenu(page, x, y) {
-  return page.evaluate((point) => {
+  return page.evaluate(async (point) => {
     const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
-    scope.__mc.open(point.x, point.y);
+    await scope.__mc.open(point.x, point.y);
   }, { x, y }).then(() => {
     return page.clock.fastForward(DEFAULT_ANIMATION_DURATION * 2).then(() => {
       return readMenu(page);
@@ -739,13 +759,13 @@ test.beforeEach(async ({ page }) => {
     /**
      * Открывает меню в точке `reopening` — по тому же пути, что и автор обработчика:
      * напрямую из действия пункта, мимо пробы и мимо браузера.
-     * @returns {void}
+     * @returns {Promise<void>}
      */
-    function reopenAt() {
+    async function reopenAt() {
       if (menu === null || reopenPoint === null) {
         throw new Error('нечего переоткрывать: точка не передана в make');
       }
-      menu.open({ x: reopenPoint.x, y: reopenPoint.y });
+      await menu.open({ x: reopenPoint.x, y: reopenPoint.y });
     }
 
     /**
@@ -873,13 +893,13 @@ test.beforeEach(async ({ page }) => {
         if (menu === null) {
           throw new Error('меню не создано');
         }
-        menu.open({ x, y });
+        return menu.open({ x, y });
       },
       openAsSubmenu(x, y) {
         if (menu === null) {
           throw new Error('меню не создано');
         }
-        menu.openAsSubmenu(x, y);
+        return menu.openAsSubmenu(x, y);
       },
       close() {
         if (menu === null) {
@@ -1126,7 +1146,7 @@ test.describe('жизненный цикл MyContext', () => {
     expect(afterThrow.log, 'упавшее действие в журнал не попало').toEqual(['тихий']);
   });
 
-  test('open() без attach открывает меню в заданных координатах', async ({ page }) => {
+  test('await open() без attach открывает меню в заданных координатах', async ({ page }) => {
     await makeMenu(page, 'flat', null);
     const after = await openMenu(page, WORKSPACE_POINT.x, WORKSPACE_POINT.y);
 
@@ -1151,7 +1171,7 @@ test.describe('жизненный цикл MyContext', () => {
     expect(withActive.focusLabel, 'первая стрелка даёт первый пункт').toBe('Первый');
   });
 
-  test('open() на открытом меню проходит полный цикл: закрытие и показ в новой точке', async ({ page }) => {
+  test('await open() на открытом меню проходит полный цикл: закрытие и показ в новой точке', async ({ page }) => {
     // Часы заморожены ради `reopenMenu`, который долистывает отложенный показ через
     // `fastForward`, а тот без установленных часов бросает. Под `reduce` цикл и так
     // проходит за один такт, то есть заморозка ничего не ускоряет и ничего не
@@ -1207,10 +1227,7 @@ test.describe('жизненный цикл MyContext', () => {
 
     // Отдельным `evaluate`: снимок, взятый в том же вызове, что и второй `open()`,
     // увидел бы уже показанное меню и ничего бы не сказал о промежутке.
-    await page.evaluate(() => {
-      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
-      scope.__mc.open(500, 400);
-    });
+    await startShow(page, 500, 400);
 
     // Выход идёт на месте, в Top Layer: `hidePopover` ещё не зван, но отметка
     // закрытия уже стоит, и `pointer-events` сняты. Показ отложен ровно на
@@ -1410,7 +1427,7 @@ test.describe('жизненный цикл MyContext', () => {
     expect(afterOwner.errors, 'страница без ошибок').toEqual([]);
   });
 
-  test('action, вызвавший open(), не отменяется отложенным закрытием', async ({ page }) => {
+  test('action, вызвавший await open(), не отменяется отложенным закрытием', async ({ page }) => {
     // Часы замораживаются здесь, а не в `beforeEach`: файл держит настоящее время,
     // и заморозка в общей фикстуре остановила бы таймеры hover intent у всех его
     // кейсов. Этому кейцу нужна ровно одна вещь — пережить время, — и пауза после
@@ -1590,7 +1607,7 @@ test.describe('жизненный цикл MyContext', () => {
     expect(after.openCount).toBe(0);
   });
 
-  test('detach() не уничтожает экземпляр: open() после detach() всё ещё работает', async ({ page }) => {
+  test('detach() не уничтожает экземпляр: await open() после detach() всё ещё работает', async ({ page }) => {
     await makeMenu(page, 'flat', 'workspace');
     await detachMenu(page);
 
@@ -1621,11 +1638,11 @@ test.describe('жизненный цикл MyContext', () => {
   });
 
   test('destroy() очищает карту actions целиком', async ({ page }) => {
-    const sizes = await page.evaluate(() => {
+    const sizes = await page.evaluate(async () => {
       const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
       const probe = scope.__mc;
       probe.make('nested', 'workspace');
-      probe.open(300, 200);
+      await probe.open(300, 200);
       // Два уровня — два ключа: карта принадлежит экземпляру целиком, а не уровню.
       const before = probe.actionsSize();
       probe.destroy();
@@ -1665,7 +1682,7 @@ test.describe('жизненный цикл MyContext', () => {
     expect(afterSecond.focusOwnerId, 'повторный close() вернул фокус').toBe('workspace');
   });
 
-  test('повторный open() снова регистрирует уровень в движке клавиатуры', async ({ page }) => {
+  test('повторный await open() снова регистрирует уровень в движке клавиатуры', async ({ page }) => {
     await makeMenu(page, 'flat', 'workspace');
     await rightClick(page, WORKSPACE_POINT);
     await closeMenu(page);
@@ -1840,7 +1857,8 @@ test.describe('жизненный цикл MyContext', () => {
       await page.emulateMedia({ reducedMotion: 'no-preference' });
       await makeMenu(page, 'flat', 'workspace');
       await openMenu(page, WORKSPACE_POINT.x, WORKSPACE_POINT.y);
-      const inWindow = await openMenu(page, SECOND_POINT.x, SECOND_POINT.y);
+      await startShow(page, SECOND_POINT.x, SECOND_POINT.y);
+      const inWindow = await readMenu(page);
       // Окно существует: уровень гаснет на месте и ещё в Top Layer. Без этого
       // снимка «отложенный показ отменён» ничего бы не говорила — с равным успехом
       // прошла бы и синхронная реализация без всякой отложенности.
@@ -1869,7 +1887,8 @@ test.describe('жизненный цикл MyContext', () => {
     });
     await makeMenu(page, 'flat', 'workspace');
     await openMenu(page, WORKSPACE_POINT.x, WORKSPACE_POINT.y);
-    const inWindow = await openMenu(page, SECOND_POINT.x, SECOND_POINT.y);
+    await startShow(page, SECOND_POINT.x, SECOND_POINT.y);
+    const inWindow = await readMenu(page);
     expect(inWindow.levels[0].closing, 'меню гаснет, а не показано').toBe(true);
 
     const after = await destroyMenu(page);
@@ -1901,7 +1920,8 @@ test.describe('жизненный цикл MyContext', () => {
     await page.clock.pauseAt(CLOCK_FROZEN_AT);
     await makeMenu(page, 'flat', 'workspace');
     await openMenu(page, 200, 150);
-    const inWindow = await openMenu(page, 400, 300);
+    await startShow(page, 400, 300);
+    const inWindow = await readMenu(page);
     // «Открытое» меню в окне — это и висящий показ, а не только непустая цепочка:
     // без этого третье нажатие сочло бы меню закрытым и прошло бы мимо цикла.
     expect(inWindow.levels[0].closing, 'второй вызов оставил меню гаснущим').toBe(true);
@@ -1911,7 +1931,8 @@ test.describe('жизненный цикл MyContext', () => {
     // ничем не перекрывается, и именно потому работает: время стоит, сколько бы
     // реального ни ушло на походы до третьего `open()`.
     await page.clock.fastForward(DEFAULT_ANIMATION_DURATION - 10);
-    const restarted = await openMenu(page, 600, 450);
+    await startShow(page, 600, 450);
+    const restarted = await readMenu(page);
 
     // Третий вызов пустил цикл заново, а не показал меню немедленно поверх
     // гаснущего. Без этой проверки кейс прошёл бы и на том порядке, который спека

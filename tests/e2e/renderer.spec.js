@@ -112,7 +112,7 @@ test.describe('пункт', () => {
       );
       const levelItems = host.__vcFixture();
       const { renderLevel } = await import('../../src/renderer.js');
-      const level = renderLevel(levelItems, {
+      const level = await renderLevel(levelItems, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -160,7 +160,7 @@ test.describe('пункт', () => {
       );
       const levelItems = host.__vcFixture();
       const { renderLevel } = await import('../../src/renderer.js');
-      const level = renderLevel(levelItems, {
+      const level = await renderLevel(levelItems, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -197,7 +197,7 @@ test.describe('пункт', () => {
   test('isEnabledAction без поля и с возвратом true оставляют пункт доступным', async ({ page }) => {
     const result = await page.evaluate(async () => {
       const { renderLevel } = await import('../../src/renderer.js');
-      const level = renderLevel([
+      const level = await renderLevel([
         { labelAction: () => 'Без предиката' },
         { labelAction: () => 'Вернул true', isEnabledAction: () => true },
       ], {
@@ -234,7 +234,7 @@ test.describe('пункт', () => {
         { labelAction: () => 'Строка', isEnabledAction: () => 'да' },
         { labelAction: () => 'Единица', isEnabledAction: () => 1 },
       ]));
-      const level = renderLevel(items, {
+      const level = await renderLevel(items, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -262,7 +262,7 @@ test.describe('пункт', () => {
     const result = await page.evaluate(async () => {
       const { renderLevel } = await import('../../src/renderer.js');
       const calls = [];
-      renderLevel([
+      await renderLevel([
         { labelAction: () => 'Первый', isEnabledAction: () => { calls.push(1); return true; } },
         { labelAction: () => 'Второй' },
       ], {
@@ -286,7 +286,7 @@ test.describe('пункт', () => {
       );
       const levelItems = host.__vcFixture();
       const { renderLevel } = await import('../../src/renderer.js');
-      const level = renderLevel(levelItems, {
+      const level = await renderLevel(levelItems, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -336,7 +336,7 @@ test.describe('пункт', () => {
       const levelItems = host.__vcFixture();
       const { renderLevel } = await import('../../src/renderer.js');
       const actions = new Map();
-      const level = renderLevel(levelItems, {
+      const level = await renderLevel(levelItems, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -385,7 +385,7 @@ test.describe('пункт', () => {
   });
 });
 
-test.describe('нумерация уровня', () => {
+test.describe('нумерация уровня', async () => {
   test('aria-level равен levelIndex плюс один', async ({ page }) => {
     const result = await page.evaluate(async () => {
       const host = /** @type { { __vcFixture: () => Array<MenuItem | SeparatorItem> } } */ (
@@ -395,10 +395,10 @@ test.describe('нумерация уровня', () => {
       const { renderLevel } = await import('../../src/renderer.js');
       /**
        * @param {number} levelIndex
-       * @returns {string | null}
+       * @returns {Promise<string | null>}
        */
-      const readAriaLevel = (levelIndex) => {
-        const level = renderLevel(levelItems, {
+      const readAriaLevel = async (levelIndex) => {
+        const level = await renderLevel(levelItems, {
           levelIndex,
           menuId: `vc-level-${levelIndex}`,
           label: 'Меню файла',
@@ -407,9 +407,9 @@ test.describe('нумерация уровня', () => {
         return level.items[0].element.getAttribute('aria-level');
       };
       return {
-        root: readAriaLevel(0),
-        second: readAriaLevel(1),
-        third: readAriaLevel(2),
+        root: await readAriaLevel(0),
+        second: await readAriaLevel(1),
+        third: await readAriaLevel(2),
       };
     });
 
@@ -429,7 +429,7 @@ test.describe('нумерация уровня', () => {
         { type: 'separator' },
         { labelAction: () => 'Третий' },
       ];
-      const level = renderLevel(items, {
+      const level = await renderLevel(items, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -472,7 +472,7 @@ test.describe('нумерация уровня', () => {
   test('renderItem вне уровня: aria-setsize из аргумента, ключ из menuId, aria-posinset достаёт уровень', async ({ page }) => {
     const result = await page.evaluate(async () => {
       const { renderItem } = await import('../../src/renderer.js');
-      const item = renderItem(
+      const item = await renderItem(
         { labelAction: () => 'Одинокий' },
         { levelIndex: 2, menuId: 'vc-level-2', actions: new Map() },
         7,
@@ -516,7 +516,7 @@ test.describe('сетка пункта', () => {
         { labelAction: () => 'Эмодзи', iconAction: () => ({ type: 'emoji', value: '📄' }) },
         { labelAction: () => 'Без иконки' },
       ];
-      const level = renderLevel(items, {
+      const level = await renderLevel(items, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -576,7 +576,7 @@ test.describe('сетка пункта', () => {
         { labelAction: () => 'Владелец', submenuAction: () => [{ labelAction: () => 'PDF' }] },
         { labelAction: () => 'Обычный' },
       ];
-      const level = renderLevel(items, {
+      const level = await renderLevel(items, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -626,7 +626,7 @@ test.describe('сетка пункта', () => {
         /** @type { unknown } */ (globalThis)
       );
       const { renderLevel } = await import('../../src/renderer.js');
-      const level = renderLevel(fixtures.__vcFixture(), {
+      const level = await renderLevel(fixtures.__vcFixture(), {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -696,7 +696,7 @@ test.describe('сетка пункта', () => {
   test('шеврон что-то рисует: у ::before есть ненулевая толщина рамки', async ({ page }) => {
     const result = await page.evaluate(async () => {
       const { renderLevel } = await import('../../src/renderer.js');
-      const level = renderLevel([{ labelAction: () => 'Экспорт', submenuAction: () => [{ labelAction: () => 'PDF' }] }], {
+      const level = await renderLevel([{ labelAction: () => 'Экспорт', submenuAction: () => [{ labelAction: () => 'PDF' }] }], {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -789,7 +789,7 @@ test.describe('сетка пункта', () => {
   test('шеврон реально разворачивается: transform в состояниях left и right различаются', async ({ page }) => {
     const result = await page.evaluate(async () => {
       const { renderLevel } = await import('../../src/renderer.js');
-      const level = renderLevel([
+      const level = await renderLevel([
         { labelAction: () => 'Вправо', submenuAction: () => [{ labelAction: () => 'A' }] },
         { labelAction: () => 'Влево', submenuAction: () => [{ labelAction: () => 'B' }] },
       ], {
@@ -867,10 +867,10 @@ test.describe('сетка пункта', () => {
       /**
        * @param {string} hostId
        * @param {Array<MenuItem | SeparatorItem>} items
-       * @returns {import('../../src/renderer.js').RenderedLevel}
+       * @returns {Promise<import('../../src/renderer.js').RenderedLevel>}
        */
-      const open = (hostId, items) => {
-        const level = renderLevel(items, {
+      const open = async (hostId, items) => {
+        const level = await renderLevel(items, {
           levelIndex: 0,
           menuId: 'vc-level-0',
           label: 'Меню файла',
@@ -884,13 +884,13 @@ test.describe('сетка пункта', () => {
       // Все меню остаются в документе до конца замера: узел, не вставленный в
       // документ, не имеет габаритов, и `scrollWidth` у его лейбла совпал бы с
       // `clientWidth` — многоточие выглядело бы сработавшим, не сработав.
-      const longLevel = open('host', [{ labelAction: () => long }]);
+      const longLevel = await open('host', [{ labelAction: () => long }]);
       // Третье меню — короткая подпись. Оно умещается в предел целиком, и
       // поэтому отвечает на вопрос, на который равенство ниже ответить не может:
       // ширина идёт за содержимым, а предел остаётся пределом.
-      const narrowWidth = open('host-2', [{ labelAction: () => narrow }]).element
+      const narrowWidth = (await open('host-2', [{ labelAction: () => narrow }])).element
         .getBoundingClientRect().width;
-      const shortWidth = open('host-2', [{ labelAction: () => short }]).element
+      const shortWidth = (await open('host-2', [{ labelAction: () => short }])).element
         .getBoundingClientRect().width;
       const label = /** @type {HTMLElement} */ (
         longLevel.items[0].element.querySelector('.vc-label')
@@ -939,7 +939,7 @@ test.describe('сетка пункта', () => {
        * @returns {Promise<number>}
        */
       const measure = async (items) => {
-        const level = renderLevel(items, {
+        const level = await renderLevel(items, {
           levelIndex: 0,
           menuId: 'vc-level-0',
           label: 'Меню файла',
@@ -983,7 +983,7 @@ test.describe('ключи и коллбэки', () => {
         { labelAction: () => 'Третий' },
       ];
       const actions = new Map();
-      const level = renderLevel(items, {
+      const level = await renderLevel(items, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -1025,7 +1025,7 @@ test.describe('ключи и коллбэки', () => {
         { labelAction: () => 'Третье', action: () => { calls.push('третье'); } },
       ];
       const actions = new Map();
-      const level = renderLevel(items, {
+      const level = await renderLevel(items, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -1086,10 +1086,10 @@ test.describe('ключи и коллбэки', () => {
        * @param {string} hostId
        * @param {string} menuId
        * @param {number} levelIndex
-       * @returns {import('../../src/renderer.js').RenderedLevel}
+       * @returns {Promise<import('../../src/renderer.js').RenderedLevel>}
        */
-      const render = (hostId, menuId, levelIndex) => {
-        const level = renderLevel([{ labelAction: () => `Пункт ${levelIndex}` }], {
+      const render = async (hostId, menuId, levelIndex) => {
+        const level = await renderLevel([{ labelAction: async () => `Пункт ${levelIndex}` }], {
           levelIndex,
           menuId,
           label: 'Меню файла',
@@ -1099,8 +1099,8 @@ test.describe('ключи и коллбэки', () => {
           .replaceChildren(level.element);
         return level;
       };
-      const root = render('host', 'vc-level-0', 0);
-      const child = render('host-2', 'vc-level-1', 1);
+      const root = await render('host', 'vc-level-0', 0);
+      const child = await render('host-2', 'vc-level-1', 1);
       return {
         keys: [...actions.keys()],
         rootKey: root.items[0].key,
@@ -1125,10 +1125,10 @@ test.describe('ключи и коллбэки', () => {
       const actions = new Map();
       /**
        * @param {string} tag метка экземпляра: попадает в подпись и в `action`.
-       * @returns {import('../../src/renderer.js').RenderedLevel}
+       * @returns {Promise<import('../../src/renderer.js').RenderedLevel>}
        */
-      const build = (tag) => {
-        return renderLevel([
+      const build = async (tag) => {
+        return await renderLevel([
           { labelAction: () => `Первый ${tag}`, action: () => { calls.push(`первый:${tag}`); } },
           { labelAction: () => `Второй ${tag}`, action: () => { calls.push(`второй:${tag}`); } },
         ], {
@@ -1139,8 +1139,8 @@ test.describe('ключи и коллбэки', () => {
           actions,
         });
       };
-      const first = build('a');
-      const second = build('b');
+      const first = await build('a');
+      const second = await build('b');
       // Активация пункта `1` у второго экземпляра обязана вызвать его же
       // обработчик: коллизия ключей необратима, ведь ключ не перевыводится из
       // DOM в момент клика.
@@ -1197,13 +1197,13 @@ test.describe('каркас уровня', () => {
       );
       const levelItems = host.__vcFixture();
       const { renderLevel } = await import('../../src/renderer.js');
-      const level = renderLevel(levelItems, {
+      const level = await renderLevel(levelItems, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
         actions: new Map(),
       });
-      const withoutLabel = renderLevel(levelItems, {
+      const withoutLabel = await renderLevel(levelItems, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         actions: new Map(),
@@ -1252,7 +1252,7 @@ test.describe('каркас уровня', () => {
       );
       const levelItems = host.__vcFixture();
       const { renderLevel } = await import('../../src/renderer.js');
-      const level = renderLevel(levelItems, {
+      const level = await renderLevel(levelItems, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         actions: new Map(),
@@ -1310,10 +1310,10 @@ test.describe('каркас уровня', () => {
        * @param {string} hostId
        * @param {string} menuId
        * @param {number} levelIndex
-       * @returns {import('../../src/renderer.js').RenderedLevel}
+       * @returns {Promise<import('../../src/renderer.js').RenderedLevel>}
        */
-      const render = (hostId, menuId, levelIndex) => {
-        const level = renderLevel([
+      const render = async (hostId, menuId, levelIndex) => {
+        const level = await renderLevel([
           { labelAction: () => 'Первый', submenuAction: () => [{ labelAction: () => 'A' }] },
           { labelAction: () => 'Второй', submenuAction: () => [{ labelAction: () => 'B' }] },
         ], {
@@ -1326,8 +1326,8 @@ test.describe('каркас уровня', () => {
           .replaceChildren(level.element);
         return level;
       };
-      const root = render('host', 'vc-level-0', 0);
-      const child = render('host-2', 'vc-level-1', 1);
+      const root = await render('host', 'vc-level-0', 0);
+      const child = await render('host-2', 'vc-level-1', 1);
       const owners = [...root.items, ...child.items];
       const owns = owners.map((entry) => {
         return entry.element.getAttribute('aria-owns');
@@ -1365,10 +1365,10 @@ test.describe('каркас уровня', () => {
       /**
        * @param {string} hostId
        * @param {string} menuId
-       * @returns {import('../../src/renderer.js').RenderedLevel}
+       * @returns {Promise<import('../../src/renderer.js').RenderedLevel>}
        */
-      const render = (hostId, menuId) => {
-        const level = renderLevel([
+      const render = async (hostId, menuId) => {
+        const level = await renderLevel([
           { labelAction: () => 'Первый', submenuAction: () => [{ labelAction: () => 'A' }] },
           { labelAction: () => 'Второй', submenuAction: () => [{ labelAction: () => 'B' }] },
         ], {
@@ -1383,8 +1383,8 @@ test.describe('каркас уровня', () => {
           .replaceChildren(level.element);
         return level;
       };
-      const first = render('host', 'vc-a-0');
-      const second = render('host-2', 'vc-b-0');
+      const first = await render('host', 'vc-a-0');
+      const second = await render('host-2', 'vc-b-0');
       return {
         first: first.items.map((entry) => {
           return entry.element.getAttribute('aria-owns');
@@ -1422,7 +1422,7 @@ test.describe('каркас уровня', () => {
         { labelAction: () => 'Без подменю' },
         { labelAction: () => 'С подменю', submenuAction: () => [{ labelAction: () => 'A' }] },
       ];
-      const level = renderLevel(items, {
+      const level = await renderLevel(items, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',

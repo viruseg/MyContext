@@ -176,14 +176,14 @@ import { expect, test } from '@playwright/test';
 /**
  * @typedef {object} KeyboardProbe
  * @property {(set: string, buildSubmenus?: boolean) => void} open
- * @property {(index: number, enabled: boolean) => void} reshow повторный показ
+ * @property {(index: number, enabled: boolean) => Promise<void>} reshow повторный показ
  *   корневого уровня после правки `isEnabledAction` у пункта набора: тот же путь,
  *   что и `open`, но меню не пересобирается.
- * @property {(index: number) => string | null} ensureSubmenu пытается завести
+ * @property {(index: number) => Promise<string | null>} ensureSubmenu пытается завести
  *   уровень-подменю пункта по индексу и отдаёт сообщение слоя либо `null`, если
  *   уровень заведён.
  * @property {(paths: Record<string, number[]>) => ProbeSnapshot} read
- * @property {(steps: Step[], paths: Record<string, number[]>) => StepResult[]} run
+ * @property {(steps: Step[], paths: Record<string, number[]>) => Promise<StepResult[]>} run
  */
 
 const STYLESHEET_PATH = '/styles/mycontext.css';
@@ -438,9 +438,9 @@ test.beforeEach(async ({ page }) => {
      * @param {LevelEntry} entry
      * @param {Array<MenuItem | SeparatorItem>} items
      * @param {number} levelIndex
-     * @returns {void}
+     * @returns {Promise<void>}
      */
-    function buildTree(entry, items, levelIndex) {
+    async function buildTree(entry, items, levelIndex) {
       for (const [index, item] of items.entries()) {
         if ('type' in item) {
           continue;
@@ -453,14 +453,16 @@ test.beforeEach(async ({ page }) => {
         if (!owner.hasSubmenu) {
           continue;
         }
-        const submenu = item.submenuAction === undefined ? null : item.submenuAction();
+        const submenu = item.submenuAction === undefined
+          ? null
+          : await item.submenuAction();
         if (submenu === null) {
           continue;
         }
-        const child = openedLayer().ensureLevel(submenu, entry, levelIndex + 1, owner);
+        const child = await openedLayer().ensureLevel(submenu, entry, levelIndex + 1, owner);
         levels.push(child);
         byElement.set(child.element, child);
-        buildTree(child, submenu, levelIndex + 1);
+        await buildTree(child, submenu, levelIndex + 1);
       }
     }
 
@@ -517,7 +519,7 @@ test.beforeEach(async ({ page }) => {
         openedLayer().hideAll();
         chain.length = 0;
       },
-      openSubmenu(entry) {
+      async openSubmenu(entry) {
         calls.order.push(`openSubmenu:${entry.element.id}`);
         calls.openSubmenu += 1;
         calls.openSubmenuIds.push(entry.element.id);
@@ -736,16 +738,35 @@ test.beforeEach(async ({ page }) => {
     /**
      * @param {string} key
      * @param {ItemAt | undefined} at
-     * @returns {{ prevented: boolean, target: string | null }}
+     * @returns {Promise<{ prevented: boolean, target: string | null }>}
      */
-    function press(key, at) {
+    async function press(key, at) {
       const target = at === undefined ? document.activeElement : itemAt(at).element;
       if (target === null) {
         return { prevented: false, target: null };
       }
       const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
       target.dispatchEvent(event);
+      await flush();
       return { prevented: event.defaultPrevented, target: describeTarget(target) };
+    }
+
+    /**
+     * @param {Record<string, number[]>} paths
+     * @returns {ProbeSnapshot}
+     */
+    /**
+     * Движок разбирает клавишу асинхронно: показ подменю ждёт ответов действий его
+     * пунктов, и дерево уровней дополняется уже после того, как рассылка клавиши
+     * вернулась. Проба ждёт одну задачу, чтобы движок доделал своё, — иначе снимок
+     * снимался бы на половине показа.
+     *
+     * @returns {Promise<void>}
+     */
+    function flush() {
+      return new Promise((resolve) => {
+        setTimeout(resolve, 0);
+      });
     }
 
     /**
@@ -775,9 +796,9 @@ test.beforeEach(async ({ page }) => {
 
     /**
      * @param {Step} step
-     * @returns {StepResult}
+     * @returns {Promise<StepResult>}
      */
-    function execute(step) {
+    async function execute(step) {
       if (step.command === 'reset') {
         keyboard.reset();
         return {
@@ -809,6 +830,7 @@ test.beforeEach(async ({ page }) => {
           cancelable: true,
         });
         outside.dispatchEvent(event);
+        await flush();
         return {
           command: step.command,
           key: step.key ?? null,
@@ -828,7 +850,7 @@ test.beforeEach(async ({ page }) => {
         if (child === null) {
           throw new Error('у пункта нет заведённого подменю');
         }
-        host.openSubmenu(child);
+        await host.openSubmenu(child);
         return {
           command: step.command,
           key: null,
@@ -885,6 +907,7 @@ test.beforeEach(async ({ page }) => {
           cancelable: true,
         });
         list.dispatchEvent(event);
+        await flush();
         return {
           command: step.command,
           key: step.key ?? null,
@@ -894,7 +917,7 @@ test.beforeEach(async ({ page }) => {
           levels: read(pathsOfRun).levels,
         };
       }
-      const result = press(step.key ?? '', step.at);
+      const result = await press(step.key ?? '', step.at);
       return {
         command: step.command,
         key: step.key ?? null,
@@ -908,34 +931,34 @@ test.beforeEach(async ({ page }) => {
     /**
      * @param {Step[]} steps
      * @param {Record<string, number[]>} paths
-     * @returns {StepResult[]}
+     * @returns {Promise<StepResult[]>}
      */
-    function run(steps, paths) {
+    async function run(steps, paths) {
       pathsOfRun = paths;
       /** @type {StepResult[]} */
       const results = [];
       for (const step of steps) {
-        results.push(execute(step));
+        results.push(await execute(step));
       }
       return results;
     }
 
     const probe = /** @type {KeyboardProbe} */ ({
-      open(set, buildSubmenus) {
+      async open(set, buildSubmenus) {
         openedSet = set;
         layer = createLayer({ label: 'Меню файла', theme: 'light', actions });
         const items = sets[set];
-        root = layer.ensureLevel(items, null, 0, null);
+        root = await layer.ensureLevel(items, null, 0, null);
         levels.push(root);
         byElement.set(root.element, root);
         if (buildSubmenus !== false) {
-          buildTree(root, items, 0);
+          await buildTree(root, items, 0);
         }
         openedLayer().showRoot(root, { x: 60, y: 60 });
         showInChain(root);
         keyboard.registerLevel(root, { focus: true });
       },
-      reshow(index, enabled) {
+      async reshow(index, enabled) {
         const items = sets[openedSet];
         const item = items[index];
         if (item === undefined || 'type' in item) {
@@ -947,12 +970,12 @@ test.beforeEach(async ({ page }) => {
         // оркестратор: тот же уровень заново заводится, показывается и отдаётся
         // движку, без пересборки меню.
         item.isEnabledAction = () => enabled;
-        const entry = openedLayer().ensureLevel(items, null, 0, null);
+        const entry = await openedLayer().ensureLevel(items, null, 0, null);
         openedLayer().showRoot(entry, { x: 60, y: 60 });
         showInChain(entry);
         keyboard.registerLevel(entry, { focus: true });
       },
-      ensureSubmenu(index) {
+      async ensureSubmenu(index) {
         const entry = openedRoot();
         const owner = entry.items[index];
         /** @type {string | null} */
@@ -983,12 +1006,12 @@ test.beforeEach(async ({ page }) => {
  * @returns {Promise<ScenarioResult>}
  */
 async function runScenario(page, scenario) {
-  return page.evaluate((input) => {
+  return page.evaluate(async (input) => {
     const scope = /** @type {{ __vcKb: KeyboardProbe }} */ (/** @type {unknown} */ (globalThis));
     const probe = scope.__vcKb;
-    probe.open(input.set, input.buildSubmenus);
+    await probe.open(input.set, input.buildSubmenus);
     const before = probe.read(input.paths);
-    const steps = probe.run(input.steps, input.paths);
+    const steps = await probe.run(input.steps, input.paths);
     return { before, steps, after: probe.read(input.paths) };
   }, scenario);
 }
@@ -1322,23 +1345,23 @@ test.describe('роуминг-фокус', () => {
   });
 
   test('пункт, выпавший из кольца между показами, не остаётся помеченным', async ({ page }) => {
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const scope = /** @type {{ __vcKb: KeyboardProbe }} */ (
         /** @type {unknown} */ (globalThis)
       );
       const probe = scope.__vcKb;
-      probe.open('offLimits');
+      await probe.open('offLimits');
       // Владелец сначала доступен, и на нём появляется отметка роуминга: без неё
       // кейс проверял бы сброс на пустом месте, а состояние «выключили активный
       // пункт» было бы не тем, что стоит проверить. Две стрелки — вторая
       // доступная строка набора, отделять которую от первой нечем, и «Мёртвый
       // владелец» пропускается кольцом само собой.
-      probe.run([{ command: 'press', key: 'ArrowDown' }, { command: 'press', key: 'ArrowDown' }], {
+      await probe.run([{ command: 'press', key: 'ArrowDown' }, { command: 'press', key: 'ArrowDown' }], {
         root: [],
       });
       const marked = probe.read({ root: [] });
       // Автор выключает пункт между показами, и меню открывается заново.
-      probe.reshow(2, false);
+      await probe.reshow(2, false);
       return { marked, after: probe.read({ root: [] }) };
     });
 
@@ -1736,10 +1759,10 @@ test.describe('переходы между уровнями', () => {
   });
 
   test('слой не заводит уровень под отключённого владельца подменю', async ({ page }) => {
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const scope = /** @type {{ __vcKb: KeyboardProbe }} */ (/** @type {unknown} */ (globalThis));
       const probe = scope.__vcKb;
-      probe.open('offLimits');
+      await probe.open('offLimits');
       // Отключённый пункт с непустым подменю — не владелец, поэтому у него нет
       // зарезервированного адреса, а `ensureLevel` без адреса бросит. Состояние
       // «открытое подменю при неактивном владельце», ради которого прежний кейс
@@ -1749,10 +1772,10 @@ test.describe('переходы между уровнями', () => {
       // Роуминг приводится в движение шагом вниз: открытое меню выделения не имеет,
       // и без этого шага сравнивать было бы нечего — «у отключённого нет отметки» на
       // пустом уровне не отличало бы его от любого другого пункта.
-      probe.run([{ command: 'press', key: 'ArrowDown' }], { root: [] });
+      await probe.run([{ command: 'press', key: 'ArrowDown' }], { root: [] });
       return {
-        deaf: probe.ensureSubmenu(1),
-        live: probe.ensureSubmenu(2),
+        deaf: await probe.ensureSubmenu(1),
+        live: await probe.ensureSubmenu(2),
         snapshot: probe.read({ root: [] }),
       };
     });

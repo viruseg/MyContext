@@ -111,7 +111,7 @@ import { OPEN_GRACE_MS, SAFETY_PADDING, SUBMENU_OFFSET } from '../../src/constan
  * @property {(index: number, enabled: boolean) => void} setNestedAvailability то же
  *   для пункта внутри подменю набора `nested`: там правка невозможна иначе,
  *   потому что `submenuAction` отдаёт наружу тот же массив.
- * @property {(enabled: boolean) => OwnerProbe} ownersOf
+ * @property {(enabled: boolean) => Promise<OwnerProbe>} ownersOf
  * @property {() => string[]} toggles переключения Top Layer по уровням в виде
  *   «`id` уровня:`newState`». Снимок `toggle` различает «меню переехало» и «меню
  *   на мгновение исчезло и вернулось»: конечное состояние у обоих одинаково, а
@@ -655,7 +655,7 @@ test.beforeEach(async ({ page }) => {
       toggles() {
         return toggles.slice();
       },
-      ownersOf(enabled) {
+      async ownersOf(enabled) {
         // Рендер вызывается на тех же данных, что и меню: подменю непустое, и
         // единственное различие между двумя пунктами — ответ предиката.
         const items = [{
@@ -663,7 +663,7 @@ test.beforeEach(async ({ page }) => {
           submenuAction: () => [{ labelAction: () => 'Лист' }],
           isEnabledAction: () => enabled,
         }];
-        const level = renderLevel(items, {
+        const level = await renderLevel(items, {
           levelIndex: 0,
           menuId: 'vc-проба',
           label: 'Меню пробы',
@@ -1827,11 +1827,11 @@ test.describe('показ подменю', () => {
   });
 
   test('отключённый пункт с подменю не выглядит владельцем', async ({ page }) => {
-    const owners = await page.evaluate(() => {
+    const owners = await page.evaluate(async () => {
       const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
       return {
-        live: scope.__mc.ownersOf(true),
-        deaf: scope.__mc.ownersOf(false),
+        live: await scope.__mc.ownersOf(true),
+        deaf: await scope.__mc.ownersOf(false),
       };
     });
 

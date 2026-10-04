@@ -837,6 +837,18 @@ export class MyContext extends EventTarget {
   #reopenHandle = null;
 
   /**
+   * Разрешитель промиса, которым обёрнут отложенный показ; `null`, когда показ не
+   * отложен.
+   *
+   * Живёт рядом с `#reopenHandle`, а не внутри него: отмена снимает задачу и обязана
+   * одновременно разбудить промис. Иначе `open()`, ждущий этого показа, не
+   * разрешился бы никогда — закрытие отменило бы показ, но не обещание показать.
+   *
+   * @type {(() => void) | null}
+   */
+  #reopenResolve = null;
+
+  /**
    * Запрос `prefers-reduced-motion: reduce` для решения о пропуске отложенности
    * показа. Значение `.matches` читается в момент переоткрытия, поэтому смена
    * настройки движка влияет на уже созданный экземпляр.
@@ -960,7 +972,7 @@ export class MyContext extends EventTarget {
     if (rendered.hasSubmenu || rendered.handsOff) {
       // Показ — тот же путь, что и по наведению: одно тело, один `ensureLevel` и одно
       // место, где показанный уровень отдаётся движку.
-      this.#showWhatItemLeadsTo(rendered, event);
+      this.#fireAndForget(this.#showWhatItemLeadsTo(rendered, event), 'action');
       return;
     }
     this.#fireAndForget(this.#runItemAction(rendered, event), 'action');
@@ -1059,7 +1071,7 @@ export class MyContext extends EventTarget {
     if (this.#destroyed || event.defaultPrevented) {
       return;
     }
-    this.#keyboard.handleKeydown(event);
+    this.#fireAndForget(this.#keyboard.handleKeydown(event), 'keydown');
   };
 
   /**
@@ -1317,7 +1329,7 @@ export class MyContext extends EventTarget {
     if (this.#options.pressAndHold !== 'none') {
       return;
     }
-    this.open({ x: event.clientX, y: event.clientY });
+    this.#fireAndForget(this.open({ x: event.clientX, y: event.clientY }), 'open()');
   };
 
   /**
@@ -1475,7 +1487,7 @@ export class MyContext extends EventTarget {
     if (this.#armsPress(event)) {
       event.preventDefault();
       this.#armedPress = { button: event.button, pointerId: event.pointerId };
-      this.open({ x: event.clientX, y: event.clientY });
+      this.#fireAndForget(this.open({ x: event.clientX, y: event.clientY }), 'open()');
       return;
     }
     if (event.button !== PRIMARY_MOUSE_BUTTON) {
@@ -1901,9 +1913,13 @@ export class MyContext extends EventTarget {
     //
     this.#hover = createHoverIntent({
       onOpen: () => {
+        // Предмет и событие читаются здесь, а не передаются в асинхронное тело
+        // после ожидания: за это время курсор успевает уйти с пункта, и показ открыл
+        // бы подменю уже не того пункта.
         const owner = this.#hoverOwner;
-        if (owner !== null && this.#hoverEvent !== null) {
-          this.#showWhatItemLeadsTo(owner, this.#hoverEvent);
+        const event = this.#hoverEvent;
+        if (owner !== null && event !== null) {
+          this.#fireAndForget(this.#showWhatItemLeadsTo(owner, event), 'action');
         }
       },
     });
@@ -2045,9 +2061,17 @@ export class MyContext extends EventTarget {
    * Под `prefers-reduced-motion: reduce` отложенность пропускается целиком, и цикл
    * проходит за один такт.
    *
+   * Промис, а не `void`: ответы действий пункта могут быть асинхронными, и до их
+   * получения показывать нечего. Отказ действия отклоняет этот промис, и вызывающий
+   * ловит его сам; на путях, где промис некому ждать, его разбирает `#fireAndForget`.
+   *
+   * **Проверки при этом бросают, а не отклоняют промис.** Показ асинхронен, но
+   * проверка опций — нет, и объявлять её отказом значило бы менять `@throws` метода
+   * на `rejects` и ломать привычный `try/catch` вокруг вызова.
+   *
    * @param {Point} params точка вызова в координатах вьюпорта, px.
    * @param {OpenOptions} [options] дополнительные условия показа.
-   * @returns {void}
+   * @returns {Promise<void>}
    * @throws {Error} если экземпляр уничтожен.
    * @throws {TypeError} если опции негодны.
    */
@@ -2087,8 +2111,7 @@ export class MyContext extends EventTarget {
       this.#closersForShow = true;
     }
     if (!reopening) {
-      this.#showAt(params);
-      return;
+      return this.#showAt(params);
     }
     // Подменю прежней постановки привязаны к прямоугольникам своих
     // пунктов-владельцев, а меню уезжает в новую точку, поэтому скрывается вся
@@ -2102,8 +2125,7 @@ export class MyContext extends EventTarget {
     // существовало бы вовсе. Медиазапрос читается здесь, а не в конструкторе, —
     // решение принимается в момент переоткрытия.
     if (this.#reducedMotionQuery.matches) {
-      this.#showAt(params);
-      return;
+      return this.#showAt(params);
     }
     // Задача закрытия, которую только что поставил слой внутри `hide()`, встанет в
     // очередь раньше этой: таймеры одного тика детерминированы по порядку постановки,
@@ -2111,13 +2133,31 @@ export class MyContext extends EventTarget {
     // бывает. На отложенный показ смотрят обе охраны: `#cancelReopen` снимает его
     // в каждом закрытии, а эти проверки — страховка на пути, где отмены не было.
     const serial = this.#openSerial;
-    this.#reopenHandle = defaultSchedule(() => {
-      this.#reopenHandle = null;
+    // Задача оборачивается в промис, а не остаётся таймером с показом внутри:
+    // `#showAt` ждёт данные пунктов, и показ после паузы обязан быть частью
+    // возвращаемого промиса — иначе `open()` разрешился бы до появления меню, и
+    // вызывающий, ждущий его, отсчитал бы от готовности неготового.
+    return new Promise((resolve) => {
+      // `resolve` без аргумента: промис ничего не возвращает, а передача
+      // `undefined` вывела бы его в тип `Promise<undefined>` и сломала `.then`,
+      // возвращающий показ.
+      this.#reopenResolve = () => {
+        resolve(undefined);
+      };
+      this.#reopenHandle = defaultSchedule(() => {
+        this.#reopenHandle = null;
+        const wake = this.#reopenResolve;
+        this.#reopenResolve = null;
+        if (wake !== null) {
+          wake();
+        }
+      }, this.#options.animationDuration);
+    }).then(() => {
       if (this.#destroyed || this.#openSerial !== serial) {
-        return;
+        return undefined;
       }
-      this.#showAt(params);
-    }, this.#options.animationDuration);
+      return this.#showAt(params);
+    });
   }
 
   /**
@@ -2227,6 +2267,13 @@ export class MyContext extends EventTarget {
     }
     defaultCancel(this.#reopenHandle);
     this.#reopenHandle = null;
+    // Промис отложенного показа разбуждается здесь же, а не остаётся висящим:
+    // отмена сняла задачу, значит показа не будет, и ждать его дальше незачем.
+    const resolve = this.#reopenResolve;
+    this.#reopenResolve = null;
+    if (resolve !== null) {
+      resolve();
+    }
   }
 
   /**
@@ -2301,19 +2348,19 @@ export class MyContext extends EventTarget {
    * относится к меню, которого ещё нет, и с новой постановкой несовместимо.
    *
    * @param {Point} params точка вызова в координатах вьюпорта, px.
-   * @returns {void}
+   * @returns {Promise<void>}
    */
-  #showAt(params) {
+  async #showAt(params) {
     this.#hover.cancelAll();
     // Метка отдачи снимается на показе, а не при закрытии: показ — единственное
     // место, где прежняя активация заведомо кончилась. Закрытие происходит внутри
     // самой отдачи, и снятая там метка отдала бы `click`, пришедший следом, вторым
     // вызовом по уже ушедшему меню.
     this.#handoffDone = null;
-    const root = this.#ensureLevel(this.#items, null, 0, null);
+    const root = await this.#ensureLevel(this.#items, null, 0, null);
     this.#root = root;
     this.#chain.push(root);
-    this.#leadAhead(root);
+    await this.#leadAhead(root);
     this.#layer.showRoot(root, params);
     // Позиция страницы запоминается после показа, а не до: событие `scroll` может
     // прийти уже после того, как меню встало на место, и сверять его надо с тем, что
@@ -2377,13 +2424,13 @@ export class MyContext extends EventTarget {
    * @param {number} x Координата указателя по горизонтали, `clientX`.
    * @param {number} y Координата указателя по вертикали, `clientY`.
    * @param {SubmenuHandoff} [handoff] Описание живого жеста, которым нас открыли.
-   * @returns {void}
+   * @returns {Promise<void>}
    * @throws {Error} если экземпляр уничтожен.
    * @throws {TypeError} если `pressAndHold` называет `'none'`, а `handoff` сообщает
    *   о живом жесте, либо если `handoff` не отвечает форме {@link SubmenuHandoff}.
    */
   openSubmenu(x, y, handoff) {
-    this.#showAsSubmenu(x, y, handoff, 'openSubmenu(x, y, handoff)');
+    return this.#showAsSubmenu(x, y, handoff, 'openSubmenu(x, y, handoff)');
   }
 
   /**
@@ -2398,7 +2445,7 @@ export class MyContext extends EventTarget {
    * @param {number} y Координата указателя по вертикали, `clientY`.
    * @param {SubmenuHandoff | undefined} handoff Описание живого жеста.
    * @param {string} source Имя вызывающего для сообщения об ошибке.
-   * @returns {void}
+   * @returns {Promise<void>}
    */
   #showAsSubmenu(x, y, handoff, source) {
     const gesture = readHandoff(handoff, source);
@@ -2410,7 +2457,7 @@ export class MyContext extends EventTarget {
     if (gesture.armed) {
       this.#armExternalPress(gesture.button);
     }
-    this.open({ x, y }, { dismissible: true });
+    return this.open({ x, y }, { dismissible: true });
   }
 
   /**
@@ -2428,14 +2475,14 @@ export class MyContext extends EventTarget {
    *
    * @param {number} x Координата указателя по горизонтали, `clientX`.
    * @param {number} y Координата указателя по вертикали, `clientY`.
-   * @returns {void}
+   * @returns {Promise<void>}
    * @throws {Error} если экземпляр уничтожен.
    * @throws {TypeError} если `pressAndHold` называет `'none'`: удержания нет, и
    *   закрывать показанное будет нечем.
    */
   openAsSubmenu(x, y) {
     this.#assertAlive();
-    this.#showAsSubmenu(
+    return this.#showAsSubmenu(
       x,
       y,
       {
@@ -2489,6 +2536,10 @@ export class MyContext extends EventTarget {
     // бы подписчику открытие, которому он так и не дождался.
     const wasShowing = this.#isShowing();
     this.#cancelReopen();
+    // Счётчик поколений растёт и на закрытии. Показ, ждущий данных пунктов, читает
+    // его перед ожиданием и сверяет после: без этого подъёма отменённый показ
+    // доиграл бы до конца и поднял меню уже после того, как его закрыли.
+    this.#openSerial += 1;
     // Жест снимается здесь, а не в каждом вызывающем: закрытие и вооружённое
     // удержание — две стороны одного состояния меню, и закрытие обязано гасить
     // жест всегда, включая автоскрытие и потерю фокуса окна.
@@ -2682,9 +2733,9 @@ export class MyContext extends EventTarget {
    *    переиспользует и уровень, и его `id`.
    *
    * @param {LevelEntry} entry уровень-подменю.
-   * @returns {void}
+   * @returns {Promise<void>}
    */
-  #openSubmenu(entry) {
+  async #openSubmenu(entry) {
     if (this.#destroyed) {
       return;
     }
@@ -2693,7 +2744,7 @@ export class MyContext extends EventTarget {
       this.#truncateChain(parent);
     }
     this.#layer.showSubmenu(entry);
-    this.#leadAhead(entry);
+    await this.#leadAhead(entry);
     this.#chain.push(entry);
     this.#keyboard.registerLevel(entry, { focus: false });
   }
@@ -2713,9 +2764,9 @@ export class MyContext extends EventTarget {
    * выделять пункт нового, а не только что снятого.
    *
    * @param {LevelEntry} entry уровень, найденный движком по паре «родитель, владелец».
-   * @returns {LevelEntry} показанный уровень.
+   * @returns {Promise<LevelEntry>} показанный уровень.
    */
-  #openSubmenuFromKeyboard(entry) {
+  async #openSubmenuFromKeyboard(entry) {
     if (this.#destroyed) {
       return entry;
     }
@@ -2729,8 +2780,8 @@ export class MyContext extends EventTarget {
     if (owner === null || parent === null || items === null) {
       return entry;
     }
-    const current = this.#ensureSubmenuLevel(items, parent, owner);
-    this.#openSubmenu(current);
+    const current = await this.#ensureSubmenuLevel(items, parent, owner);
+    await this.#openSubmenu(current);
     return current;
   }
 
@@ -2748,9 +2799,9 @@ export class MyContext extends EventTarget {
    * @param {Event} event событие, которым пункт активирован; отдающему достаётся
    *   как есть — координаты и кнопку доставать из него должен автор, который знает,
    *   что с ними делать.
-   * @returns {void}
+   * @returns {Promise<void>}
    */
-  #showWhatItemLeadsTo(rendered, event) {
+  async #showWhatItemLeadsTo(rendered, event) {
     if (this.#destroyed) {
       return;
     }
@@ -2780,7 +2831,7 @@ export class MyContext extends EventTarget {
     if (parent === undefined || submenuItems === null) {
       return;
     }
-    this.#openSubmenu(this.#ensureSubmenuLevel(submenuItems, parent, rendered));
+    await this.#openSubmenu(await this.#ensureSubmenuLevel(submenuItems, parent, rendered));
   }
 
   /**
@@ -3002,10 +3053,10 @@ export class MyContext extends EventTarget {
    *   у корня.
    * @param {number} levelIndex глубина уровня, начиная с 0; идёт в `aria-level`.
    * @param {RenderedItem | null} ownerItem пункт-владелец; `null` у корня.
-   * @returns {LevelEntry}
+   * @returns {Promise<LevelEntry>}
    */
-  #ensureLevel(items, parent, levelIndex, ownerItem) {
-    const entry = this.#layer.ensureLevel(items, parent, levelIndex, ownerItem);
+  async #ensureLevel(items, parent, levelIndex, ownerItem) {
+    const entry = await this.#layer.ensureLevel(items, parent, levelIndex, ownerItem);
     if (this.#levels.has(entry.element)) {
       return entry;
     }
@@ -3077,9 +3128,9 @@ export class MyContext extends EventTarget {
    * перечитывается заново.
    *
    * @param {LevelEntry} entry показываемый уровень.
-   * @returns {void}
+   * @returns {Promise<void>}
    */
-  #leadAhead(entry) {
+  async #leadAhead(entry) {
     for (const rendered of entry.items) {
       const leadsSomewhere = rendered.hasSubmenu || rendered.handsOff;
       if (!leadsSomewhere || !rendered.focusable) {
@@ -3102,7 +3153,9 @@ export class MyContext extends EventTarget {
       // Уровень заводится только владельцу: отдающему подменю нет, и заводить ему
       // нечего, а пустой уровень был бы меню без пунктов, которое нечем наполнить.
       if (rendered.hasSubmenu && rendered.submenuItems !== null) {
-        this.#ensureSubmenuLevel(rendered.submenuItems, entry, rendered);
+        // Ведётся по частям: подписки на пункт не ждут данных подменю, а ждать их
+        // пришлось бы ради одного уровня, который к показу может и не дойти.
+        await this.#ensureSubmenuLevel(rendered.submenuItems, entry, rendered);
       }
     }
     // Второй проход — по доступным пунктам без подменю: в первом на них явно вызвано
@@ -3155,11 +3208,11 @@ export class MyContext extends EventTarget {
    * не была бы видна нигде — уровень завелся бы, `aria-level` в нём оказался бы
    * не тем, и разошлись бы только `aria-level` и цепочка.
    *
-   * @param {Array<MenuItem | SeparatorItem>} items пункты подменю; непустота и
+* @param {Array<MenuItem | SeparatorItem>} items пункты подменю; непустота и
    *   доступность владельца проверены вызывающим.
-   * @param {LevelEntry} parent уровень, из которого подменю открывается.
+   * @param {LevelEntry} parent уровень, из которого открывается подменю.
    * @param {RenderedItem} ownerItem пункт-владелец подменю.
-   * @returns {LevelEntry} уровень подменю; тот же самый при повторном заведении.
+   * @returns {Promise<LevelEntry>} уровень подменю; тот же самый при повторном заведении.
    */
   #ensureSubmenuLevel(items, parent, ownerItem) {
     return this.#ensureLevel(items, parent, this.#levelIndexOf(parent) + 1, ownerItem);

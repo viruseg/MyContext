@@ -218,11 +218,11 @@ test.beforeEach(async ({ page }) => {
           menu.attach(container);
         }
       },
-      async open(x, y) {
+      open(x, y) {
         if (menu === null) {
           throw new Error('меню не создано');
         }
-        await menu.open({ x, y });
+        return menu.open({ x, y });
       },
       read() {
         const rects = Array.from(document.querySelectorAll('.vc-menu')).map((element) => {

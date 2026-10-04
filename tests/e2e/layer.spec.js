@@ -416,14 +416,14 @@ test.beforeEach(async ({ page }) => {
   }, { animationDuration: TEST_ANIMATION_DURATION });
 });
 
-test.describe('показ', () => {
+test.describe('показ', async () => {
   test('showRoot: элемент получает :popover-open и ненулевые габариты после показа', async ({ page }) => {
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { rootItems } = host.__vcSets();
       const probe = host.__vcProbe;
       const layer = probe.create();
-      const entry = layer.ensureLevel(rootItems, null, 0, null);
+      const entry = await layer.ensureLevel(rootItems, null, 0, null);
 
       // Контроль состояния «до показа»: элемент ещё не подключён, значит
       // ненулевые габариты после показа не могут объясняться тем, что он давно
@@ -477,7 +477,7 @@ test.describe('показ', () => {
       const probe = host.__vcProbe;
       const { calculateMenuPosition } = await import('../../src/positioner.js');
       const layer = probe.create();
-      const entry = layer.ensureLevel(rootItems, null, 0, null);
+      const entry = await layer.ensureLevel(rootItems, null, 0, null);
 
       // До показа уровень не подключён, поэтому габариты нулевые, а не малые.
       const before = entry.element.getBoundingClientRect();
@@ -535,12 +535,12 @@ test.describe('показ', () => {
     // `scale(0.96)`, — поэтому измеряется раскладка: `offset*` трансформацию не
     // знает.
     await page.emulateMedia({ reducedMotion: 'no-preference' });
-    const result = await page.evaluate(({ padding, edge }) => {
+    const result = await page.evaluate(async ({ padding, edge }) => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { wideItems } = host.__vcSets();
       const probe = host.__vcProbe;
       const layer = probe.create();
-      const entry = layer.ensureLevel(wideItems, null, 0, null);
+      const entry = await layer.ensureLevel(wideItems, null, 0, null);
       const anchor = { x: window.innerWidth - edge, y: window.innerHeight - 10 };
       layer.showRoot(entry, anchor);
       const element = entry.element;
@@ -579,7 +579,7 @@ test.describe('показ', () => {
       const probe = host.__vcProbe;
       const { calculateMenuPosition } = await import('../../src/positioner.js');
       const layer = probe.create();
-      const entry = layer.ensureLevel(rootItems, null, 0, null);
+      const entry = await layer.ensureLevel(rootItems, null, 0, null);
       const anchor = { x: 120, y: 90 };
       layer.showRoot(entry, anchor);
 
@@ -622,18 +622,18 @@ test.describe('показ', () => {
   });
 
   test('top layer: показанное подменю отрисовывается поверх ранее созданного соседнего', async ({ page }) => {
-    const result = await page.evaluate(({ left }) => {
+    const result = await page.evaluate(async ({ left }) => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { rootItems, subItems } = host.__vcSets();
       const probe = host.__vcProbe;
       const layer = probe.create();
-      const root = layer.ensureLevel(rootItems, null, 0, null);
+      const root = await layer.ensureLevel(rootItems, null, 0, null);
       // Меню у левого края: оба подменя помещаются справа от своих владельцев и
       // потому перекрываются — точка пересечения существует.
       layer.showRoot(root, { x: left, y: 60 });
 
-      const first = layer.ensureLevel(subItems, root, 1, root.items[0]);
-      const second = layer.ensureLevel(subItems, root, 1, root.items[2]);
+      const first = await layer.ensureLevel(subItems, root, 1, root.items[0]);
+      const second = await layer.ensureLevel(subItems, root, 1, root.items[2]);
 
       layer.showSubmenu(first);
       const firstRect = first.element.getBoundingClientRect();
@@ -703,19 +703,19 @@ test.describe('показ', () => {
   });
 
   test('признак прокручиваемости ставится на показ и снимается на коротком', async ({ page }) => {
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { longItems, shortItems } = host.__vcSets();
       const probe = host.__vcProbe;
       /**
        * @param {Array<MenuItem | SeparatorItem>} items
-       * @returns {ZoneReading}
+       * @returns {Promise<ZoneReading>}
        */
-      const shown = (items) => {
+      const shown = async (items) => {
         // Отдельный слой на каждый уровень: `ensureLevel` у корня отдаёт тот же
         // уровень по ссылке, и второй вызов с другими пунктами вернул бы первый.
         const layer = probe.create();
-        const entry = layer.ensureLevel(items, null, 0, null);
+        const entry = await layer.ensureLevel(items, null, 0, null);
         layer.showRoot(entry, { x: 40, y: 40 });
         const list = /** @type {HTMLElement} */ (entry.element.querySelector('.vc-list'));
         const zones = Array.from(entry.element.querySelectorAll('.vc-scroll-zone'));
@@ -730,7 +730,7 @@ test.describe('показ', () => {
           overflows: list.scrollHeight > list.clientHeight,
         };
       };
-      return { long: shown(longItems), short: shown(shortItems) };
+      return { long: await shown(longItems), short: await shown(shortItems) };
     });
 
     // Контроль переполнения обязателен у обоих уровней: признак, проверяемый
@@ -767,11 +767,11 @@ test.describe('показ', () => {
     // которого в показанном состоянии не бывает.
     await page.emulateMedia({ reducedMotion: 'no-preference' });
 
-    const result = await page.evaluate(({ padding }) => {
+    const result = await page.evaluate(async ({ padding }) => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { longItems } = host.__vcSets();
       const layer = host.__vcProbe.real();
-      const entry = layer.ensureLevel(longItems, null, 0, null);
+      const entry = await layer.ensureLevel(longItems, null, 0, null);
       // Точка у самого низа вьюпорта: меню в неё не помещается, и позиционер
       // прижимает его к нижнему отступу. Без этого кейс измерял бы меню там, где
       // нижнему краю некуда перешагивать.
@@ -815,11 +815,11 @@ test.describe('показ', () => {
   });
 
   test('после смены вьюпорта признак пересчитывается, а не наследуется', async ({ page }) => {
-    const before = await page.evaluate(() => {
+    const before = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { longItems } = host.__vcSets();
       const layer = host.__vcProbe.keep();
-      const entry = layer.ensureLevel(longItems, null, 0, null);
+      const entry = await layer.ensureLevel(longItems, null, 0, null);
       layer.showRoot(entry, { x: 40, y: 40 });
       const list = /** @type {HTMLElement} */ (entry.element.querySelector('.vc-list'));
       return {
@@ -831,7 +831,7 @@ test.describe('показ', () => {
     // Вдвое выше прежнего: 1120 px содержимого при рамке 1384 px переполнением
     // больше не являются.
     await page.setViewportSize({ width: 1280, height: 1400 });
-    const after = await page.evaluate(() => {
+    const after = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { longItems } = host.__vcSets();
       // Тот же слой и тот же уровень: `ensureLevel` с теми же аргументами
@@ -839,7 +839,7 @@ test.describe('показ', () => {
       // уровню, а не по новому. Открытым при этом он остаётся — на живом меню
       // смена вьюпорта закрывает его само, и кейс обязан пережить то же самое.
       const layer = host.__vcProbe.keep();
-      const entry = layer.ensureLevel(longItems, null, 0, null);
+      const entry = await layer.ensureLevel(longItems, null, 0, null);
       layer.showRoot(entry, { x: 40, y: 40 });
       const list = /** @type {HTMLElement} */ (entry.element.querySelector('.vc-list'));
       const zones = Array.from(entry.element.querySelectorAll('.vc-scroll-zone'));
@@ -870,15 +870,15 @@ test.describe('показ', () => {
   });
 });
 
-test.describe('перечитывание состояния пунктов', () => {
+test.describe('перечитывание состояния пунктов', async () => {
   test('предикат, ответивший false между показами, снимает пункт с показа', async ({ page }) => {
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcItems: () => MutableSet, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (
         /** @type { unknown } */ (globalThis)
       );
       const layer = host.__vcProbe.create();
       const { items, state } = host.__vcItems();
-      const first = layer.ensureLevel(items, null, 0, null);
+      const first = await layer.ensureLevel(items, null, 0, null);
       const owner = first.items[1];
       const ownsBefore = owner.element.getAttribute('aria-owns');
       /**
@@ -894,7 +894,7 @@ test.describe('перечитывание состояния пунктов', ()
       // один раз и открывается многократно. Предикат читает замыкание, поэтому
       // менять ему нечего: меняется состояние, из которого он читает.
       state.ownerEnabled = false;
-      const second = layer.ensureLevel(items, null, 0, null);
+      const second = await layer.ensureLevel(items, null, 0, null);
 
       return {
         sameLevel: first === second,
@@ -940,31 +940,31 @@ test.describe('перечитывание состояния пунктов', ()
   });
 
   test('уровень подменю отказавшего владельца переживает отказ и возвращается с тем же id', async ({ page }) => {
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcItems: () => MutableSet, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (
         /** @type { unknown } */ (globalThis)
       );
       const layer = host.__vcProbe.create();
       const { items, state } = host.__vcItems();
-      const root = layer.ensureLevel(items, null, 0, null);
+      const root = await layer.ensureLevel(items, null, 0, null);
       const owner = root.items[1];
       const definition = /** @type {MenuItem} */ (items[1]);
       const submenu = /** @type {Array<MenuItem | SeparatorItem>} */ (definition.submenuAction?.());
       // Подменю заводится, пока владелец ещё владельцем: у него по наведению и по
       // клику открывается уровень, и именно его переиспользование обещает README.
-      const sub = layer.ensureLevel(submenu, root, 1, owner);
+      const sub = await layer.ensureLevel(submenu, root, 1, owner);
       const ownsBefore = owner.element.getAttribute('aria-owns');
 
       state.ownerEnabled = false;
-      layer.ensureLevel(items, null, 0, null);
+      await layer.ensureLevel(items, null, 0, null);
       const whileDisabled = {
         ariaOwns: owner.element.getAttribute('aria-owns'),
         hasSubmenu: owner.hasSubmenu,
       };
 
       state.ownerEnabled = true;
-      const second = layer.ensureLevel(items, null, 0, null);
-      const restored = layer.ensureLevel(submenu, second, 1, second.items[1]);
+      const second = await layer.ensureLevel(items, null, 0, null);
+      const restored = await layer.ensureLevel(submenu, second, 1, second.items[1]);
 
       return {
         subId: sub.element.id,
@@ -1000,13 +1000,13 @@ test.describe('подменю', () => {
       const probe = host.__vcProbe;
       const { calculateSubmenuPosition } = await import('../../src/positioner.js');
       const layer = probe.create();
-      const root = layer.ensureLevel(rootItems, null, 0, null);
+      const root = await layer.ensureLevel(rootItems, null, 0, null);
       // Меню у правого края: подменю справа от владельца не помещается.
       layer.showRoot(root, { x: window.innerWidth - edge, y: 200 });
 
       const owner = root.items[0];
       const ownerRect = owner.element.getBoundingClientRect();
-      const sub = layer.ensureLevel(subItems, root, 1, owner);
+      const sub = await layer.ensureLevel(subItems, root, 1, owner);
       layer.showSubmenu(sub);
       const subRect = sub.element.getBoundingClientRect();
       const expected = calculateSubmenuPosition({
@@ -1053,13 +1053,13 @@ test.describe('подменю', () => {
       const probe = host.__vcProbe;
       const { calculateSubmenuPosition } = await import('../../src/positioner.js');
       const layer = probe.create();
-      const root = layer.ensureLevel(rootItems, null, 0, null);
+      const root = await layer.ensureLevel(rootItems, null, 0, null);
       // Меню у левого края: справа от владельца есть место.
       layer.showRoot(root, { x: left, y: 200 });
 
       const owner = root.items[0];
       const ownerRect = owner.element.getBoundingClientRect();
-      const sub = layer.ensureLevel(subItems, root, 1, owner);
+      const sub = await layer.ensureLevel(subItems, root, 1, owner);
       layer.showSubmenu(sub);
       const subRect = sub.element.getBoundingClientRect();
       const expected = calculateSubmenuPosition({
@@ -1094,19 +1094,19 @@ test.describe('подменю', () => {
   });
 
   test('aria-owns: showSubmenu проставляет пункту-владельцу aria-owns со id подменю', async ({ page }) => {
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { rootItems, subItems } = host.__vcSets();
       const probe = host.__vcProbe;
       const layer = probe.create();
-      const root = layer.ensureLevel(rootItems, null, 0, null);
+      const root = await layer.ensureLevel(rootItems, null, 0, null);
       const owner = root.items[0];
       const reserved = owner.element.getAttribute('aria-owns');
       // До создания подменю зарезервированная цель не существует: рендерер обязан
       // назвать её заранее, и до показа это висячая ссылка.
       const reservedBefore = document.getElementById(reserved ?? '') !== null;
 
-      const sub = layer.ensureLevel(subItems, root, 1, owner);
+      const sub = await layer.ensureLevel(subItems, root, 1, owner);
       const targetBeforeShow = document.getElementById(reserved ?? '') !== null;
 
       layer.showSubmenu(sub);
@@ -1146,16 +1146,16 @@ test.describe('подменю', () => {
   });
 
   test('aria-expanded: showSubmenu ставит пункту-владельцу aria-expanded=true', async ({ page }) => {
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { rootItems, subItems } = host.__vcSets();
       const probe = host.__vcProbe;
       const layer = probe.create();
-      const root = layer.ensureLevel(rootItems, null, 0, null);
+      const root = await layer.ensureLevel(rootItems, null, 0, null);
       const owner = root.items[0];
       const before = owner.element.getAttribute('aria-expanded');
 
-      const sub = layer.ensureLevel(subItems, root, 1, owner);
+      const sub = await layer.ensureLevel(subItems, root, 1, owner);
       layer.showSubmenu(sub);
 
       return {
@@ -1180,18 +1180,18 @@ test.describe('подменю', () => {
   });
 });
 
-test.describe('закрытие', () => {
+test.describe('закрытие', async () => {
   test('закрытие: элемент скрывается после animationDuration', async ({ page }) => {
     // Настоящее движение: под `reduce` слой пропускает отложенное закрытие
     // целиком, и кейс проверял бы не отложенность, а пропуск.
     await page.emulateMedia({ reducedMotion: 'no-preference' });
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { rootItems, subItems } = host.__vcSets();
       const probe = host.__vcProbe;
       const layer = probe.create();
-      const root = layer.ensureLevel(rootItems, null, 0, null);
-      const sub = layer.ensureLevel(subItems, root, 1, root.items[0]);
+      const root = await layer.ensureLevel(rootItems, null, 0, null);
+      const sub = await layer.ensureLevel(subItems, root, 1, root.items[0]);
       layer.showRoot(root, { x: 40, y: 40 });
       layer.showSubmenu(sub);
 
@@ -1244,13 +1244,13 @@ test.describe('закрытие', () => {
 
   test('закрытие: повторное открытие до истечения задержки отменяет hidePopover', async ({ page }) => {
     await page.emulateMedia({ reducedMotion: 'no-preference' });
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { rootItems, subItems } = host.__vcSets();
       const probe = host.__vcProbe;
       const layer = probe.create();
-      const root = layer.ensureLevel(rootItems, null, 0, null);
-      const sub = layer.ensureLevel(subItems, root, 1, root.items[0]);
+      const root = await layer.ensureLevel(rootItems, null, 0, null);
+      const sub = await layer.ensureLevel(subItems, root, 1, root.items[0]);
       layer.showRoot(root, { x: 40, y: 40 });
       layer.showSubmenu(sub);
 
@@ -1289,16 +1289,16 @@ test.describe('закрытие', () => {
 
   test('поколения: отложенное закрытие старого поколения не трогает новое', async ({ page }) => {
     await page.emulateMedia({ reducedMotion: 'no-preference' });
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { rootItems, subItems } = host.__vcSets();
       const probe = host.__vcProbe;
       const layer = probe.create();
-      const root = layer.ensureLevel(rootItems, null, 0, null);
-      const sub = layer.ensureLevel(subItems, root, 1, root.items[0]);
+      const root = await layer.ensureLevel(rootItems, null, 0, null);
+      const sub = await layer.ensureLevel(subItems, root, 1, root.items[0]);
       // Контроль: `ensureLevel` обязан вернуть тот же уровень, иначе поколения
       // измерялись бы на подменённом объекте.
-      const sameRoot = layer.ensureLevel(rootItems, null, 0, null) === root;
+      const sameRoot = await layer.ensureLevel(rootItems, null, 0, null) === root;
 
       const afterCreate = sub.generation;
       layer.showRoot(root, { x: 40, y: 40 });
@@ -1357,8 +1357,8 @@ test.describe('закрытие', () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { rootItems, subItems } = host.__vcSets();
       const layer = host.__vcProbe.real();
-      const root = layer.ensureLevel(rootItems, null, 0, null);
-      const sub = layer.ensureLevel(subItems, root, 1, root.items[0]);
+      const root = await layer.ensureLevel(rootItems, null, 0, null);
+      const sub = await layer.ensureLevel(subItems, root, 1, root.items[0]);
       layer.showRoot(root, { x: 40, y: 40 });
       layer.showSubmenu(sub);
       /**
@@ -1426,8 +1426,8 @@ test.describe('закрытие', () => {
       );
       const { rootItems, subItems } = host.__vcSets();
       const layer = host.__vcProbe.real();
-      const root = layer.ensureLevel(rootItems, null, 0, null);
-      const sub = layer.ensureLevel(subItems, root, 1, root.items[0]);
+      const root = await layer.ensureLevel(rootItems, null, 0, null);
+      const sub = await layer.ensureLevel(subItems, root, 1, root.items[0]);
       layer.showRoot(root, { x: 40, y: 40 });
       layer.showSubmenu(sub);
 
@@ -1561,7 +1561,7 @@ test.describe('закрытие', () => {
       );
       const { rootItems } = host.__vcSets();
       const layer = host.__vcProbe.real();
-      const root = layer.ensureLevel(rootItems, null, 0, null);
+      const root = await layer.ensureLevel(rootItems, null, 0, null);
       const element = root.element;
       /** @type {Array<{ transform: string, opacity: string }>} */
       const samples = [];
@@ -1605,14 +1605,14 @@ test.describe('закрытие', () => {
 
   test('reduced-motion: hidePopover вызывается немедленно, без задачи в планировщике', async ({ page }) => {
     // Эмуляция `reduce` уже стоит в `beforeEach`.
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { rootItems, subItems } = host.__vcSets();
       const probe = host.__vcProbe;
       const reduced = globalThis.matchMedia('(prefers-reduced-motion: reduce)').matches;
       const layer = probe.create();
-      const root = layer.ensureLevel(rootItems, null, 0, null);
-      const sub = layer.ensureLevel(subItems, root, 1, root.items[0]);
+      const root = await layer.ensureLevel(rootItems, null, 0, null);
+      const sub = await layer.ensureLevel(subItems, root, 1, root.items[0]);
       layer.showRoot(root, { x: 40, y: 40 });
       layer.showSubmenu(sub);
 
@@ -1649,7 +1649,7 @@ test.describe('закрытие', () => {
 
   test('reduced-motion: значение медиазапроса читается в момент закрытия, а не при создании', async ({ page }) => {
     // Слой создаётся, когда `reduce` ещё не действует...
-    await page.evaluate(() => {
+    await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { rootItems } = host.__vcSets();
       // Значение переключается между двумя оценками страницы, поэтому медиазапрос
@@ -1666,18 +1666,18 @@ test.describe('закрытие', () => {
       const layer = host.__vcProbe.keep({
         reducedMotionQuery: /** @type {MediaQueryList} */ (/** @type {unknown} */ (query)),
       });
-      const entry = layer.ensureLevel(rootItems, null, 0, null);
+      const entry = await layer.ensureLevel(rootItems, null, 0, null);
       layer.showRoot(entry, { x: 40, y: 40 });
     });
     // ...а закрывается уже при `reduce`.
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const page_ = /** @type {{ __vcProbe: LayerProbe, __vcQuery: { matches: boolean }, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> }} */ (
         /** @type {unknown} */ (globalThis)
       );
       const { rootItems } = page_.__vcSets();
       const probe = page_.__vcProbe;
       const layer = probe.keep();
-      const entry = layer.ensureLevel(rootItems, null, 0, null);
+      const entry = await layer.ensureLevel(rootItems, null, 0, null);
 
       // Первое закрытие при `matches: false` — отложенное. Это контроль кейса:
       // без него второе закрытие прошло бы и по значению, сохранённому при
@@ -1707,15 +1707,15 @@ test.describe('закрытие', () => {
   });
 
   test('hideAll: скрывает всю цепочку, от глубоких к корню', async ({ page }) => {
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { rootItems, subItems, nestedItems } = host.__vcSets();
       const probe = host.__vcProbe;
       const layer = probe.create();
-      const root = layer.ensureLevel(rootItems, null, 0, null);
-      const first = layer.ensureLevel(nestedItems, root, 1, root.items[0]);
-      const second = layer.ensureLevel(subItems, root, 1, root.items[2]);
-      const deep = layer.ensureLevel(subItems, first, 2, first.items[0]);
+      const root = await layer.ensureLevel(rootItems, null, 0, null);
+      const first = await layer.ensureLevel(nestedItems, root, 1, root.items[0]);
+      const second = await layer.ensureLevel(subItems, root, 1, root.items[2]);
+      const deep = await layer.ensureLevel(subItems, first, 2, first.items[0]);
       layer.showRoot(root, { x: 40, y: 40 });
       layer.showSubmenu(first);
       layer.showSubmenu(second);
@@ -1777,12 +1777,12 @@ test.describe('закрытие', () => {
 
   test('animationDuration без опции достаётся слою из константы', async ({ page }) => {
     await page.emulateMedia({ reducedMotion: 'no-preference' });
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { rootItems } = host.__vcSets();
       const probe = host.__vcProbe;
       const layer = probe.bare();
-      const entry = layer.ensureLevel(rootItems, null, 0, null);
+      const entry = await layer.ensureLevel(rootItems, null, 0, null);
       layer.showRoot(entry, { x: 40, y: 40 });
       layer.hide(entry);
       return {
@@ -1802,22 +1802,22 @@ test.describe('закрытие', () => {
   });
 });
 
-test.describe('уровни', () => {
+test.describe('уровни', async () => {
   test('ensureLevel: повторный вызов с теми же аргументами возвращает тот же LevelEntry', async ({ page }) => {
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { rootItems, subItems, nestedItems } = host.__vcSets();
       const probe = host.__vcProbe;
       const layer = probe.create();
-      const root = layer.ensureLevel(rootItems, null, 0, null);
-      const rootAgain = layer.ensureLevel(rootItems, null, 0, null);
-      const first = layer.ensureLevel(nestedItems, root, 1, root.items[0]);
-      const firstAgain = layer.ensureLevel(nestedItems, root, 1, root.items[0]);
+      const root = await layer.ensureLevel(rootItems, null, 0, null);
+      const rootAgain = await layer.ensureLevel(rootItems, null, 0, null);
+      const first = await layer.ensureLevel(nestedItems, root, 1, root.items[0]);
+      const firstAgain = await layer.ensureLevel(nestedItems, root, 1, root.items[0]);
       // Другая ветка: тот же уровень, другой пункт-владелец — другой уровень.
-      const other = layer.ensureLevel(subItems, root, 1, root.items[2]);
+      const other = await layer.ensureLevel(subItems, root, 1, root.items[2]);
       // Третий уровень под первым подменю.
-      const deep = layer.ensureLevel(subItems, first, 2, first.items[0]);
-      const deepAgain = layer.ensureLevel(subItems, first, 2, first.items[0]);
+      const deep = await layer.ensureLevel(subItems, first, 2, first.items[0]);
+      const deepAgain = await layer.ensureLevel(subItems, first, 2, first.items[0]);
 
       return {
         sameRoot: rootAgain === root,
@@ -1877,17 +1877,17 @@ test.describe('уровни', () => {
   });
 
   test('menuId: у каждого уровня свой vc- идентификатор, а у подменю он совпадает с зарезервированным aria-owns', async ({ page }) => {
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { rootItems, subItems } = host.__vcSets();
       const probe = host.__vcProbe;
       const first = probe.create();
       const second = probe.create();
-      const root = first.ensureLevel(rootItems, null, 0, null);
-      const sub = first.ensureLevel(subItems, root, 1, root.items[0]);
+      const root = await first.ensureLevel(rootItems, null, 0, null);
+      const sub = await first.ensureLevel(subItems, root, 1, root.items[0]);
       // Второй экземпляр на той же глубине: различает их только `menuId`, и от
       // него зависит безопасность ключа пункта в общей карте.
-      const otherRoot = second.ensureLevel(rootItems, null, 0, null);
+      const otherRoot = await second.ensureLevel(rootItems, null, 0, null);
 
       const ids = {
         root: root.element.id,
@@ -1940,22 +1940,22 @@ test.describe('уровни', () => {
   });
 
   test('actions: карта общая для всех уровней и пополняется только', async ({ page }) => {
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { rootItems, subItems } = host.__vcSets();
       const probe = host.__vcProbe;
       const layer = probe.create();
-      const root = layer.ensureLevel(rootItems, null, 0, null);
+      const root = await layer.ensureLevel(rootItems, null, 0, null);
       const rootId = root.element.id;
       const afterRoot = [...probe.actions.keys()];
-      const sub = layer.ensureLevel(subItems, root, 1, root.items[0]);
+      const sub = await layer.ensureLevel(subItems, root, 1, root.items[0]);
       const subId = sub.element.id;
       const afterSub = [...probe.actions.keys()];
       // Разделитель не получает записи: коллбэка у него нет.
       const separatorKeyed = probe.actions.has(`${rootId}:3`);
 
       // Уровни другого экземпляра пишут в ту же карту.
-      const other = probe.create().ensureLevel(rootItems, null, 0, null);
+      const other = await probe.create().ensureLevel(rootItems, null, 0, null);
       const otherRootId = other.element.id;
       const afterOther = [...probe.actions.keys()];
       const sizeBeforeDestroy = probe.actions.size;
@@ -1998,13 +1998,13 @@ test.describe('уровни', () => {
   });
 
   test('тема и длительность достаются до каждого уровня', async ({ page }) => {
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { rootItems, subItems } = host.__vcSets();
       const probe = host.__vcProbe;
       const layer = probe.create({ theme: 'dark' });
-      const root = layer.ensureLevel(rootItems, null, 0, null);
-      const sub = layer.ensureLevel(subItems, root, 1, root.items[2]);
+      const root = await layer.ensureLevel(rootItems, null, 0, null);
+      const sub = await layer.ensureLevel(subItems, root, 1, root.items[2]);
       // Уровень обязан быть показан: у отцепленного узла `getComputedStyle` не
       // вычисляет и пользовательские свойства, и проверка была бы пустой.
       layer.showRoot(root, { x: 40, y: 40 });
@@ -2041,7 +2041,7 @@ test.describe('уровни', () => {
     // Настоящее движение: под `reduce` отложенного закрытия не было бы и висящих
     // задач тоже, а снимать было бы нечего.
     await page.emulateMedia({ reducedMotion: 'no-preference' });
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const host = /** @type { { __vcProbe: LayerProbe, __vcSets: () => Record<string, Array<MenuItem | SeparatorItem>> } } */ (/** @type { unknown } */ (globalThis));
       const { rootItems, subItems, nestedItems } = host.__vcSets();
       const probe = host.__vcProbe;
@@ -2056,15 +2056,15 @@ test.describe('уровни', () => {
       };
       const before = bodyIds();
 
-      const root = layer.ensureLevel(rootItems, null, 0, null);
-      const sub = layer.ensureLevel(nestedItems, root, 1, root.items[0]);
-      const deep = layer.ensureLevel(subItems, sub, 2, sub.items[0]);
+      const root = await layer.ensureLevel(rootItems, null, 0, null);
+      const sub = await layer.ensureLevel(nestedItems, root, 1, root.items[0]);
+      const deep = await layer.ensureLevel(subItems, sub, 2, sub.items[0]);
       layer.showRoot(root, { x: 40, y: 40 });
       layer.showSubmenu(sub);
       layer.showSubmenu(deep);
       // Никогда не показанный уровень: `destroy` обязан убрать и его, а
       // `ensureLevel` — не оставлять его подключённым к документу.
-      const untouched = layer.ensureLevel(subItems, root, 1, root.items[2]);
+      const untouched = await layer.ensureLevel(subItems, root, 1, root.items[2]);
       layer.hide(deep);
 
       const whileOpen = {
