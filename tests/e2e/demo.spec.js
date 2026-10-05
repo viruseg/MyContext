@@ -128,6 +128,7 @@ const SCENARIO_IDS = [
   'basic',
   'nested',
   'disabled',
+  'hidden',
   'icons',
   'long',
   'scale',
@@ -144,6 +145,7 @@ const SCENARIO_TITLES = {
   basic: 'Базовое меню',
   nested: 'Вложенность',
   disabled: 'Отключённые пункты',
+  hidden: 'Скрытые строки',
   icons: 'Иконки',
   long: 'Длинный список',
   scale: 'Масштаб меню',
@@ -160,6 +162,7 @@ const SCENARIO_SHAPE = {
   basic: { first: 'Открыть', last: 'Экспорт с действием', count: 11 },
   nested: { first: 'Обновить', last: 'Ответить с действием', count: 5 },
   disabled: { first: 'Доступно', last: 'Доступный владелец с действием', count: 5 },
+  hidden: { first: 'Первый', last: 'Отправка с действием', count: 4 },
   icons: { first: 'Эмодзи', last: 'Владелец с действием', count: 8 },
   long: { first: 'Пункт 1', last: 'Владелец с действием', count: 42 },
   scale: { first: 'Открыть', last: 'Импорт с действием', count: 5 },
@@ -244,6 +247,11 @@ const FOCUS_HINT =
   + 'владельца подменю: после `ArrowRight` он остаётся выделенным, но его `blur` '
   + 'приходит — фокус ушёл в подменю.';
 
+const VISIBILITY_HINT =
+  'Ответ `isVisibleAction` перечитывается на каждом показе: откройте меню ещё раз, и '
+  + 'пунта не станет, а меню пересоберётся целиком. Разделитель скрыт всегда — правило '
+  + 'одно и то же у пункта и у разделителя.';
+
 /**
  * Ожидаемая подсказка каждого блока. Таблица, а не условие по `id` в кейсе: подсказка
  * объявлена в описании сценария, и сверять её надо со всем списком, иначе
@@ -255,6 +263,7 @@ const SCENARIO_HINTS = {
   basic: HINT,
   nested: HINT,
   disabled: HINT,
+  hidden: VISIBILITY_HINT,
   icons: HINT,
   long: HINT,
   scale: SCALE_HINT,
