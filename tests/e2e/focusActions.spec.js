@@ -48,13 +48,24 @@ import { expect, test } from '@playwright/test';
  *   фокуса бросить исключение автора.
  * @property {(key: string) => Promise<void>} press
  * @property {(point: { x: number, y: number }) => Promise<void>} moveTo
+ * @property {(selector: string) => ({ left: number, top: number, width: number, height: number } | null)} rectOfNode
+ *   рамка любого узла по селектору — разделителя по подписи не найти, у него её нет.
+ * @property {() => void} watchAfterKeydown подписаться на `keydown` документа так,
+ *   чтобы поймать его после обработчика уровня.
+ * @property {() => boolean} focusCalledNow звалось ли синхронное `focusAction`.
+ * @property {() => boolean} sawFocusAction видел ли слушатель документа вызов
+ *   `focusAction` к своему моменту.
+ * @property {() => void} bumpSubmenuVersion сменить метку состава подменя, чтобы
+ *   следующий показ перестроил уровень целиком.
+ * @property {() => Promise<void>} openSecond показать второй экземпляр.
+ * @property {() => boolean} alive жив ли экземпляр: закрытие идемпотентно у живого и бросает у
+ *   разобранного.
  * @property {(label: string) => void} clickItem
  * @property {() => void} close
  * @property {() => void} destroy
  * @property {() => void} reopen
  * @property {() => void} disableFirst
  * @property {() => void} secondMenu
- * @property {() => void} reopenFromFirst
  * @property {(swallow: boolean) => void} onError подписка на `error`; `swallow` зовёт
  *   `preventDefault()`.
  * @property {() => Snapshot} read
@@ -65,6 +76,8 @@ import { expect, test } from '@playwright/test';
  * @property {boolean} [destroyOnClose]
  * @property {boolean} [asyncActions]
  * @property {boolean} [reopenOnFocus]
+ * @property {boolean} [destroyOnFocus] `focusAction` первого пункта разбирает
+ *   экземпляр изнутри действия.
  * @property {boolean} [noErrorListener] не подписываться на `error`: отказ должен
  *   уйти на страницу, а не быть разобранным подписчиком.
  */
@@ -137,10 +150,25 @@ test.beforeEach(async ({ page }) => {
     let armed = null;
     /** @type {boolean} */
     let enabled = true;
+    /**
+     * Метка состава подменю. Меняется между показами по команде кейса, и это единственный
+     * способ добиться перестроения уровня: `submenuAction` отдаёт новые объекты на каждом
+     * показе, но отпечаток кодирует значения полей, а не ссылки.
+     *
+     * @type {number}
+     */
+    let submenuVersion = 0;
+    /** Признак, что синхронное `focusAction` уже отработало. @type {boolean} */
+    let focusCalled = false;
+    const scope2 = /** @type {{ __sawFocusAction?: boolean }} */ (
+      /** @type {unknown} */ (globalThis)
+    );
     /** @type {boolean} */
     let asyncActions = false;
     /** @type {boolean} */
     let reopenOnFocus = false;
+    /** @type {boolean} */
+    let destroyOnFocus = false;
     /** @type {boolean} */
     let swallow = false;
 
@@ -234,9 +262,27 @@ test.beforeEach(async ({ page }) => {
           note('blur', 'Первый', 0);
         };
       } else {
-        first.focusAction = watch('focus', 'Первый');
+        first.focusAction = () => {
+          focusCalled = true;
+          note('focus', 'Первый', 0);
+          if (armed === 'focus') {
+            armed = null;
+            throw new Error('событие focus автора упало');
+          }
+          if (destroyOnFocus && menu !== null) {
+            // Разбор изнутри действия: экземпляр не переживает его, и обработчик,
+            // в котором шёл вызов, обязан устоять.
+            const doomed = menu;
+            menu = null;
+            doomed.destroy();
+          }
+          if (reopenOnFocus && enabled) {
+            openAt(OPEN_POINT_FALLBACK);
+          }
+        };
         first.blurAction = watch('blur', 'Первый');
       }
+      first.isEnabledAction = () => enabled;
       return [
         first,
         {
@@ -245,11 +291,18 @@ test.beforeEach(async ({ page }) => {
           focusAction: watch('focus', 'Второй'),
           blurAction: watch('blur', 'Второй'),
         },
+        {
+          labelAction: () => 'Глухо',
+          isEnabledAction: () => false,
+          focusAction: watch('focus', 'Глухо'),
+          blurAction: watch('blur', 'Глухо'),
+        },
         { type: 'separator' },
         {
           labelAction: () => 'Ветка',
           submenuAction: () => [
             {
+              version: submenuVersion,
               labelAction: () => 'Лист',
               action: () => {},
               focusAction: watch('focus', 'Лист'),
@@ -284,8 +337,11 @@ test.beforeEach(async ({ page }) => {
         pageErrors.length = 0;
         armed = null;
         enabled = true;
+        submenuVersion = 0;
+        focusCalled = false;
         asyncActions = input.asyncActions === true;
         reopenOnFocus = input.reopenOnFocus === true;
+        destroyOnFocus = input.destroyOnFocus === true;
         swallow = false;
         const surface = document.getElementById('surface');
         if (!(surface instanceof HTMLElement)) {
@@ -337,13 +393,45 @@ test.beforeEach(async ({ page }) => {
       async moveTo(point) {
         const element = document.elementFromPoint(point.x, point.y);
         if (element === null) {
-          throw new Error('под точкой nothing нет');
+          throw new Error('под точкой ничего нет');
         }
         element.dispatchEvent(new PointerEvent('pointermove', {
           bubbles: true,
           clientX: point.x,
           clientY: point.y,
         }));
+      },
+      rectOfNode(selector) {
+        const element = document.querySelector(selector);
+        if (element === null) {
+          return null;
+        }
+        const rect = element.getBoundingClientRect();
+        return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+      },
+      watchAfterKeydown() {
+        // Слушатель `keydown` на документе ловит событие после обработчика уровня, а
+        // событий на одну клавишу ровно одно: мышиный путь не годится, браузер шлёт
+        // за одну подвижку курсора несколько `pointermove`, и второй пришёл бы уже
+        // после микрозадачи.
+        scope2.__sawFocusAction = false;
+        document.addEventListener('keydown', () => {
+          scope2.__sawFocusAction = focusCalled;
+        }, { capture: false });
+      },
+      sawFocusAction() {
+        return scope2.__sawFocusAction === true;
+      },
+      focusCalledNow() {
+        const value = focusCalled;
+        focusCalled = false;
+        return value;
+      },
+      bumpSubmenuVersion() {
+        submenuVersion += 1;
+      },
+      disableFirst() {
+        enabled = false;
       },
       clickItem(label) {
         const item = itemOf(label);
@@ -362,19 +450,30 @@ test.beforeEach(async ({ page }) => {
           menu.destroy();
         }
       },
+      alive() {
+        if (menu === null) {
+          return false;
+        }
+        try {
+          menu.close();
+          return true;
+        } catch {
+          return false;
+        }
+      },
       async reopen() {
         await openAt(OPEN_POINT_FALLBACK);
-      },
-      disableFirst() {
-        enabled = false;
       },
       secondMenu() {
         second = new MyContext([{ labelAction: () => 'Чужой', action: () => {} }], {
           label: 'чужое меню',
         });
       },
-      async reopenFromFirst() {
-        await openAt(OPEN_POINT_FALLBACK);
+      async openSecond() {
+        if (second === null) {
+          throw new Error('второго меню нет');
+        }
+        await second.open({ x: 700, y: 600 });
       },
       onError(value) {
         swallow = value;
@@ -452,6 +551,35 @@ async function centreOf(page, label) {
 async function hoverItem(page, label) {
   const point = await centreOf(page, label);
   await page.mouse.move(point.x, point.y);
+}
+
+/**
+ * Наводит курсор на узел по селектору: разделителя по подписи не найти, а у
+ * отключённого пункта подпись есть, но селектор надёжнее одинаковой подписи у всех
+ * уровней.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {string} selector
+ * @returns {Promise<void>}
+ */
+async function hoverNode(page, selector) {
+  const rect = await page.evaluate((selectorText) => {
+    const scope = /** @type {{ __focus: Probe }} */ (/** @type {unknown} */ (globalThis));
+    return scope.__focus.rectOfNode(selectorText);
+  }, selector);
+  expect(rect, `узел ${selector} есть в разметке`).not.toBeNull();
+  const found = /** @type {{ left: number, top: number, width: number, height: number }} */ (
+    /** @type {unknown} */ (rect)
+  );
+  await page.mouse.move(found.left + found.width / 2, found.top + found.height / 2);
+}
+
+/**
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<void>}
+ */
+async function hoverSeparator(page) {
+  await hoverNode(page, '.vc-separator');
 }
 
 /**
@@ -699,17 +827,69 @@ test.describe('закрытие и снос', () => {
     expect((await readMenu(page)).log).toEqual(['focus:Первый', 'blur:Первый']);
   });
 
-  test('перестроение состава зовёт blur снесённого пункта', async ({ page }) => {
+  test('перестроение состава подменю зовёт blur пункта снесённого уровня', async ({ page }) => {
     await makeMenu(page);
-    await hoverItem(page, 'Первый');
+    // Фокус стоит на пункте подменю, и автор меняет его состав. Уровень с этим пунктом
+    // будет снесён целиком, и `blur` обязан прийти именно от сноса, а не от закрытия:
+    // меню всё это время на экране.
+    await hoverItem(page, 'Ветка');
+    await page.waitForFunction(() => {
+      return document.querySelectorAll('.vc-menu:popover-open').length === 2;
+    });
+    await hoverItem(page, 'Лист');
     await page.evaluate(() => {
       const scope = /** @type {{ __focus: Probe }} */ (/** @type {unknown} */ (globalThis));
-      scope.__focus.disableFirst();
-      return scope.__focus.reopen();
+      scope.__focus.bumpSubmenuVersion();
     });
+    // Возврат на владельца переоткрывает подменю, и перестроенный уровень приходит на
+    // место снесённого.
+    await hoverItem(page, 'Первый');
+    await hoverItem(page, 'Ветка');
     const after = await readMenu(page);
-    expect(after.log).toEqual(['focus:Первый', 'blur:Первый']);
-    expect(stillHeld(after.log), 'снос уровня закрывает пару').toEqual([]);
+    expect(after.log).toContain('blur:Лист');
+    expect(stillHeld(after.log)).toEqual(['Ветка']);
+  });
+
+  test('снос уровня не отдаёт blur чужому пункту, у которого фокус стоит', async ({ page }) => {
+    await makeMenu(page);
+    // Фокус возвращается владельцу, а отметка в подменю остаётся: она значит «курсор
+    // стоит здесь». Снос этого уровня не имеет права отнять фокус у владельца.
+    await press(page, 'End');
+    await press(page, 'ArrowRight');
+    await press(page, 'ArrowLeft');
+    await page.evaluate(() => {
+      const scope = /** @type {{ __focus: Probe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__focus.bumpSubmenuVersion();
+    });
+    await hoverItem(page, 'Первый');
+    await hoverItem(page, 'Ветка');
+    const after = await readMenu(page);
+    // Ложный отчёт выдаёт себя снимком: `blur` не может прийти на пункт, у которого
+    // фокус всё ещё стоит. Подсветка при этом может стоять — отметка это другой
+    // вопрос, — и сравнивать журнаки целиком здесь не нужно.
+    expect(after.snaps.filter((snap) => {
+      return snap.entry.startsWith('blur:') && snap.focused === true;
+    }), 'ни один blur не пришёлся на пункт в фокусе').toEqual([]);
+    expect(stillHeld(after.log), 'фокус держит владелец').toEqual(['Ветка']);
+    expect(after.log[after.log.length - 1], 'последним пришёл focus:Ветка').toBe('focus:Ветка');
+  });
+
+  test('невыбираемая строка под фокусом в подменю зовёт blur без задержки', async ({ page }) => {
+    await makeMenu(page);
+    // Фокус в подменю, курсор — на отключённой строке корня. Меню переносит фокус на
+    // элемент уровня и прячет подменю, то есть фокус уходит с пункта подменю прямо
+    // здесь, и ждать следующего события автору нельзя.
+    await hoverItem(page, 'Ветка');
+    await page.waitForFunction(() => {
+      return document.querySelectorAll('.vc-menu:popover-open').length === 2;
+    });
+    await press(page, 'End');
+    await press(page, 'ArrowRight');
+    // Курсор уходит на невыбираемую строку корня, а фокус стоит в подменю.
+    await hoverItem(page, 'Глухо');
+    const after = await readMenu(page);
+    expect(after.log).toEqual(['focus:Ветка', 'blur:Ветка', 'focus:Лист', 'blur:Лист']);
+    expect(stillHeld(after.log), 'пара пункта подменю закрылась сразу').toEqual([]);
   });
 
   test('destroyOnClose зовёт blur до разбора', async ({ page }) => {
@@ -718,6 +898,21 @@ test.describe('закрытие и снос', () => {
     await page.mouse.click(FAR_POINT.x, FAR_POINT.y);
     const after = await readMenu(page);
     expect(after.log).toEqual(['focus:Первый', 'blur:Первый']);
+  });
+
+  test('destroy из focusAction не роняет обработчик и не оставляет пару', async ({ page }) => {
+    await makeMenu(page, { destroyOnFocus: true });
+    await hoverItem(page, 'Первый');
+    const after = await readMenu(page);
+    // Разбор зовётся изнутри действия: событие фокуса к этому моменту уже записано, а
+    // обработчик, в котором шёл вызов, не должен упасть.
+    expect(after.log).toEqual(['focus:Первый', 'blur:Первый']);
+    expect(stillHeld(after.log), 'разбор закрывает пару').toEqual([]);
+    expect(after.errors).toEqual([]);
+    expect(await page.evaluate(() => {
+      const scope = /** @type {{ __focus: Probe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__focus.alive();
+    })).toBe(false);
   });
 });
 
@@ -794,7 +989,12 @@ test.describe('границы', () => {
     await page.evaluate(() => {
       const scope = /** @type {{ __focus: Probe }} */ (/** @type {unknown} */ (globalThis));
       scope.__focus.secondMenu();
+      return scope.__focus.openSecond();
     });
+    // Чужое меню забирает DOM-фокус на свой элемент уровня, но не имеет права трогать
+    // пары первого экземпляра: слот и карта действий у экземпляров разные, и в чужой
+    // показ библиотека не вмешивается. Пара первого экземпляра поэтому остаётся
+    // незакрытой — и это предел, а не ошибка парности.
     await hoverItem(page, 'Первый');
     await hoverItem(page, 'Второй');
     const after = await readMenu(page);
@@ -803,14 +1003,52 @@ test.describe('границы', () => {
     expect(unpaired(after.log)).toEqual([]);
   });
 
-  test('пункт, ставший отключённым, не получает blur', async ({ page }) => {
+  test('пункт, ставший отключённым, теряет фокус с blur', async ({ page }) => {
     await makeMenu(page);
-    // Отметка и слот принадлежат показу, а не странице: недоступный пункт не был
-    // отмечен, и обещания ему никто не давал.
+    // Пункт получает фокус, пока доступен, и становится недоступным к следующему
+    // показу. Обещание ему дано, и закрыть его должно закрытие — молча оставлять пару
+    // нельзя, а вот нового `focus` у недоступного пункта не бывает.
     await press(page, 'ArrowDown');
+    await page.evaluate(() => {
+      const scope = /** @type {{ __focus: Probe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__focus.disableFirst();
+      return scope.__focus.reopen();
+    });
     const after = await readMenu(page);
+    expect(after.log).toEqual(['focus:Первый', 'blur:Первый']);
+    expect(stillHeld(after.log), 'пара закрыта, а не брошена').toEqual([]);
+    expect(after.activeLabels, 'недоступный пункт не отмечается').toEqual([]);
+    expect(after.shown).toBe(1);
+  });
+
+  test('разделитель не получает событий при наведении', async ({ page }) => {
+    await makeMenu(page);
+    await hoverItem(page, 'Первый');
+    await hoverSeparator(page);
+    const after = await readMenu(page);
+    // Разделитель — не пункт: выделение на нём не мигает, и пары он не разрывает.
+    // Снятие выделения при уходе курсора сработало бы и на разделителе, и подсветка
+    // мигала бы на каждом проходе мимо него.
     expect(after.log).toEqual(['focus:Первый']);
-    expect(after.activeLabels).toEqual(['Первый']);
+    expect(after.activeLabels, 'выделение осталось на пункте').toEqual(['Первый']);
+  });
+
+  test('событие приходит в том же стеке, что и перемена состояния', async ({ page }) => {
+    await makeMenu(page);
+    await page.evaluate(() => {
+      const scope = /** @type {{ __focus: Probe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__focus.watchAfterKeydown();
+    });
+    await press(page, 'ArrowDown');
+    // Слушатель документа ловит `keydown` после обработчика уровня. Видел ли он вызов
+    // действия к своему моменту — и есть ответ на «в том же стеке»: отложенное на
+    // микрозадачу действие сюда бы не успело.
+    const saw = await page.evaluate(() => {
+      const scope = /** @type {{ __focus: Probe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__focus.sawFocusAction();
+    });
+    expect(saw).toBe(true);
+    expect((await readMenu(page)).log).toEqual(['focus:Первый']);
   });
 
   test('focus и blur парны на длинном сценарии', async ({ page }) => {

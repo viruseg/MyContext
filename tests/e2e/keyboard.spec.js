@@ -185,6 +185,11 @@ import { expect, test } from '@playwright/test';
  * @property {(index: number) => Promise<string | null>} ensureSubmenu пытается завести
  *   уровень-подменю пункта по индексу и отдаёт сообщение слоя либо `null`, если
  *   уровень заведён.
+ * @property {(index: number, path: number[]) => void} forgetMarked снести уровень,
+ *   в котором у пункта по индексу стоит отметка. Случай, которого не бывает в
+ *   живом меню: сносу подлежит уровень, который показывают заново, а показывают его
+ *   с пункта-владельца, и к этому моменту фокус стоит на владельце. Отсюда и
+ *   вопрос: отметка в снесённом уровне — это чужой пункт или его собственный?
  * @property {(paths: Record<string, number[]>) => ProbeSnapshot} read
  * @property {(steps: Step[], paths: Record<string, number[]>) => Promise<StepResult[]>} run
  */
@@ -1028,6 +1033,14 @@ test.beforeEach(async ({ page }) => {
           message = error instanceof Error ? error.message : String(error);
         }
         return message;
+      },
+      forgetMarked(index, path) {
+        const entry = levelOf(path);
+        keyboard.forgetLevels([entry]);
+        const item = entry.items[index];
+        if (item === undefined) {
+          throw new Error('в наборе нет такого пункта');
+        }
       },
       read,
       run,
@@ -2779,5 +2792,45 @@ test.describe('передача фокуса', () => {
       ],
     });
     expect(result.after.calls.focusChanges).toEqual(['Живой владелец']);
+  });
+});
+
+test.describe('снесённый уровень', () => {
+  test('снесение уровня с отметкой не отдаёт чужую потерю фокуса', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'offLimits',
+      paths: { root: [], sub: [2] },
+      steps: [
+        { command: 'hover', at: { path: [], index: 2 } },
+        { command: 'show-submenu', at: { path: [], index: 2 } },
+        { command: 'press', key: 'ArrowRight' },
+        { command: 'press', key: 'ArrowLeft' },
+      ],
+    });
+    // Отметка осталась на первом пункте подменю, а фокус вернулся владельцу: отметка
+    // значит «курсор стоит здесь», и она переживает скрытие. Уровень с этой отметкой
+    // сносится — и это не потеря фокуса владельца.
+    expect(result.after.calls.focusChanges).toEqual([
+      'Живой владелец',
+      'Тоже внутрь',
+      'Живой владелец',
+    ]);
+    expect(result.after.levels.root.focusLabel).toBe('Живой владелец');
+
+    await page.evaluate(() => {
+      const scope = /** @type {{ __vcKb: KeyboardProbe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__vcKb.forgetMarked(0, [2]);
+    });
+    const after = await page.evaluate(() => {
+      const scope = /** @type {{ __vcKb: KeyboardProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__vcKb.read({ root: [] });
+    });
+    // Молчание здесь и есть контракт: движок не знает, кому принадлежит фокус, и
+    // объявлять по отметке значило бы отдать чужую пару.
+    expect(after.calls.focusChanges).toEqual([
+      'Живой владелец',
+      'Тоже внутрь',
+      'Живой владелец',
+    ]);
   });
 });

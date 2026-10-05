@@ -1127,12 +1127,18 @@ export class MyContext extends EventTarget {
     if (action === undefined) {
       return;
     }
-    this.#fireAndForget(
-      Promise.resolve().then(() => {
-        return action();
-      }),
-      field,
-    );
+    // Вызов синхронный, а не отложенный на микрозадачу: событие обещано в том же
+    // стеке, что и перемена состояния, и автор вправе рассчитывать на это. Синхронный
+    // бросок ловится здесь же, а отказ промиса — в `#fireAndForget`; оба идут в
+    // `#reportFailure` с тем же `source`, и разницы в том, что автор увидит, нет.
+    let result;
+    try {
+      result = action();
+    } catch (reason) {
+      this.#reportFailure(reason, field);
+      return;
+    }
+    this.#fireAndForget(result, field);
   }
 
   /**
@@ -1299,6 +1305,12 @@ export class MyContext extends EventTarget {
    * Фокус вне дерева меню не отбирается: переносить нечего, а клавиши и так уходят
    * не в меню.
    *
+   * **Перенос фокуса объявляется вместе с ним.** Фокус в этот момент может стоять на
+   * пункте подменю — он соседний узел Top Layer, а не потомок `entry.element`, и
+   * `clearActive` его не видит, — и перенос на элемент уровня забирает его у того
+   * пункта. Подменю после этого прячется, и ждать следующего события автору нельзя:
+   * `blurAction` должен прийти здесь.
+   *
    * @param {LevelEntry} entry уровень, на строке которого стоит курсор.
    * @returns {void}
    */
@@ -1307,6 +1319,7 @@ export class MyContext extends EventTarget {
     const focus = document.activeElement;
     if (focus !== null && this.#isInsideMenu(focus)) {
       entry.element.focus({ preventScroll: true });
+      this.#itemFocusChanged(null);
     }
     const open = this.#openSubmenuOf(entry);
     if (open !== null) {
@@ -3374,10 +3387,33 @@ export class MyContext extends EventTarget {
    * Записи `#actions` уходят по префиксу `menuId` — адрес уровня входит в ключ каждого
    * его пункта, и иначе они остались бы навсегда.
    *
+   * **Потеря фокуса объявляется здесь и до чистки карт.** Пункт, державший фокус,
+   * мог исчезнуть вместе со своим уровнем, и его `blurAction` иначе не пришёл бы
+   * никогда: слот живёт в экземпляре, и больше объявлять некому. Порядок обязателен —
+   * после удаления записей по префиксу `#actionFor` вернул бы `null` и вызов вышел бы
+   * молча. Слот сверяется со снесёнными уровнями, а не с их отметками: отметка
+   * переживает скрытие подменю, и уровень может быть снесён с отметкой, не держав
+   * фокуса, — такой отчёт отдал бы чужую пару.
+   *
+   * Сегодня слот внутри снесённого уровня не стоит: единственный путь сноса —
+   * перестроение при показе, а показ подменю планируется на пункте-владельце, и к
+   * этому моменту фокус стоит на нём. Проверка остаётся, потому что обещание
+   * «`blur` не позже исчезновения пункта» должно быть верно по построению, а не по
+   * сегодняшнему числу путей к сносу.
+   *
    * @param {LevelEntry[]} entries снесённые уровни, от глубоких к снесённому.
    * @returns {void}
    */
   #forgetLevels(entries) {
+    const focused = this.#focusedItem;
+    if (focused !== null) {
+      for (const entry of entries) {
+        if (entry.element.contains(focused.element)) {
+          this.#itemFocusChanged(null);
+          break;
+        }
+      }
+    }
     for (const entry of entries) {
       const element = entry.element;
       this.#levels.delete(element);
