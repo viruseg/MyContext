@@ -779,6 +779,18 @@ export class MyContext extends EventTarget {
   #hoverOwner;
 
   /**
+   * Пункт, которому последний раз сообщили, что он получил фокус.
+   *
+   * Единственный источник правды о том, кому мы пообещали фокус: по нему же видно,
+   * что обещание снято, и по нему же отличается переход от повтора. Отметка
+   * `data-active` на это не годится — она переживает скрытие подменю и у владельца
+   * открытого подменю означает путь раскрытия, а не выбор.
+   *
+   * @type {RenderedItem | null}
+   */
+  #focusedItem;
+
+  /**
    * Событие входа в пункт, ради которого зреет отложенное открытие.
    *
    * Живёт рядом с `#hoverOwner`, потому что показ по наведению происходит по таймеру
@@ -1064,6 +1076,63 @@ export class MyContext extends EventTarget {
       return null;
     }
     return this.#actions.get(rendered.key) ?? null;
+  }
+
+  /**
+   * Передача фокуса пункту меню: снимает обещание с прежнего и даёт новому.
+   *
+   * **Идемпотентно по `next`.** Тот же пункт, что и в `#focusedItem`, молчит: движок не
+   * различает «фокус перешёл» и «фокус остался там же», и различать это автору незачем —
+   * вернувший фокус уже отмеченному пункту не меняет ничего, а сообщение о несостоявшемся
+   * переходе пришлось бы автору отличать самому.
+   *
+   * **Поле записывается до вызова любого действия.** Авторское действие вправе открыть
+   * или закрыть меню, и записанный слот пережил бы такой поворот, а полузаписанный отдал
+   * бы чужому действию несуществующее состояние.
+   *
+   * @param {RenderedItem | null} next пункт, получивший фокус, либо `null`, если фокус
+   *   отошёл на элемент уровня или с дерева меню вовсе.
+   * @returns {void}
+   */
+  #itemFocusChanged(next) {
+    const previous = this.#focusedItem;
+    if (previous === next) {
+      return;
+    }
+    this.#focusedItem = next;
+    if (previous !== null) {
+      this.#invokeFocusAction(previous, 'blurAction');
+    }
+    if (next !== null) {
+      this.#invokeFocusAction(next, 'focusAction');
+    }
+  }
+
+  /**
+   * Зовёт событие фокуса пункта и разбирает его отказ.
+   *
+   * Ждать нечего: зовётся из обработчика DOM, где промис никто не забирает, а состояние
+   * меню к этому моменту уже применено и от действия не зависит. Отказ приходит событием
+   * `error` — тем же, что у `action`, — и не отменяет ничего: подсветка уже стоит, показ
+   * подменю уже запланирован, и отматывать их отказом автора было бы гасить не его
+   * ошибку, а его работу.
+   *
+   * @param {RenderedItem} rendered пункт, чьё событие зовётся.
+   * @param {'focusAction' | 'blurAction'} field имя поля пункта.
+   * @returns {void}
+   */
+  #invokeFocusAction(rendered, field) {
+    const item = this.#actionFor(rendered);
+    const action = item === null ? undefined : item[field];
+    if (action === undefined) {
+      return;
+    }
+    this.#fireAndForget(
+      Promise.resolve().then(() => {
+        return action();
+      }),
+      field,
+    );
   }
 
   /**
@@ -1984,6 +2053,7 @@ export class MyContext extends EventTarget {
     this.#hoverTargets = new Map();
     this.#chain = [];
     this.#hoverOwner = null;
+    this.#focusedItem = null;
     this.#reducedMotionQuery = globalThis.matchMedia('(prefers-reduced-motion: reduce)');
     this.#layer = createLayer({
       label: this.#options.label,
@@ -2902,9 +2972,9 @@ export class MyContext extends EventTarget {
       focusOwner: () => {
         this.#returnFocus();
       },
-      // Движок сообщает о передаче фокуса, экземпляр на этом шаге молчит: тело
-      // приходит следующей задачей вместе с разбором отказов.
-      itemFocusChanged() {},
+      itemFocusChanged: (next) => {
+        this.#itemFocusChanged(next);
+      },
     };
   }
 
