@@ -2902,6 +2902,9 @@ export class MyContext extends EventTarget {
       focusOwner: () => {
         this.#returnFocus();
       },
+      // Движок сообщает о передаче фокуса, экземпляр на этом шаге молчит: тело
+      // приходит следующей задачей вместе с разбором отказов.
+      itemFocusChanged() {},
     };
   }
 

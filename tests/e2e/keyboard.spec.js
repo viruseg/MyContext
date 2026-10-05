@@ -118,6 +118,9 @@ import { expect, test } from '@playwright/test';
  * @property {string[]} openSubmenuIds
  * @property {number} focusOwner
  * @property {string[]} order
+ * @property {string[]} focusChanges подписи пунктов, которым сообщили о фокусе, по
+ *   порядку; строка `'нет'` на каждый вызов с `null`. Журнал, а не счётчик: важно
+ *   знать, кому и в каком порядке сообщали, а «сколько раз» это и есть длина.
  */
 
 /**
@@ -395,8 +398,20 @@ test.beforeEach(async ({ page }) => {
       },
     ];
 
-    /** @type {Record<string, Array<MenuItem | SeparatorItem>>} */
-    const sets = { cycle, tail, tree, long, dead, offLimits, ownerActs };
+    /**
+     * Уровень с единственным доступным пунктом: `moveTo` выбирает его при любом
+     * шаге, и второй шаг не меняет ничего. Различать «фокус перешёл» и «фокус остался
+     * там же» на таком уровне можно только этим — на уровне из нескольких пунктов тот
+     * же случай даёт переход, и проверка прошла бы в обоих направлениях.
+     *
+     * @type {Array<MenuItem | SeparatorItem>}
+     */
+    const solo = [{ labelAction: () => 'Один' }];
+
+    /**
+     * @type {Record<string, Array<MenuItem | SeparatorItem>>}
+     */
+    const sets = { cycle, tail, tree, long, dead, offLimits, ownerActs, solo };
 
     /**
      * Проба `focus`: без неё утверждение «фокус всегда с `preventScroll`» было бы
@@ -493,6 +508,7 @@ test.beforeEach(async ({ page }) => {
       openSubmenuIds: [],
       focusOwner: 0,
       order: [],
+      focusChanges: [],
     };
 
     /**
@@ -579,6 +595,12 @@ test.beforeEach(async ({ page }) => {
       // контракту `KeyboardHost`.
       handOver() {
         calls.order.push('handOver');
+      },
+      // Передача фокуса — единственный предмет этого журнала: кто и в каком порядке
+      // узнал, что фокус его. `'нет'` означает вызов с `null`, то есть фокус ушёл с
+      // пунктов на элемент уровня или с дерева вовсе.
+      itemFocusChanged(next) {
+        calls.focusChanges.push(next === null ? 'нет' : (labelIn(next.element) ?? 'без подписи'));
       },
     };
 
@@ -1360,6 +1382,7 @@ test.describe('роуминг-фокус', () => {
       openSubmenuIds: [],
       focusOwner: 0,
       order: [],
+      focusChanges: [],
     });
     expect(result.after.actions).toEqual([]);
   });
@@ -1658,6 +1681,7 @@ test.describe('переходы между уровнями', () => {
       openSubmenuIds: [],
       focusOwner: 0,
       order: [],
+      focusChanges: ['Открыть'],
     });
     // Уровень не тронут вовсе — ни отметок, ни фокуса. Сравнение снимков до и после
     // самой стрелки вместо сравнения с показом: любое изменение состояния роняет
@@ -2057,6 +2081,7 @@ test.describe('переходы между уровнями', () => {
       openSubmenuIds: [],
       focusOwner: 0,
       order: [],
+      focusChanges: ['Открыть', 'Экспорт'],
     });
     expect(result.after.actions).toEqual([]);
     expect(result.after.clicks).toEqual([]);
@@ -2104,6 +2129,7 @@ test.describe('переходы между уровнями', () => {
       openSubmenuIds: [result.before.levels.sub.id],
       focusOwner: 0,
       order: [`openSubmenu:${result.before.levels.sub.id}`],
+      focusChanges: ['Открыть', 'Экспорт', 'PDF', 'нет'],
     });
     // Отметки не вернулись сами собой.
     expect(result.after.levels.root.tabStops).toBe(0);
@@ -2152,6 +2178,7 @@ test.describe('активация', () => {
       openSubmenuIds: [],
       focusOwner: 0,
       order: [],
+      focusChanges: [],
     });
   });
 
@@ -2559,6 +2586,7 @@ test.describe('границы разбора', () => {
       openSubmenuIds: [],
       focusOwner: 0,
       order: [],
+      focusChanges: [],
     });
     // Роуминг-состояние меню не тронуто. Отметки, а не весь снимок: фокус ушёл на
     // элемент-владельца по условию шага, и его смена — не результат обработки.
@@ -2668,5 +2696,88 @@ test.describe('границы разбора', () => {
     for (const call of inMenu) {
       expect(call.preventScroll).toBe(true);
     }
+  });
+});
+
+test.describe('передача фокуса', () => {
+  test('стрелка вниз даёт focus по одному разу на пункт', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'tail',
+      paths: { root: [] },
+      steps: [
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'ArrowDown' },
+      ],
+    });
+    expect(result.after.calls.focusChanges).toEqual(['Первый', 'Второй']);
+  });
+
+  test('moveTo по кругу на единственном пункте молчит', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'solo',
+      paths: { root: [] },
+      steps: [
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'ArrowUp' },
+      ],
+    });
+    // Второй и третий шаги выбирают тот же пункт: перехода нет, и сообщать не о чем.
+    expect(result.after.calls.focusChanges).toEqual(['Один']);
+  });
+
+  test('возврат на уже отмеченный пункт молчит', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'cycle',
+      paths: { root: [] },
+      steps: [
+        { command: 'hover', at: { path: [], index: 0 } },
+        { command: 'hover', at: { path: [], index: 0 } },
+      ],
+    });
+    // Мышиный путь возвращает фокус уже отмеченному пункту, не меняя отметки, — и
+    // обязан молчать: «фокус остался там же» и «фокус перешёл» неразличимы для
+    // движка, а различать их автору не нужно.
+    expect(result.after.calls.focusChanges).toEqual(['Первый']);
+  });
+
+  test('leave-tree снимает фокус один раз', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'cycle',
+      paths: { root: [] },
+      steps: [
+        { command: 'hover', at: { path: [], index: 0 } },
+        { command: 'leave-tree' },
+        { command: 'leave-tree' },
+      ],
+    });
+    expect(result.after.calls.focusChanges).toEqual(['Первый', 'нет']);
+  });
+
+  test('reset снимает фокус', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'cycle',
+      paths: { root: [] },
+      steps: [
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'reset' },
+      ],
+    });
+    expect(result.after.calls.focusChanges).toEqual(['Первый', 'нет']);
+  });
+
+  test('уход с уровня без фокуса на нём молчит', async ({ page }) => {
+    // Фокус стоит на владельце в корне, а сбрасывается подменю: сообщать нечего, и
+    // ложный `null` отдал бы чужой пункт в небыль.
+    const result = await runScenario(page, {
+      set: 'offLimits',
+      paths: { root: [], sub: [2] },
+      steps: [
+        { command: 'hover', at: { path: [], index: 2 } },
+        { command: 'show-submenu', at: { path: [], index: 2 } },
+        { command: 'leave-tree', at: { path: [2], index: 0 } },
+      ],
+    });
+    expect(result.after.calls.focusChanges).toEqual(['Живой владелец']);
   });
 });
