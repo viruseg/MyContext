@@ -1141,6 +1141,93 @@ test.describe('правило соседа', () => {
     expect(expandedLabels(after), 'развёрнуты «Экспорт» и «PNG»').toEqual(['PNG', 'Экспорт'].sort());
     expect(after.errors, 'ошибок страницы нет').toEqual([]);
   });
+
+  test('клик по владельцу открытого подменю не мигает подменю', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+
+    // «PNG» — владелец подменю без своего `action`, и только такой владелец кликом
+    // раскрывается: у «Экспорта» действие есть, и клик по нему звал бы его.
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const pngId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('PNG');
+    });
+    expect(pngId, 'адрес подменю «PNG» назван').not.toBeNull();
+    await hoverItem(page, 'PNG');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    await hoverItem(page, 'Один');
+    const opened = await readMenu(page);
+    expect(isOpen(opened, /** @type {string} */ (pngId)), 'подменю «PNG» открыто').toBe(true);
+    // Журнал Top Layer, а не снимок разметки: мигание — это выход и вход подменю между
+    // двумя кадрами, и в снимке после него видно ровно то же самое состояние.
+    const before = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.toggles();
+    });
+
+    // Клик по владельцу собственного открытого подменю: активным пунктом уровня он
+    // не меняется, а значит не меняется и подменю. Без этого раннего выхода показ
+    // прошёл бы полный цикл — `#truncateChain` спрятал бы подменю, ради которого
+    // клик и пришёл, и `showSubmenu` показал его снова.
+    await clickItem(page, 'PNG');
+    await page.clock.fastForward(OPEN_GRACE_MS * 2);
+    const after = await readMenu(page);
+    const toggles = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.toggles();
+    });
+    expect(toggles, 'уровень не уходил из Top Layer и не возвращался').toEqual(before);
+    expect(isOpen(after, /** @type {string} */ (pngId)), 'подменю то же самое и открыто').toBe(true);
+    expect(after.openCount, 'открыты корень и два подменю').toBe(3);
+    expect(after.log, 'действие не звалось — звать нечего').toEqual([]);
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
+  });
+
+  test('клик по владельцу с открытым вложенным подменю не трогает оба', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+
+    // Контроль на `#truncateChain`: клик по владельцу мог бы обрезать цепочку до
+    // родителя, и вложенное подменю ушло бы вместе с внешним. Правило владельца
+    // отвечает на вопрос «что показано», а не «что показывать заново», — и глубже
+    // собственного подменю не спускается. «Один» владеет своим подменю, так что
+    // цепочка доходит до четырёх уровней, и адрес берётся у него, а не у «Глубоко»:
+    // «Глубоко» лежит уже внутри подменю и владельцем не является.
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    await hoverItem(page, 'PNG');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    await hoverItem(page, 'Один');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const deepId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Один');
+    });
+    expect(deepId, 'адрес подменю «Один» назван').not.toBeNull();
+    const before = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.toggles();
+    });
+    const open = await readMenu(page);
+    expect(open.openCount, 'открыты корень и три подменю').toBe(4);
+    expect(isOpen(open, /** @type {string} */ (deepId)), 'подменю «Один» открыто').toBe(true);
+
+    await clickItem(page, 'PNG');
+    await page.clock.fastForward(OPEN_GRACE_MS * 2);
+    const after = await readMenu(page);
+    const toggles = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.toggles();
+    });
+    expect(toggles, 'ни один уровень не мигал').toEqual(before);
+    expect(isOpen(after, /** @type {string} */ (deepId)), 'подменю «Один» открыто').toBe(true);
+    expect(after.openCount, 'открыты корень и три подменю').toBe(4);
+    expect(expandedLabels(after), 'развёрнуты все три владельца')
+      .toEqual(['PNG', 'Один', 'Экспорт'].sort());
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
+  });
 });
 
 test.describe('показ подменю', () => {
