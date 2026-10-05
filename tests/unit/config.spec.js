@@ -131,6 +131,32 @@ test.describe('валидация корневого состава', () => {
       .toThrow('items[0].type');
   });
 
+  test('негодная форма события фокуса отклоняется с путём до поля', () => {
+    expect(() => menuOf([{ labelAction: () => 'Пункт', focusAction: 'звонить' }]))
+      .toThrow('items[0].focusAction');
+    expect(() => menuOf([{ labelAction: () => 'Пункт', blurAction: 42 }]))
+      .toThrow('items[0].blurAction');
+  });
+
+  test('обе формы события фокуса принимаются', () => {
+    // Объединение двух форм, а не `void | Promise<void>`: у `void` на выходе есть
+    // правило совместимости, у объединения его нет, и действие, возвращающее
+    // значение ради побочного эффекта, перестало бы подходить.
+    /** @type {string[]} */
+    const log = [];
+    expect(() => menuOf([
+      {
+        labelAction: () => 'Пункт',
+        focusAction: () => log.push('фокус'),
+        blurAction: async () => {
+          await Promise.resolve();
+          log.push('снят');
+        },
+      },
+    ])).not.toThrow();
+    expect(log, 'конструктор действий не зовёт').toEqual([]);
+  });
+
   test('валидная конфигурация принимается', () => {
     /** @type {Array<MenuItem | SeparatorItem>} */
     const items = [
