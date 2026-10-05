@@ -51,6 +51,24 @@ const SCALE_UP = 1.5;
 const SCALE_DOWN = 0.5;
 
 /**
+ * Множители, на которых проверяется, что подпись нигде не обрезается.
+ *
+ * Не одна-две величины, а весь диапазон ползунка демо с шагом `SCALE_STEP`:
+ * обрезка видна глазом на меньшинстве множителей (на 0.5…2.0 при кегле 13 px
+ * под `system-ui` её не видно примерно на трёх из шестнадцати), потому что
+ * `overflow: hidden` срезает по краю бокса, округлённому до целых пикселей, и
+ * круглая величина вылета то переживает округление, то нет. Один «злой» множитель
+ * в проверке означал бы, что остальные тринадцать непроверенными остаются.
+ */
+const LABEL_FIT_SCALES = [0.5, 0.6, 0.7, 0.8, 0.9, 1, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2];
+
+/**
+ * Шаг ползунка множителя в демо: `SCALE_RANGE.step` оттуда и взят, и кейс повторяет
+ * его намеренно — проверяются те величины, которые человек вообще может выставить.
+ */
+const SCALE_STEP = 0.1;
+
+/**
  * @typedef {import('../../src/MyContext.js').MenuItem} MenuItem
  * @typedef {import('../../src/MyContext.js').SeparatorItem} SeparatorItem
  */
@@ -204,6 +222,101 @@ async function measureScale(page, scale, anchor) {
   return snapshot;
 }
 
+/**
+ * Высота бокса подписи против шрифтового бокса на одном множителе.
+ *
+ * @typedef {object} LabelFit
+ * @property {number} labelHeight высота бокса `.vc-label`, px.
+ * @property {number} fontBox высота шрифтового бокса подписи, px: `ascent` плюс
+ *   `descent` того шрифта, которым подпись на самом деле нарисована.
+ * @property {number} itemHeight высота пункта, px.
+ * @property {number} tolerance допуск сравнения, px: доли пикселя от
+ *   округления `getComputedStyle` и `getBoundingClientRect` по разные стороны.
+ */
+
+/**
+ * Показывает меню с подписью, у которой есть вылеты, и меряет, помещаются ли они в
+ * бокс подписи.
+ *
+ * **Шрифтовой бокс меряется по фактически применённому `font`, а не константой.**
+ * Подпись рисуется тем шрифтом и тем кеглем, что вычислились у уровня, и только
+ * этот шрифт задаёт, сколько места занимает строка. Константа `1.33em` в кейсе
+ * означала бы проверку гипотезы «сколько занимает system-ui», а не проверку меню;
+ * смени автор темы `--vc-font` или кегль, и кейс продолжил бы утверждать верное
+ * о числе, относящееся к шрифту, которого на странице уже нет.
+ *
+ * **`canvas` вместо `TextMetrics` со скрытого узла:** холст рисует тем же шрифтом,
+ * что и страница, и отдаёт метрики без того, чтобы подпись пришлось бы временно
+ * переписывать.
+ *
+ * **Подпись с вылетами, а не произвольная.** Проверяется не «влезает ли текст»,
+ * а «влезает ли строка шрифта», и интересуют именно нижние вылеты `g`, `у`, `y`:
+ * верхние всегда помещаются в бокс строки, а нижние — ровно те, что уходят под
+ * `overflow: hidden`. Кириллическая `Экспорт` годится: `р` уходит за базовую
+ * линию так же, как `g`.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {number} scale множитель размеров.
+ * @returns {Promise<LabelFit>}
+ */
+async function measureLabelFit(page, scale) {
+  await page.evaluate(async (factor) => {
+    const holder = /** @type {{ __scaleMenu?: import('../../src/MyContext.js').MyContext }} */ (
+      /** @type {unknown} */ (globalThis)
+    );
+    if (holder.__scaleMenu !== undefined) {
+      holder.__scaleMenu.close();
+      holder.__scaleMenu.destroy();
+      delete holder.__scaleMenu;
+    }
+    const { MyContext } = await import('../../src/index.js');
+    /** @type {Array<MenuItem | SeparatorItem>} */
+    const items = [{ labelAction: () => 'Экспорт' }];
+    const menu = new MyContext(items, { scale: factor });
+    menu.open({ x: 40, y: 40 });
+    holder.__scaleMenu = menu;
+  }, scale);
+
+  // Показ анимируется даже под `reduce`, пока не пришёл кадр перехода: узлы
+  // уровня появляются синхронно, но ждать их появления дешевле и надёжнее, чем
+  // мерять снимок, в котором их может ещё не быть.
+  await expect(page.locator('.vc-menu:popover-open .vc-label')).toHaveText('Экспорт');
+
+  const fit = await page.evaluate(() => {
+    const label = /** @type {HTMLElement} */ (
+      document.querySelector('.vc-menu:popover-open .vc-label')
+    );
+    const item = /** @type {HTMLElement} */ (
+      document.querySelector('.vc-menu:popover-open .vc-item')
+    );
+    if (label === null || item === null) {
+      throw new Error('на странице нет показанного пункта меню');
+    }
+    const level = /** @type {HTMLElement} */ (label.closest('.vc-menu'));
+    if (level === null) {
+      throw new Error('на странице нет уровня меню');
+    }
+    const style = getComputedStyle(label);
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    if (context === null) {
+      throw new Error('страница не даёт 2d-контекст для замера шрифта');
+    }
+    // Шрифт подписи собирается целиком, а `font` уровня отдал бы кегль уровня:
+    // он у подписи свой, и кегль подписи — единственный верный.
+    context.font = style.font;
+    const metrics = context.measureText(label.textContent ?? '');
+    return {
+      labelHeight: label.getBoundingClientRect().height,
+      fontBox: metrics.fontBoundingBoxAscent + metrics.fontBoundingBoxDescent,
+      itemHeight: item.getBoundingClientRect().height,
+      tolerance: 0.5,
+    };
+  });
+
+  return fit;
+}
+
 test.beforeEach(async ({ page }) => {
   await page.setViewportSize(VIEWPORT);
   // `goto` обязателен перед `setContent`: без него у документа нет адреса, и ни
@@ -298,5 +411,35 @@ test.describe('множитель масштаба', () => {
         `нижний край ${name} не вышел за вьюпорт`,
       ).toBeLessThanOrEqual(viewportHeight - SAFETY_PADDING);
     }
+  });
+
+  test('подпись не обрезает вылеты ни на одном множителе', async ({ page }) => {
+    // Подпись с вылетами обязана стоять на каждом множителе, а не на одном
+    // удачном: с половиной величин, где округление съедает вылет, кейс прошёл бы
+    // и с багом на месте.
+    for (const scale of LABEL_FIT_SCALES) {
+      const fit = await measureLabelFit(page, scale);
+
+      // Инвариант, а не «выглядит нормально»: бокс подписи обязан покрывать
+      // шрифтовой бокс целиком, иначе нижние вылеты уходят под `overflow: hidden`,
+      // который подпись несёт ради многоточия.
+      expect(fit.labelHeight, `подпись обрезана на множителе ${scale}`)
+        .toBeGreaterThanOrEqual(fit.fontBox - fit.tolerance);
+      // Вторая половина того же требования: выросшая подпись обязана помещаться в
+      // пункт. Иначе фикс обменял бы обрезанные глифы на вылезающий текст.
+      expect(fit.labelHeight, `подпись выше пункта на множителе ${scale}`)
+        .toBeLessThanOrEqual(fit.itemHeight + fit.tolerance);
+    }
+  });
+
+  test('множители кейса идут с шагом ползунка демо', () => {
+    // Кейс обещает проверить весь диапазон демо, а список задан руками. Шаг
+    // ползунка — часть обещания: пропущенная ступень осталась бы непроверенной
+    // молча, и список разъехался бы с `Demo/demo.js` без единого падения.
+    for (let index = 1; index < LABEL_FIT_SCALES.length; index += 1) {
+      const previous = /** @type {number} */ (LABEL_FIT_SCALES[index - 1]);
+      expect(LABEL_FIT_SCALES[index] - previous).toBeCloseTo(SCALE_STEP, 10);
+    }
+    expect(LABEL_FIT_SCALES[0]).toBeGreaterThanOrEqual(SCALE_DOWN);
   });
 });
