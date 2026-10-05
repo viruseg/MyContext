@@ -111,9 +111,9 @@ function textElement(tagName, className, text) {
  *
  * @returns {HTMLOListElement}
  */
-function logElement() {
+function logElement(kind = 'clicks') {
   const log = document.createElement('ol');
-  log.className = 'demo-log';
+  log.className = kind === 'focus' ? 'demo-log demo-log--focus' : 'demo-log';
   log.setAttribute('aria-live', 'polite');
   log.tabIndex = 0;
   return log;
@@ -165,6 +165,31 @@ function logIn(scenarioId, readLabel) {
 }
 
 /**
+ * Запись события фокуса в отдельный журнал блока.
+ *
+ * Отдельный журнал, а не строчка в журнале кликов: событие фокуса и выбор пункта —
+ * разные вещи, и смешанный список не отвечал бы ни на вопрос «что выбрали», ни на
+ * вопрос «где стоит фокус». Отдельным он и проверяется: журнал кликов читают кейсы
+ * `tests/e2e/demo.spec.js`, и лишняя запись сломала бы их все.
+ *
+ * @param {string} scenarioId
+ * @param {() => string | Promise<string>} readLabel
+ * @param {'focus' | 'blur'} kind
+ * @returns {() => Promise<void>}
+ */
+function logFocus(scenarioId, readLabel, kind) {
+  return async () => {
+    const block = document.querySelector(`[data-scenario="${scenarioId}"]`);
+    const log = block === null ? null : block.querySelector('.demo-log--focus');
+    if (!(log instanceof HTMLElement)) {
+      throw new Error(`демо: у блока «${scenarioId}» нет журнала фокуса`);
+    }
+    const label = await readLabel();
+    log.appendChild(textElement('li', 'demo-log__item', `${kind}: ${label}`));
+  };
+}
+
+/**
  * Действие на каждом пункте всех уровней, добавленное поверх описания сценария.
  *
  * Отдельный проход, а не `action` в описаниях сценариев: описания остаются
@@ -185,7 +210,7 @@ function logIn(scenarioId, readLabel) {
  *   пункты одного уровня; `submenuAction` вправе отдать промис.
  * @returns {Promise<Array<MenuItem | SeparatorItem>>} копия уровня с действиями.
  */
-async function withItemActions(scenarioId, items) {
+async function withItemActions(scenarioId, items, focusJournal = false) {
   const level = await items;
   return level.map((item) => {
     if (isSeparator(item)) {
@@ -200,10 +225,14 @@ async function withItemActions(scenarioId, items) {
       ...rest,
       labelAction,
       action: clickable ? logIn(scenarioId, labelAction) : undefined,
+      // Журнал фокуса навешивается на все пункты блока, включая недоступные: у
+      // недоступного событий не будет, и в этом тоже ответ — он не получает фокус.
+      focusAction: focusJournal ? logFocus(scenarioId, labelAction, 'focus') : undefined,
+      blurAction: focusJournal ? logFocus(scenarioId, labelAction, 'blur') : undefined,
       submenuAction: submenuAction === undefined
         ? undefined
         : async () => {
-          return withItemActions(scenarioId, await submenuAction());
+          return withItemActions(scenarioId, await submenuAction(), focusJournal);
         },
     };
   });
@@ -231,11 +260,12 @@ async function withItemActions(scenarioId, items) {
  *
  * @param {Scenario} scenario описание сценария.
  * @param {number} scale множитель размеров меню.
+ * @param {boolean} focusJournal навесить ли на пункты события фокуса.
  * @returns {Promise<MyContext>} демо собирает пункты до создания меню: `submenuAction`
  *   вправе отдать промис, а разворачивать его надо с ожиданием.
  */
-async function createMenu(scenario, scale) {
-  return new MyContext(await withItemActions(scenario.id, scenario.items), {
+async function createMenu(scenario, scale, focusJournal) {
+  return new MyContext(await withItemActions(scenario.id, scenario.items, focusJournal), {
     theme: 'auto',
     label: scenario.title,
     autoHideDistance: scenario.autoHideDistance ?? DEFAULT_AUTO_HIDE_DISTANCE,
@@ -301,7 +331,14 @@ async function buildScenario(scenario, block) {
     textElement('p', 'demo-scenario__hint', scenario.hint ?? DEFAULT_HINT),
     logElement(),
   );
-  let menu = await createMenu(scenario, DEFAULT_SCALE);
+  const focusJournal = scenario.focusJournal === true;
+  if (focusJournal) {
+    // Журнал фокуса идёт после журнала кликов и без своей подписи: назначение видно
+    // из первых же строк, а подпись над вторым списком без подписи над первым
+    // выглядела бы ошибкой вёрстки.
+    block.appendChild(logElement('focus'));
+  }
+  let menu = await createMenu(scenario, DEFAULT_SCALE, focusJournal);
   if (scenario.openFromButton === true) {
     // Привязки нет намеренно: блок с этим сценарием показывает показ из чужого кода,
     // а правила закрытия поднимает сам показ. Привязанный блок открыл бы меню ещё и
@@ -329,7 +366,7 @@ async function buildScenario(scenario, block) {
     // смену размера, и `logIn` ищет его по блоку в момент клика.
     control.range.addEventListener('input', async () => {
       menu.destroy();
-      menu = await createMenu(scenario, Number(control.range.value));
+      menu = await createMenu(scenario, Number(control.range.value), focusJournal);
       menu.attach(block);
       control.readout.value = control.range.value;
     });
