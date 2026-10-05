@@ -93,6 +93,22 @@ test.describe('валидация корневого состава', () => {
       .toThrow('items[0].action');
     expect(() => menuOf([{ labelAction: () => 'Первый', isEnabledAction: 'да' }]))
       .toThrow('items[0].isEnabledAction');
+    expect(() => menuOf([{ labelAction: () => 'Первый', isVisibleAction: 'да' }]))
+      .toThrow('items[0].isVisibleAction');
+  });
+
+  test('предикат видимости разделителя проверяется так же, как пунктовый', () => {
+    // Разделитель отличается от пункта единственным полем, но предикат видимости
+    // достался и ему: скрытая черта — законное состояние уровня, а не мусор в
+    // контракте. Проверка формы оттуда же, откуда у пункта, иначе опечатка автора
+    // ждала бы своего часа на показе.
+    expect(() => menuOf([{ type: 'separator', isVisibleAction: 'нет' }]))
+      .toThrow('items[0].isVisibleAction');
+    expect(() => menuOf([
+      { type: 'separator' },
+      { type: 'separator', isVisibleAction: () => true },
+      { type: 'separator', isVisibleAction: async () => false },
+    ])).not.toThrow();
   });
 
   test('version не число отклоняется', () => {

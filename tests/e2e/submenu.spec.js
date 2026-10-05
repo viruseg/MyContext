@@ -390,7 +390,7 @@ test.beforeEach(async ({ page }) => {
 
   await page.evaluate(async () => {
     const { MyContext } = await import('../../src/index.js');
-    const { renderLevel } = await import('../../src/renderer.js');
+    const { collectAnswers, renderLevel } = await import('../../src/renderer.js');
 
     /**
      * Подменю набора `nested` лежит в отдельном массиве, а не собирается в
@@ -689,12 +689,13 @@ test.beforeEach(async ({ page }) => {
           submenuAction: () => [{ labelAction: () => 'Лист' }],
           isEnabledAction: () => enabled,
         }];
-        const level = await renderLevel(items, {
+        const context = {
           levelIndex: 0,
           menuId: 'vc-проба',
           label: 'Меню пробы',
           actions: new Map(),
-        });
+        };
+        const level = await renderLevel(items, context, await collectAnswers(items, context.menuId));
         const item = level.items[0];
         return {
           hasSubmenu: item.hasSubmenu,

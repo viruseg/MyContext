@@ -1,6 +1,6 @@
 import { DEFAULT_ANIMATION_DURATION, SAFETY_PADDING } from './constants.js';
 import { calculateMenuPosition, calculateSubmenuPosition } from './positioner.js';
-import { renderLevel, refreshItems, submenuHashOf } from './renderer.js';
+import { collectAnswers, refreshItems, renderLevel, submenuHashOf } from './renderer.js';
 import { createScrollZones } from './scrollZones.js';
 import { applyAnimationDuration, applyScale, applyTheme } from './theme.js';
 
@@ -114,6 +114,7 @@ import { applyAnimationDuration, applyScale, applyTheme } from './theme.js';
 /**
  * @typedef {import('./renderer.js').MenuItem} MenuItem
  * @typedef {import('./renderer.js').SeparatorItem} SeparatorItem
+ * @typedef {import('./renderer.js').LevelAnswer} LevelAnswer
  * @typedef {import('./renderer.js').RenderContext} RenderContext
  * @typedef {import('./renderer.js').RenderedItem} RenderedItem
  * @typedef {import('./renderer.js').RenderedLevel} RenderedLevel
@@ -444,41 +445,42 @@ export function createLayer(options) {
    * @param {number} levelIndex
    * @param {RenderedItem | null} ownerItem
    * @param {string} menuId
-   * @returns {Promise<LevelEntry>}
+   * @param {Array<LevelAnswer>} answers ответы строк этого показа; заново не собираются,
+   *   и пересборка уровня не зовёт действия второй раз.
+   * @returns {LevelEntry}
    */
-  function createEntry(items, parent, levelIndex, ownerItem, menuId) {
+  function createEntry(items, parent, levelIndex, ownerItem, menuId, answers) {
     /** @type {RenderContext} */
     const context = { levelIndex, menuId, label, actions };
-    return renderLevel(items, context).then((rendered) => {
-      applyTheme(rendered.element, theme);
-      applyAnimationDuration(rendered.element, animationDuration);
-      applyScale(rendered.element, scale);
-      /** @type {LevelEntry} */
-      const entry = {
-        element: rendered.element,
-        items: rendered.items,
-        parent,
-        ownerItem,
-        children: [],
-        open: false,
-        itemsHash: submenuHashOf(items),
-        generation: 0,
-        activeIndex: -1,
-      };
-      levels.push(entry);
-      zones.set(entry, createScrollZones({
-        list: rendered.scroll.list,
-        level: entry.element,
-        up: rendered.scroll.up,
-        down: rendered.scroll.down,
-      }));
-      return entry;
-    });
+    const rendered = renderLevel(items, context, answers);
+    applyTheme(rendered.element, theme);
+    applyAnimationDuration(rendered.element, animationDuration);
+    applyScale(rendered.element, scale);
+    /** @type {LevelEntry} */
+    const entry = {
+      element: rendered.element,
+      items: rendered.items,
+      parent,
+      ownerItem,
+      children: [],
+      open: false,
+      itemsHash: submenuHashOf(items),
+      generation: 0,
+      activeIndex: -1,
+    };
+    levels.push(entry);
+    zones.set(entry, createScrollZones({
+      list: rendered.scroll.list,
+      level: entry.element,
+      up: rendered.scroll.up,
+      down: rendered.scroll.down,
+    }));
+    return entry;
   }
 
-/**
-    * Приводит построенный уровень к предъявленному составу: тот же отпечаток —
-   * обновляются ответы действий, другой — уровень перестраивается.
+  /**
+   * Приводит построенный уровень к предъявленному составу: тот же отпечаток и та же
+   * видимость — обновляются ответы действий, иначе уровень перестраивается.
    *
    * Перестроение сносит поддерево целиком, а не перерисовывает список: состояния
    * уровня живут не только в его DOM. Реестр движка клавиатуры, подписки на показ
@@ -486,43 +488,61 @@ export function createLayer(options) {
    * стирает, — а частичная перерисовка оставила бы в реестре пункты прежнего
    * состава и оставила бы `Tab` зацикленным на одном из них.
    *
-   * Адрес нового уровня — прежний: `aria-owns` пункта-владельца уже назван, и
-   * второй адрес на то же подменю сделал бы ссылку висячей с другой стороны.
+   * Состав видимого — часть состава уровня, а не его украшение: строка, скрытая
+   * предыдущим показом и видимая этим, обязана появиться, и появиться может только
+   * вместе с перестроением — вставкой узла посреди уровня пришлось бы тогда ещё
+   * пересчитать `aria-posinset` и `aria-setsize` соседей, список пунктов уровня и
+   * его `activeIndex`, и отдельно разобраться с подменю пункта, который стал
+   * невидимым владельцем. Пересборка отвечает на всё это разом, и адрес нового
+   * уровня остаётся прежним, потому что `createEntry` получает тот же `menuId`.
+   *
+   * Проверки, жив ли ещё уровень, здесь нет: ответы собраны до того, как уровень
+   * найден, и с этого момента до этого прохода нет ничего асинхронного. Проверка
+   * живости жила ровно на той асинхронной границе, которой больше нет.
    *
    * @param {LevelEntry} entry уровень, построенный ранее.
    * @param {Array<MenuItem | SeparatorItem>} items новый состав того же уровня.
+   * @param {Array<LevelAnswer>} answers ответы строк этого показа.
    * @param {number} levelIndex
-   * @returns {Promise<LevelEntry>} тот же уровень, если состав не изменился, и новый иначе.
+   * @returns {LevelEntry} тот же уровень, если состав не изменился, и новый иначе.
    */
-  function reconcile(entry, items, levelIndex) {
-    const hash = submenuHashOf(items);
-    if (entry.itemsHash === hash) {
-      // Повторный показ — единственное время, когда состояние пунктов ещё можно
-      // догнать: автор выключает действие между показами, и без этого прохода
-      // поле действовало бы только на первом.
-      return refreshItems(items, entry.items, entry.element.id, actions, () => {
-        return levels.includes(entry);
-      }).then(() => {
-        // Пока шли ответы, уровень могли снести — и вернуть его после было бы
-        // некем: показывать отцепленный уровень нельзя, а следующий показ искал бы
-        // уровень заново и завёл бы второй. Мёртвый уровень заводится начисто.
-        if (!levels.includes(entry)) {
-          return ensureLevel(items, entry.parent, levelIndex, entry.ownerItem);
-        }
-        return entry;
-      });
+  function reconcile(entry, items, answers, levelIndex) {
+    const sameShape = entry.itemsHash === submenuHashOf(items);
+    const rebuild = !sameShape || refreshItems(items, entry.items, answers, entry.element.id, actions);
+    if (!rebuild) {
+      return entry;
     }
     const menuId = entry.element.id;
     const parent = entry.parent;
     discardLevels(entry);
-    return createEntry(items, parent, levelIndex, entry.ownerItem, menuId).then((fresh) => {
-      if (parent === null) {
-        root = fresh;
-      } else {
-        parent.children.push(fresh);
-      }
-      return fresh;
-    });
+    const fresh = createEntry(items, parent, levelIndex, entry.ownerItem, menuId, answers);
+    if (parent === null) {
+      root = fresh;
+    } else {
+      parent.children.push(fresh);
+    }
+    return fresh;
+  }
+
+  /**
+   * Адрес, под которым уровень заводится заново. У корня он выводится из серийного
+   * номера экземпляра и глубины, у подменю — берётся у пункта-владельца, потому что
+   * `aria-owns` на пункте уже назван именно им и второй адрес на то же меню сделал
+   * бы ссылку висячей.
+   *
+   * @param {LevelEntry | null} parent
+   * @param {number} levelIndex
+   * @param {RenderedItem | null} ownerItem
+   * @returns {string}
+   */
+  function menuIdFor(parent, levelIndex, ownerItem) {
+    if (parent === null) {
+      return `${menuIdPrefix}-${levelIndex}`;
+    }
+    if (ownerItem === null) {
+      throw new Error('MyContext: у уровня-подменя обязан быть пункт-владелец');
+    }
+    return reservedSubmenuId(ownerItem);
   }
 
   /**
@@ -571,6 +591,11 @@ export function createLayer(options) {
   /**
    * Заводит уровень по составу либо приводит уже построенный к нему.
    *
+   * Ответы действий собираются здесь, а не внутри сборки уровня: один показ — один
+   * сбор, и пересборка уровня, случившаяся из-за смены видимости, пользуется теми же
+   * ответами. Второй сбор дал бы автору два состава под одним показом, и `submenuAction`,
+   * отдающий непостоянный состав, разошёлся бы с тем, что показано.
+   *
    * @param {Array<MenuItem | SeparatorItem>} items пункты уровня в исходном порядке.
    * @param {LevelEntry | null} parent уровень, из которого открывается этот.
    * @param {number} levelIndex глубина уровня, начиная с 0; идёт в `aria-level`.
@@ -581,22 +606,43 @@ export function createLayer(options) {
     if (destroyed) {
       return Promise.reject(new Error('MyContext: слой уничтожен'));
     }
-    if (parent === null) {
-      if (ownerItem !== null) {
-        return Promise.reject(new Error('MyContext: у корневого уровня нет пункта-владельца'));
-      }
-      if (root === null) {
-        return createEntry(items, null, levelIndex, ownerItem, `${menuIdPrefix}-0`).then((fresh) => {
-          root = fresh;
-          return fresh;
-        });
-      }
-      return reconcile(root, items, levelIndex);
+    // Владелец у уровня один, и оба отказа — про его отсутствие: у корня владельца
+    // быть не должно вовсе, а у подменю им нечего вешать. Проверка до сбора
+    // ответов: отказ должен прийти раньше, чем автор увидит действия пунктов
+    // уровня, которого не будет.
+    if (parent === null && ownerItem !== null) {
+      return Promise.reject(new Error('MyContext: у корневого уровня нет пункта-владельца'));
     }
-    // Уровень без пункта-владельца некуда вешать: `aria-owns` и `aria-expanded`
-    // живут на пункте, и подменю без пункта осталось бы связанным с миром.
-    if (ownerItem === null) {
+    if (parent !== null && ownerItem === null) {
       return Promise.reject(new Error('MyContext: у уровня-подменя обязан быть пункт-владелец'));
+    }
+    return collectAnswers(items, menuIdFor(parent, levelIndex, ownerItem)).then((answers) => {
+      return ensureLevelOf(items, parent, levelIndex, ownerItem, answers);
+    });
+  }
+
+  /**
+   * Заводит уровень по собранным ответам: уже построенный приводится к ним, а
+   * отсутствующий строится.
+   *
+   * Проверки на разобранный слой здесь нет: слой проверяется до сбора ответов, а
+   * разобрать его между сбором и этим вызовом можно — и тогда уровень построится
+   * зря. Показывать его не станет: показ отменится по своему счёту показов, и
+   * уровень уедет вместе с остальными.
+   *
+   * @param {Array<MenuItem | SeparatorItem>} items пункты уровня в исходном порядке.
+   * @param {LevelEntry | null} parent уровень, из которого открывается этот.
+   * @param {number} levelIndex глубина уровня, начиная с 0; идёт в `aria-level`.
+   * @param {RenderedItem | null} ownerItem пункт-владелец; `null` у корня.
+   * @param {Array<LevelAnswer>} answers ответы строк этого показа.
+   * @returns {LevelEntry}
+   */
+  function ensureLevelOf(items, parent, levelIndex, ownerItem, answers) {
+    if (parent === null) {
+      root = root === null
+        ? createEntry(items, null, levelIndex, null, menuIdFor(null, levelIndex, null), answers)
+        : reconcile(root, items, answers, levelIndex);
+      return root;
     }
     // Идентичность уровня — пара «родитель, владелец». Сравнение по ссылке на
     // `RenderedItem` устойчиво к перестроению разметки: элемент пункта
@@ -605,13 +651,18 @@ export function createLayer(options) {
       return child.ownerItem === ownerItem;
     });
     if (existing !== undefined) {
-      return reconcile(existing, items, levelIndex);
+      return reconcile(existing, items, answers, levelIndex);
     }
-    const menuId = reservedSubmenuId(ownerItem);
-    return createEntry(items, parent, levelIndex, ownerItem, menuId).then((entry) => {
-      parent.children.push(entry);
-      return entry;
-    });
+    const entry = createEntry(
+      items,
+      parent,
+      levelIndex,
+      ownerItem,
+      menuIdFor(parent, levelIndex, ownerItem),
+      answers,
+    );
+    parent.children.push(entry);
+    return entry;
   }
 
   /**

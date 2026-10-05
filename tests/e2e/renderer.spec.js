@@ -16,7 +16,10 @@ import { resolveColor } from '../helpers/resolveColor.js';
 /**
  * @typedef {import('../../src/renderer.js').MenuItem} MenuItem
  * @typedef {import('../../src/renderer.js').SeparatorItem} SeparatorItem
+ * @typedef {import('../../src/renderer.js').RenderContext} RenderContext
+ * @typedef {import('../../src/renderer.js').RenderedLevel} RenderedLevel
  * @typedef {import('../../src/icons.js').IconConfig} IconConfig
+ * @typedef {(items: Array<MenuItem | SeparatorItem>, context: RenderContext) => Promise<RenderedLevel>} LevelBuilder
  */
 
 const STYLESHEET_PATH = '/styles/mycontext.css';
@@ -81,6 +84,25 @@ function fixtureIn(page) {
   }, { emoji: EMOJI });
 }
 
+/**
+ * Сборка уровня целиком теми же двумя проходами, какими её делает слой: ответы строк
+ * собираются первым, разметка строится вторым. Ставится на `globalThis` тем же
+ * приёмом, что и фикстура, — функция из `page.evaluate` наружу не перевозится, а
+ * собирать её в каждом кейсе было бы двадцатью пятью копиями одного и того же.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<void>}
+ */
+function levelBuilderIn(page) {
+  return page.evaluate(async () => {
+    const host = /** @type {{ __vcLevel?: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
+    const { collectAnswers, renderLevel } = await import('../../src/renderer.js');
+    host.__vcLevel = async (items, context) => {
+      return renderLevel(items, context, await collectAnswers(items, context.menuId));
+    };
+  });
+}
+
 test.beforeEach(async ({ page }) => {
   // `goto` обязателен перед `setContent`: без него у документа нет адреса, и ни
   // ссылка на таблицу стилей, ни динамический импорт не разрешились бы.
@@ -102,6 +124,7 @@ test.beforeEach(async ({ page }) => {
   // меню и падали бы по таймауту в зависимости от того, успела ли анимация кончиться.
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await fixtureIn(page);
+  await levelBuilderIn(page);
 });
 
 test.describe('пункт', () => {
@@ -111,8 +134,8 @@ test.describe('пункт', () => {
         /** @type { unknown } */ (globalThis)
       );
       const levelItems = host.__vcFixture();
-      const { renderLevel } = await import('../../src/renderer.js');
-      const level = await renderLevel(levelItems, {
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
+      const level = await renderer.__vcLevel(levelItems, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -159,8 +182,8 @@ test.describe('пункт', () => {
         /** @type { unknown } */ (globalThis)
       );
       const levelItems = host.__vcFixture();
-      const { renderLevel } = await import('../../src/renderer.js');
-      const level = await renderLevel(levelItems, {
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
+      const level = await renderer.__vcLevel(levelItems, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -196,8 +219,8 @@ test.describe('пункт', () => {
 
   test('isEnabledAction без поля и с возвратом true оставляют пункт доступным', async ({ page }) => {
     const result = await page.evaluate(async () => {
-      const { renderLevel } = await import('../../src/renderer.js');
-      const level = await renderLevel([
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
+      const level = await renderer.__vcLevel([
         { labelAction: () => 'Без предиката' },
         { labelAction: () => 'Вернул true', isEnabledAction: () => true },
       ], {
@@ -224,7 +247,7 @@ test.describe('пункт', () => {
 
   test('isEnabledAction, вернувший не-булево, отключает пункт', async ({ page }) => {
     const result = await page.evaluate(async () => {
-      const { renderLevel } = await import('../../src/renderer.js');
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
       // Пункты заходят через `unknown`: предикаты здесь возвращают не `boolean`,
       // и тип их бы отверг — а проверяется ровно то, как рендерер ведёт себя с
       // таким возвратом. Приведение ничего не скрывает: решение принимает
@@ -234,7 +257,7 @@ test.describe('пункт', () => {
         { labelAction: () => 'Строка', isEnabledAction: () => 'да' },
         { labelAction: () => 'Единица', isEnabledAction: () => 1 },
       ]));
-      const level = await renderLevel(items, {
+      const level = await renderer.__vcLevel(items, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -260,9 +283,9 @@ test.describe('пункт', () => {
 
   test('isEnabledAction вызван при сборке ровно один раз на пункт', async ({ page }) => {
     const result = await page.evaluate(async () => {
-      const { renderLevel } = await import('../../src/renderer.js');
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
       const calls = [];
-      await renderLevel([
+      await renderer.__vcLevel([
         { labelAction: () => 'Первый', isEnabledAction: () => { calls.push(1); return true; } },
         { labelAction: () => 'Второй' },
       ], {
@@ -285,8 +308,8 @@ test.describe('пункт', () => {
         /** @type { unknown } */ (globalThis)
       );
       const levelItems = host.__vcFixture();
-      const { renderLevel } = await import('../../src/renderer.js');
-      const level = await renderLevel(levelItems, {
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
+      const level = await renderer.__vcLevel(levelItems, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -334,9 +357,9 @@ test.describe('пункт', () => {
         /** @type { unknown } */ (globalThis)
       );
       const levelItems = host.__vcFixture();
-      const { renderLevel } = await import('../../src/renderer.js');
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
       const actions = new Map();
-      const level = await renderLevel(levelItems, {
+      const level = await renderer.__vcLevel(levelItems, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -392,13 +415,13 @@ test.describe('нумерация уровня', async () => {
         /** @type { unknown } */ (globalThis)
       );
       const levelItems = host.__vcFixture();
-      const { renderLevel } = await import('../../src/renderer.js');
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
       /**
        * @param {number} levelIndex
        * @returns {Promise<string | null>}
        */
       const readAriaLevel = async (levelIndex) => {
-        const level = await renderLevel(levelItems, {
+        const level = await renderer.__vcLevel(levelItems, {
           levelIndex,
           menuId: `vc-level-${levelIndex}`,
           label: 'Меню файла',
@@ -421,7 +444,7 @@ test.describe('нумерация уровня', async () => {
 
   test('aria-setsize и aria-posinset считаются без разделителей', async ({ page }) => {
     const result = await page.evaluate(async () => {
-      const { renderLevel } = await import('../../src/renderer.js');
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
       /** @type {Array<MenuItem | SeparatorItem>} */
       const items = [
         { labelAction: () => 'Первый' },
@@ -429,7 +452,7 @@ test.describe('нумерация уровня', async () => {
         { type: 'separator' },
         { labelAction: () => 'Третий' },
       ];
-      const level = await renderLevel(items, {
+      const level = await renderer.__vcLevel(items, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -478,6 +501,9 @@ test.describe('нумерация уровня', async () => {
         7,
         5,
       );
+      if (item === null) {
+        throw new Error('видимый пункт должен был вернуть узел');
+      }
       return {
         role: item.element.getAttribute('role'),
         ariaLevel: item.element.getAttribute('aria-level'),
@@ -509,14 +535,14 @@ test.describe('нумерация уровня', async () => {
 test.describe('сетка пункта', () => {
   test('иконки: слот сохраняет ширину --vc-icon-size независимо от вида иконки', async ({ page }) => {
     const result = await page.evaluate(async (square) => {
-      const { renderLevel } = await import('../../src/renderer.js');
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
       /** @type {Array<MenuItem | SeparatorItem>} */
       const items = [
         { labelAction: () => 'Svg', iconAction: () => square },
         { labelAction: () => 'Эмодзи', iconAction: () => ({ type: 'emoji', value: '📄' }) },
         { labelAction: () => 'Без иконки' },
       ];
-      const level = await renderLevel(items, {
+      const level = await renderer.__vcLevel(items, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -570,13 +596,13 @@ test.describe('сетка пункта', () => {
 
   test('иконки: у пункта без подменю колонка шеврона сохраняет ширину --vc-chevron-size', async ({ page }) => {
     const result = await page.evaluate(async () => {
-      const { renderLevel } = await import('../../src/renderer.js');
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
       /** @type {Array<MenuItem | SeparatorItem>} */
       const items = [
         { labelAction: () => 'Владелец', submenuAction: () => [{ labelAction: () => 'PDF' }] },
         { labelAction: () => 'Обычный' },
       ];
-      const level = await renderLevel(items, {
+      const level = await renderer.__vcLevel(items, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -625,8 +651,8 @@ test.describe('сетка пункта', () => {
       const fixtures = /** @type { { __vcFixture: () => Array<MenuItem | SeparatorItem> } } */ (
         /** @type { unknown } */ (globalThis)
       );
-      const { renderLevel } = await import('../../src/renderer.js');
-      const level = await renderLevel(fixtures.__vcFixture(), {
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
+      const level = await renderer.__vcLevel(fixtures.__vcFixture(), {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -695,8 +721,8 @@ test.describe('сетка пункта', () => {
 
   test('шеврон что-то рисует: у ::before есть ненулевая толщина рамки', async ({ page }) => {
     const result = await page.evaluate(async () => {
-      const { renderLevel } = await import('../../src/renderer.js');
-      const level = await renderLevel([{ labelAction: () => 'Экспорт', submenuAction: () => [{ labelAction: () => 'PDF' }] }], {
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
+      const level = await renderer.__vcLevel([{ labelAction: () => 'Экспорт', submenuAction: () => [{ labelAction: () => 'PDF' }] }], {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -788,8 +814,8 @@ test.describe('сетка пункта', () => {
 
   test('шеврон реально разворачивается: transform в состояниях left и right различаются', async ({ page }) => {
     const result = await page.evaluate(async () => {
-      const { renderLevel } = await import('../../src/renderer.js');
-      const level = await renderLevel([
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
+      const level = await renderer.__vcLevel([
         { labelAction: () => 'Вправо', submenuAction: () => [{ labelAction: () => 'A' }] },
         { labelAction: () => 'Влево', submenuAction: () => [{ labelAction: () => 'B' }] },
       ], {
@@ -863,14 +889,14 @@ test.describe('сетка пункта', () => {
     // длина подписи не выводит меню за предел.
     await page.setViewportSize({ width: 360, height: 640 });
     const result = await page.evaluate(async ({ long, short, narrow, padding }) => {
-      const { renderLevel } = await import('../../src/renderer.js');
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
       /**
        * @param {string} hostId
        * @param {Array<MenuItem | SeparatorItem>} items
        * @returns {Promise<import('../../src/renderer.js').RenderedLevel>}
        */
       const open = async (hostId, items) => {
-        const level = await renderLevel(items, {
+        const level = await renderer.__vcLevel(items, {
           levelIndex: 0,
           menuId: 'vc-level-0',
           label: 'Меню файла',
@@ -933,13 +959,13 @@ test.describe('сетка пункта', () => {
 
   test('колонки не сдвигаются: ширина меню одинакова для пунктов с иконкой и без', async ({ page }) => {
     const result = await page.evaluate(async ({ square, padding }) => {
-      const { renderLevel } = await import('../../src/renderer.js');
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
       /**
        * @param {Array<MenuItem | SeparatorItem>} items
        * @returns {Promise<number>}
        */
       const measure = async (items) => {
-        const level = await renderLevel(items, {
+        const level = await renderer.__vcLevel(items, {
           levelIndex: 0,
           menuId: 'vc-level-0',
           label: 'Меню файла',
@@ -975,7 +1001,7 @@ test.describe('сетка пункта', () => {
 test.describe('ключи и коллбэки', () => {
   test('внутренний ключ не зависит от id: пункт с повторяющимся id получает разные ключи', async ({ page }) => {
     const result = await page.evaluate(async () => {
-      const { renderLevel } = await import('../../src/renderer.js');
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
       /** @type {Array<MenuItem | SeparatorItem>} */
       const items = [
         { labelAction: () => 'Первый', id: 'x' },
@@ -983,7 +1009,7 @@ test.describe('ключи и коллбэки', () => {
         { labelAction: () => 'Третий' },
       ];
       const actions = new Map();
-      const level = await renderLevel(items, {
+      const level = await renderer.__vcLevel(items, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -1014,7 +1040,7 @@ test.describe('ключи и коллбэки', () => {
 
   test('action-коллбэк попадает в actions, а не в DOM', async ({ page }) => {
     const result = await page.evaluate(async () => {
-      const { renderLevel } = await import('../../src/renderer.js');
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
       /** @type {string[]} */
       const calls = [];
       /** @type {Array<MenuItem | SeparatorItem>} */
@@ -1025,7 +1051,7 @@ test.describe('ключи и коллбэки', () => {
         { labelAction: () => 'Третье', action: () => { calls.push('третье'); } },
       ];
       const actions = new Map();
-      const level = await renderLevel(items, {
+      const level = await renderer.__vcLevel(items, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
@@ -1080,7 +1106,7 @@ test.describe('ключи и коллбэки', () => {
 
   test('карта actions общая для всех уровней и не смешивает их пункты', async ({ page }) => {
     const result = await page.evaluate(async () => {
-      const { renderLevel } = await import('../../src/renderer.js');
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
       const actions = new Map();
       /**
        * @param {string} hostId
@@ -1089,7 +1115,7 @@ test.describe('ключи и коллбэки', () => {
        * @returns {Promise<import('../../src/renderer.js').RenderedLevel>}
        */
       const render = async (hostId, menuId, levelIndex) => {
-        const level = await renderLevel([{ labelAction: async () => `Пункт ${levelIndex}` }], {
+        const level = await renderer.__vcLevel([{ labelAction: async () => `Пункт ${levelIndex}` }], {
           levelIndex,
           menuId,
           label: 'Меню файла',
@@ -1119,7 +1145,7 @@ test.describe('ключи и коллбэки', () => {
 
   test('внутренний ключ уникален между экземплярами: два меню с одинаковым levelIndex не сталкиваются в общей карте', async ({ page }) => {
     const result = await page.evaluate(async () => {
-      const { renderLevel } = await import('../../src/renderer.js');
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
       /** @type {string[]} */
       const calls = [];
       const actions = new Map();
@@ -1128,7 +1154,7 @@ test.describe('ключи и коллбэки', () => {
        * @returns {Promise<import('../../src/renderer.js').RenderedLevel>}
        */
       const build = async (tag) => {
-        return await renderLevel([
+        return await renderer.__vcLevel([
           { labelAction: () => `Первый ${tag}`, action: () => { calls.push(`первый:${tag}`); } },
           { labelAction: () => `Второй ${tag}`, action: () => { calls.push(`второй:${tag}`); } },
         ], {
@@ -1196,14 +1222,14 @@ test.describe('каркас уровня', () => {
         /** @type { unknown } */ (globalThis)
       );
       const levelItems = host.__vcFixture();
-      const { renderLevel } = await import('../../src/renderer.js');
-      const level = await renderLevel(levelItems, {
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
+      const level = await renderer.__vcLevel(levelItems, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
         actions: new Map(),
       });
-      const withoutLabel = await renderLevel(levelItems, {
+      const withoutLabel = await renderer.__vcLevel(levelItems, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         actions: new Map(),
@@ -1251,8 +1277,8 @@ test.describe('каркас уровня', () => {
         /** @type { unknown } */ (globalThis)
       );
       const levelItems = host.__vcFixture();
-      const { renderLevel } = await import('../../src/renderer.js');
-      const level = await renderLevel(levelItems, {
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
+      const level = await renderer.__vcLevel(levelItems, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         actions: new Map(),
@@ -1305,7 +1331,7 @@ test.describe('каркас уровня', () => {
 
   test('у каждого уровня уникальный id для aria-owns', async ({ page }) => {
     const result = await page.evaluate(async () => {
-      const { renderLevel } = await import('../../src/renderer.js');
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
       /**
        * @param {string} hostId
        * @param {string} menuId
@@ -1313,7 +1339,7 @@ test.describe('каркас уровня', () => {
        * @returns {Promise<import('../../src/renderer.js').RenderedLevel>}
        */
       const render = async (hostId, menuId, levelIndex) => {
-        const level = await renderLevel([
+        const level = await renderer.__vcLevel([
           { labelAction: () => 'Первый', submenuAction: () => [{ labelAction: () => 'A' }] },
           { labelAction: () => 'Второй', submenuAction: () => [{ labelAction: () => 'B' }] },
         ], {
@@ -1361,14 +1387,14 @@ test.describe('каркас уровня', () => {
 
   test('aria-owns уникальны между экземплярами', async ({ page }) => {
     const result = await page.evaluate(async () => {
-      const { renderLevel } = await import('../../src/renderer.js');
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
       /**
        * @param {string} hostId
        * @param {string} menuId
        * @returns {Promise<import('../../src/renderer.js').RenderedLevel>}
        */
       const render = async (hostId, menuId) => {
-        const level = await renderLevel([
+        const level = await renderer.__vcLevel([
           { labelAction: () => 'Первый', submenuAction: () => [{ labelAction: () => 'A' }] },
           { labelAction: () => 'Второй', submenuAction: () => [{ labelAction: () => 'B' }] },
         ], {
@@ -1416,13 +1442,13 @@ test.describe('каркас уровня', () => {
 
   test('пункт без submenuAction не считается владельцем', async ({ page }) => {
     const result = await page.evaluate(async () => {
-      const { renderLevel } = await import('../../src/renderer.js');
+      const renderer = /** @type {{ __vcLevel: LevelBuilder }} */ (/** @type {unknown} */ (globalThis));
       /** @type {Array<MenuItem | SeparatorItem>} */
       const items = [
         { labelAction: () => 'Без подменю' },
         { labelAction: () => 'С подменю', submenuAction: () => [{ labelAction: () => 'A' }] },
       ];
-      const level = await renderLevel(items, {
+      const level = await renderer.__vcLevel(items, {
         levelIndex: 0,
         menuId: 'vc-level-0',
         label: 'Меню файла',
