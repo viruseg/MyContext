@@ -12,9 +12,10 @@
  * (`withItemActions`) и навешивает действие каждому пункту всех уровней, а
  * описания здесь остаются чистыми: новый пункт в описании сразу получает
  * рабочий клик, и журналу кликов не нужно знать, какие пункты есть. Одно
- * исключение вытекает из правила закрытия (спека 5.1, 8): клик по владельцу
- * непустого подменю открывает подменю и своего действия не зовёт, поэтому в
- * журнал такая строка не попадает, и обойти это из демо нечем.
+ * исключение — пункт-владелец: журнал навешивается на него только при
+ * `ownAction`, потому что клик по владельцу без своего действия раскрывает
+ * подменю и журнала не касается. Пометку ставят оба вида владельцев в каждом
+ * блоке, иначе различать их было бы нечем.
  *
  * **Подменю не содержат разделителей.** Хотя контракт их и допускает, разделитель
  * внутри подменю потребовал бы либо приведения типов, либо расширения типа в
@@ -25,6 +26,19 @@
 /**
  * @typedef {import('../src/renderer.js').MenuItem} MenuItem
  * @typedef {import('../src/renderer.js').SeparatorItem} SeparatorItem
+ */
+
+/**
+ * Пункт описания сценария: обычный `MenuItem` и демо-пометка `ownAction`.
+ *
+ * `ownAction` отвечает на вопрос, которого нет у библиотеки: **навешивать ли на
+ * пункт-владелец журнал кликов.** Действия вешает страница (`Demo/demo.js`), и без
+ * пометки владелец получил бы `action` вместе со всеми остальными — то есть стал бы
+ * кликабельным, а клик по нему перестал бы раскрывать подменю. Каждый блок демо
+ * показывает оба вида владельца рядом, и без пометки второй из них нечем было бы
+ * отличить от первого.
+ *
+ * @typedef {MenuItem & { ownAction?: boolean }} DemoItem
  */
 
 /**
@@ -54,7 +68,7 @@
  *   объявлен в `Demo/demo.js`: он относится к элементу управления, а не к данным
  *   меню, и держать его в описании сценария было бы вторым местом, где живёт
  *   одно и то же число.
- * @property {Array<MenuItem | SeparatorItem>} items пункты корневого уровня.
+ * @property {Array<DemoItem | SeparatorItem>} items пункты корневого уровня.
  */
 
 /**
@@ -105,7 +119,45 @@ const PRINT_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
   + ' fill="currentColor"/></svg>';
 
 /**
- * @returns {Array<MenuItem | SeparatorItem>}
+ * Пара владельцев подменю для блока: один раскрывается кликом, второй зовёт своё
+ * действие. Функция, а не две строки в каждом сценарии: пара обязана быть в каждом
+ * блоке одинаковой, а разъехавшиеся копии в одиннадцати описаниях разошлись бы
+ * первым же переименованием.
+ *
+ * `ownAction` — единственное, чем владельцы отличаются: у кликабельного журнал
+ * навешен, и клик зовёт его вместо раскрытия.
+ *
+ * @param {string} prefix подпись, отличающая пару в блоке: «Экспорт» и
+ *   «Экспорт с действием» читаются рядом, а одинаковые подписи в двух блоках путались
+ *   бы при сравнении журналов.
+ * @param {import('../src/icons.js').IconConfig} icon иконка обоих владельцев.
+ * @param {Array<MenuItem | SeparatorItem>} [leaves] состав подменю. По умолчанию
+ *   два листа: одного не хватило бы, чтобы отличить раскрытие подменю от показа
+ *   единственного пункта.
+ * @returns {Array<DemoItem>} два пункта-владельца.
+ */
+function ownerPair(prefix, icon, leaves) {
+  const items = leaves ?? [
+    { labelAction: () => 'В PDF' },
+    { labelAction: () => 'В текст' },
+  ];
+  return [
+    {
+      labelAction: () => prefix,
+      iconAction: () => icon,
+      submenuAction: () => items,
+    },
+    {
+      labelAction: () => `${prefix} с действием`,
+      iconAction: () => icon,
+      ownAction: true,
+      submenuAction: () => items,
+    },
+  ];
+}
+
+/**
+ * @returns {Array<DemoItem | SeparatorItem>}
  */
 function baseItems() {
   return [
@@ -119,6 +171,8 @@ function baseItems() {
     { labelAction: () => 'В очередь' },
     separator(),
     { labelAction: () => 'Удалить' },
+    separator(),
+    ...ownerPair('Экспорт', { type: 'svg', value: PRINT_SVG }),
   ];
 }
 
@@ -182,6 +236,8 @@ export const scenarios = [
         ],
       },
       { labelAction: () => 'Свойства' },
+      separator(),
+      ...ownerPair('Ответить', { type: 'emoji', value: '↩️' }),
     ],
   },
   {
@@ -202,16 +258,16 @@ export const scenarios = [
         submenuAction: () => [{ labelAction: () => 'Под глухим' }, { labelAction: () => 'Тоже под ним' }],
       },
       separator(),
-      {
-        labelAction: () => 'Доступный владелец',
-        iconAction: () => ({ type: 'svg', value: CONTRAST_SVG }),
-        submenuAction: () => [{ labelAction: () => 'Раскрывается' }, { labelAction: () => 'Тоже раскрывается' }],
-      },
+      ...ownerPair('Доступный владелец', { type: 'svg', value: CONTRAST_SVG }, [
+        { labelAction: () => 'Раскрывается' },
+        { labelAction: () => 'Тоже раскрывается' },
+      ]),
     ],
   },
   {
     // Три типа рядом, и после них пункт без иконки: слот под иконку создаётся
-    // всегда, поэтому подпись последнего пункта встаёт на ту же колонку.
+    // всегда, поэтому подпись последнего пункта встаёт на ту же колонку. Пара
+    // владельцев в конце даёт блоку обе иконки на пункте с подменю.
     id: 'icons',
     title: 'Иконки',
     items: [
@@ -222,6 +278,8 @@ export const scenarios = [
       separator(),
       { labelAction: () => 'Ещё вектор', iconAction: () => ({ type: 'svg', value: GAMMA_SVG }) },
       { labelAction: () => 'Ещё растр', iconAction: () => ({ type: 'raster', value: RASTER_PIXEL, alt: 'Второй образец' }) },
+      separator(),
+      ...ownerPair('Владелец', { type: 'raster', value: RASTER_PIXEL, alt: 'Владелец' }),
     ],
   },
   {
@@ -229,11 +287,17 @@ export const scenarios = [
     // вьюпорте 1280×800, а рамка `.vc-list` ограничена `max-height` от вьюпорта.
     // Список обязан прокручиваться внутри уровня, а не выталкивать меню за край, и
     // полосы прокрутки у него нет: его листают, наведя курсор на зону у края рамки.
+    // Пара владельцев стоит после сорока пунктов, чтобы не попасть в кадр и не
+    // изменить высоту содержимого, на которой держится расчёт блока.
     id: 'long',
     title: 'Длинный список',
-    items: Array.from({ length: 40 }, (unused, index) => {
-      return { labelAction: () => `Пункт ${String(index + 1)}` };
-    }),
+    items: [
+      ...Array.from({ length: 40 }, (unused, index) => {
+        return { labelAction: () => `Пункт ${String(index + 1)}` };
+      }),
+      separator(),
+      ...ownerPair('Владелец', { type: 'svg', value: CONTRAST_SVG }),
+    ],
   },
   {
     // Меню с подменю и ползунком размера. Подменю здесь — не украшение: величина
@@ -260,6 +324,8 @@ export const scenarios = [
       },
       separator(),
       { labelAction: () => 'Удалить' },
+      separator(),
+      ...ownerPair('Импорт', { type: 'svg', value: CONTRAST_SVG }),
     ],
   },
   {
@@ -284,6 +350,8 @@ export const scenarios = [
       { labelAction: () => 'Закладка', iconAction: () => ({ type: 'emoji', value: '🔖' }) },
       separator(),
       { labelAction: () => 'Удалить' },
+      separator(),
+      ...ownerPair('Печать', { type: 'svg', value: GAMMA_SVG }),
     ],
   },
   {
@@ -319,6 +387,8 @@ export const scenarios = [
       { labelAction: () => 'Закладка', iconAction: () => ({ type: 'emoji', value: '🔖' }) },
       separator(),
       { labelAction: () => 'Отключённый пункт', isEnabledAction: () => false },
+      separator(),
+      ...ownerPair('Отправка', { type: 'svg', value: GAMMA_SVG }),
     ],
   },
   {
@@ -343,6 +413,8 @@ export const scenarios = [
       { labelAction: () => 'Закладка', iconAction: () => ({ type: 'emoji', value: '🔖' }) },
       separator(),
       { labelAction: () => 'Отключённый пункт', isEnabledAction: () => false },
+      separator(),
+      ...ownerPair('Отправка', { type: 'svg', value: GAMMA_SVG }),
     ],
   },
   {
@@ -375,6 +447,11 @@ export const scenarios = [
       { labelAction: () => 'Отключённый пункт', isEnabledAction: () => false },
       separator(),
       { labelAction: () => 'Последний' },
+      separator(),
+      ...ownerPair('Поделиться', { type: 'svg', value: PRINT_SVG }, [
+        { labelAction: () => 'В PDF', iconAction: () => ({ type: 'raster', value: RASTER_PIXEL, alt: 'Документ' }) },
+        { labelAction: () => 'В текст' },
+      ]),
     ],
   },
   {
@@ -388,11 +465,11 @@ export const scenarios = [
     openFromButton: true,
     items: [
       { labelAction: () => 'Первый' },
-      {
-        labelAction: () => 'Ветка',
-        submenuAction: () => [{ labelAction: () => 'Лист' }],
-      },
       { labelAction: () => 'Последний' },
+      separator(),
+      ...ownerPair('Ветка', { type: 'svg', value: CONTRAST_SVG }, [
+        { labelAction: () => 'Лист' },
+      ]),
     ],
   },
 ];

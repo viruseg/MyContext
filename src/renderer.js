@@ -164,6 +164,13 @@ import { renderIcon } from './icons.js';
  *   `handoffAction`. Владельцем при этом он не является: подменю у него нет, и
  *   `aria-owns` ему некуда указывать. Признак нужен отдельно от `hasSubmenu`
  *   именно поэтому — владелец раскрывает уровень сам, а отдающий уходит наружу.
+ * @property {boolean} leadsOnActivation ведёт ли активация пункта куда-то, а не
+ *   зовёт его `action`. **Ответ на вопрос «что делает активация этого пункта».**
+ *   `true` у отдающего (он уводит наружу всегда) и у владельца непустого подменю,
+ *   у которого своего `action` нет. `false` у всякого остального, в том числе у
+ *   владельца с объявленным `action` — такой пункт активируется ровно как обычный,
+ *   а раскрытие остаётся на наведении и на `ArrowRight`. Ответ наоборот означает
+ *   общий путь активации, и он закрывает меню даже у пункта без `action`.
  * @property {((event: Event, handoff: import('./MyContext.js').SubmenuHandoff) => void) | null} handoff действие отдачи, взятое на
  *   этом показе; `null` у всех, кто не отдаёт.
  * @property {string | null} key внутренний ключ пункта; у разделителя `null`.
@@ -503,6 +510,33 @@ function handsOffOwner(enabled, handoff) {
 }
 
 /**
+ * Ведёт ли активация пункта куда-то, а не зовёт его `action`.
+ *
+ * Ответ решает то, что иначе спрашивали бы в трёх местах по-разному: клик,
+ * `Enter`/`Space` и отпускание под вооружённым жестом. Ведёт активация в двух
+ * случаях, и они не равнозначны:
+ *
+ * - **Отдающий ведёт всегда.** Отдача уводит меню с экрана, и второго действия
+ *   тому же пункту не отведено, поэтому объявленное рядом `action` не вытесняет её.
+ * - **Владелец подменю ведёт, только если своего `action` у него нет.** Объявленное
+ *   действие активирует пункт ровно как обычный, а раскрытие никуда не девается: оно
+ *   остаётся на наведении и на `ArrowRight`, и оба они работают у любого владельца.
+ *
+ * Ответ наоборот — «не ведёт» — означает общий путь активации, и он закрывает меню
+ * даже у пункта, у которого `action` не объявлено: закрытие живёт в обработчике
+ * активации и не зависит от того, есть ли обработчик.
+ *
+ * @param {boolean} enabled ответ `isEnabledOf` этому же пункту.
+ * @param {boolean} hasSubmenu владелец ли пункт подменю — ответ `isSubmenuOwner`.
+ * @param {boolean} handsOff отдаёт ли пункт управление — ответ `handsOffOwner`.
+ * @param {boolean} hasAction объявлено ли у пункта `action`.
+ * @returns {boolean}
+ */
+function leadsOnActivation(enabled, hasSubmenu, handsOff, hasAction) {
+  return enabled && (handsOff || (hasSubmenu && !hasAction));
+}
+
+/**
  * Ответы пункта на этот показ: всё, что о нём знать, собирается здесь и в одном
  * порядке — доступность, подпись, иконка, подменю. Один порядок на сборку уровня и
  * на каждый его показ: автор с побочным эффектом в действии увидел бы разный
@@ -529,6 +563,11 @@ function handsOffOwner(enabled, handoff) {
  * @property {boolean} handsOff отдаёт ли пункт управление наружу. **Решение**
  *   принимает `handsOffOwner` по той же причине, что `hasSubmenu` — про отключённый
  *   пункт должно быть известно и здесь, а разошлись бы ответы так же.
+ * @property {boolean} leadsOnActivation ведёт ли активация пункта куда-то, а не
+ *   зовёт его `action`. **Решение** принимает `leadsOnActivation`, и
+ *   `leadsOnActivation` у `RenderedItem` — это и есть его ответ: все три пути
+ *   активации — клик, клавиши и отпускание — спрашивают одно и то же, и разошлись
+ *   бы ответы так же, как разошлись бы разные решения на одном пункте.
  * @property {((event: Event, handoff: import('./MyContext.js').SubmenuHandoff) => void) | null} handoff действие отдачи этого показа.
  */
 
@@ -549,13 +588,16 @@ function resolveItem(item, path) {
     // проверено `assertItem`, и результат его вызова — не наше дело, потому что
     // звать его будет оркестратор, а не рендерер.
     const handoff = item.handoffAction === undefined ? null : item.handoffAction;
+    const hasSubmenu = isSubmenuOwner(enabled, submenuItems);
+    const handsOff = handsOffOwner(enabled, handoff);
     return {
       enabled,
       label,
       icon,
       submenuItems,
-      hasSubmenu: isSubmenuOwner(enabled, submenuItems),
-      handsOff: handsOffOwner(enabled, handoff),
+      hasSubmenu,
+      handsOff,
+      leadsOnActivation: leadsOnActivation(enabled, hasSubmenu, handsOff, item.action !== undefined),
       handoff,
     };
   });
@@ -679,6 +721,7 @@ function renderSeparator() {
     focusable: false,
     hasSubmenu: false,
     handsOff: false,
+    leadsOnActivation: false,
     handoff: null,
     key: null,
     submenuId: null,
@@ -745,6 +788,7 @@ function buildMenuItem(resolved, item, context, itemIndex, setSize) {
     focusable: resolved.enabled,
     hasSubmenu: resolved.hasSubmenu,
     handsOff: resolved.handsOff,
+    leadsOnActivation: resolved.leadsOnActivation,
     handoff: resolved.handsOff ? resolved.handoff : null,
     key: keyOf(context, itemIndex),
     submenuId: null,
@@ -971,7 +1015,8 @@ export function refreshItems(items, renderedItems, menuId, actions, isAlive) {
       }
       if (renderedItem.focusable === answers.enabled
         && renderedItem.hasSubmenu === answers.hasSubmenu
-        && renderedItem.handsOff === answers.handsOff) {
+        && renderedItem.handsOff === answers.handsOff
+        && renderedItem.leadsOnActivation === answers.leadsOnActivation) {
         continue;
       }
       const element = renderedItem.element;
@@ -984,6 +1029,7 @@ export function refreshItems(items, renderedItems, menuId, actions, isAlive) {
       renderedItem.focusable = answers.enabled;
       renderedItem.hasSubmenu = answers.hasSubmenu;
       renderedItem.handsOff = answers.handsOff;
+      renderedItem.leadsOnActivation = answers.leadsOnActivation;
     }
   });
 }

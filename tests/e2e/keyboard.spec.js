@@ -376,8 +376,27 @@ test.beforeEach(async ({ page }) => {
       { labelAction: () => 'Выход', action: () => { record('Выход'); } },
     ];
 
+    /**
+     * Владелец подменю со своим действием и владелец без него, рядом и в одном
+     * уровне: `Enter` у первого зовёт действие, у второго раскрывает подменю, и
+     * различать их можно было бы только тем, что один из них настоящий.
+     *
+     * @type {Array<MenuItem | SeparatorItem>}
+     */
+    const ownerActs = [
+      {
+        labelAction: () => 'Владелец с действием',
+        submenuAction: () => [{ labelAction: () => 'Под ним' }],
+        action: () => { record('Владелец с действием'); },
+      },
+      {
+        labelAction: () => 'Владелец без действия',
+        submenuAction: () => [{ labelAction: () => 'Тоже под ним' }],
+      },
+    ];
+
     /** @type {Record<string, Array<MenuItem | SeparatorItem>>} */
-    const sets = { cycle, tail, tree, long, dead, offLimits };
+    const sets = { cycle, tail, tree, long, dead, offLimits, ownerActs };
 
     /**
      * Проба `focus`: без неё утверждение «фокус всегда с `preventScroll`» было бы
@@ -590,12 +609,14 @@ test.beforeEach(async ({ page }) => {
           if (item.element !== element || item.key === null) {
             continue;
           }
-          // Владелец подменю кликом не активируется: `#onLevelClick` уходит на
-          // `hasSubmenu` раньше действия, и показ подменю вместо него идёт
-          // отдельным путём. Фикстура обязана повторять это, а не звать действие
-          // владельца и закрывать меню — иначе любой будущий кейс, кликнувший по
+          // Владелец подменю без своего действия кликом не активируется: показ
+          // подменю идёт отдельным путём, и звать ему нечего. Владелец со своим
+          // действием активируется ровно как обычный пункт, и фикстура обязана
+          // повторять именно это — иначе любой будущий кейс, кликнувший по
           // владельцу мышью, закрепил бы обратное библиотеке.
-          if (item.hasSubmenu) {
+          const definition = actions.get(item.key);
+          if (item.hasSubmenu
+            && (definition === undefined || definition.action === undefined)) {
             return;
           }
           const label = labelIn(item.element) ?? '';
@@ -603,7 +624,6 @@ test.beforeEach(async ({ page }) => {
           // Активация попадает в тот же журнал, что и вызовы хоста: порядок
           // «сначала действие, потом закрытие» виден только здесь.
           calls.order.push(`action:${label}`);
-          const definition = actions.get(item.key);
           if (definition !== undefined && definition.action !== undefined) {
             definition.action(event);
           }
@@ -2166,7 +2186,7 @@ test.describe('активация', () => {
     expect(result.steps[1].prevented).toBe(true);
   });
 
-  test('Enter на пункте-владельце открывает подменю и не вызывает action', async ({ page }) => {
+  test('Enter на пункте-владельце без своего действия открывает подменю', async ({ page }) => {
     const result = await runScenario(page, {
       set: 'tree',
       paths: { root: [], sub: [1] },
@@ -2179,7 +2199,7 @@ test.describe('активация', () => {
     });
 
     // Счётчик вызовов `action` остаётся нулём, и клика по пункту не было вовсе: у
-    // пункта-владельца активация означает открытие подменю.
+    // владельца без своего действия активация означает открытие подменю.
     expect(result.after.actions).toEqual([]);
     expect(result.after.clicks).toEqual([]);
     expect(result.after.calls.openSubmenu).toBe(1);
@@ -2230,7 +2250,7 @@ test.describe('активация', () => {
     expect(result.steps[1].prevented).toBe(true);
   });
 
-  test('Space на пункте-владельце открывает подменю и не вызывает action', async ({ page }) => {
+  test('Space на пункте-владельце без своего действия открывает подменю', async ({ page }) => {
     const result = await runScenario(page, {
       set: 'tree',
       paths: { root: [], sub: [2] },
@@ -2260,6 +2280,93 @@ test.describe('активация', () => {
     expect(rovingOf(result.after.levels.sub)).toEqual([
       ['Глубже', '0', true, true],
       ['Обычный пункт подменю', '-1', false, false],
+    ]);
+  });
+
+  test('Enter на владельце с действием зовёт его и закрывает меню', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'ownerActs',
+      paths: { root: [], sub: [0] },
+      steps: [
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'Enter' },
+      ],
+    });
+
+    // Владелец подменю активируется ровно как обычный пункт: то же действие, тот же
+    // порядок «действие, потом закрытие» и тот же синтетический клик вместо
+    // прямого вызова коллбэка — событие в действии остаётся настоящим.
+    expect(result.after.actions).toEqual(['Владелец с действием']);
+    expect(result.after.clicks).toEqual(['Владелец с действием']);
+    expect(result.after.calls.order).toEqual([
+      'action:Владелец с действием', 'close:activation',
+    ]);
+    // Подменю не раскрывалось: раскрытие осталось за `ArrowRight` и наведением.
+    expect(result.after.calls.openSubmenu).toBe(0);
+    expect(result.after.levels.root.open).toBe(false);
+    expect(result.after.focus.label).not.toBe('Под ним');
+    // Признаки владельца на месте: подменю у пункта осталось, и раскрыть его можно.
+    expect(result.after.levels.root.items[0].hasSubmenu).toBe(true);
+    expect(result.steps[1].prevented).toBe(true);
+  });
+
+  test('Space на владельце с действием зовёт его и закрывает меню', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'ownerActs',
+      paths: { root: [], sub: [0] },
+      steps: [
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: ' ' },
+      ],
+    });
+
+    // Ничем не отличается от `Enter`: две клавиши делят одну ветку разбора, иначе у
+    // владельца одна открывала бы подменю, а вторая звала бы действие.
+    expect(result.after.actions).toEqual(['Владелец с действием']);
+    expect(result.after.clicks).toEqual(['Владелец с действием']);
+    expect(result.after.calls.openSubmenu).toBe(0);
+    expect(result.after.levels.root.open).toBe(false);
+    expect(result.steps[1].prevented).toBe(true);
+  });
+
+  test('ArrowRight на владельце с действием раскрывает подменю', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'ownerActs',
+      paths: { root: [], sub: [0] },
+      steps: [
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'ArrowRight' },
+      ],
+    });
+
+    // Навигация остаётся только на стрелках: раскрытие у такого пункта никуда не
+    // делось, и `Enter` его не отнял.
+    expect(result.after.actions).toEqual([]);
+    expect(result.after.calls.openSubmenu).toBe(1);
+    expect(result.after.calls.openSubmenuIds).toEqual([result.after.levels.sub.id]);
+    expect(result.after.levels.sub.open).toBe(true);
+    expect(focusTrail(result.steps)).toEqual(['Владелец с действием', 'Под ним']);
+  });
+
+  test('Enter на владельце без своего действия раскрывает подменю', async ({ page }) => {
+    const result = await runScenario(page, {
+      set: 'ownerActs',
+      paths: { root: [], sub: [1] },
+      steps: [
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'ArrowDown' },
+        { command: 'press', key: 'Enter' },
+      ],
+    });
+
+    // Контроль на то, что новое правило не съело прежнее: у пункта своего действия
+    // нет, и `Enter` раскрывает подменю, как раскрывал.
+    expect(result.after.actions).toEqual([]);
+    expect(result.after.clicks).toEqual([]);
+    expect(result.after.calls.openSubmenu).toBe(1);
+    expect(result.after.levels.sub.open).toBe(true);
+    expect(focusTrail(result.steps)).toEqual([
+      'Владелец с действием', 'Владелец без действия', 'Тоже под ним',
     ]);
   });
 

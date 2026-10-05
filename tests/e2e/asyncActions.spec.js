@@ -43,6 +43,9 @@ import { expect, test } from '@playwright/test';
  *   открыть чужое меню после ожидания, бросить или просто считать вызовы.
  * @property {Array<'label' | 'icon' | 'submenu' | 'enabled'>} [slow] поля,
  *   которые страница обернёт в `async` с настоящей задержкой.
+ * @property {boolean} [slowAction] обернуть ли в `async` с задержкой само `action`
+ *   пункта. Читающие действия оборачиваются полем `slow`, а действие активации —
+ *   этим: `action` навешивается на каждый пункт сам, и задержка ему нужна отдельно.
  * @property {boolean} [fail] ронять ли `labelAction` этого пункта. Отказ нельзя
  *   задать значением поля, потому что значение едет в аргумент
  *   `page.evaluate`, а функции там не перевозятся.
@@ -249,9 +252,14 @@ async function setup(page, input = {}) {
       if (spec.version !== undefined) {
         item.version = spec.version;
       }
-      item.action = () => {
-        marks.push(text);
-      };
+      item.action = spec.slowAction === true
+        ? async () => {
+          await wait(delay);
+          marks.push(text);
+        }
+        : () => {
+          marks.push(text);
+        };
       if (handoffKind === 'slow-open') {
         item.handoffAction = async (
           /** @type {Event} */ _event,
@@ -763,6 +771,32 @@ test.describe('читающие действия', () => {
     ).toBe(true);
   });
 });
+test.describe('действие владельца подменю', () => {
+  test('меню ждёт асинхронное действие владельца и закрывается после него', async ({ page }) => {
+    await setup(page, {
+      items: [{
+        id: 'Ветка',
+        label: 'Ветка',
+        slowAction: true,
+        submenu: [{ id: 'Лист', label: 'Лист' }],
+      }],
+    });
+    await openMenu(page);
+    await activateItem(page);
+
+    // Закрытие стоит после `await` действия, иначе асинхронный ответ ушёл бы на
+    // уже закрытое меню: у пункта своё действие, и закрывать его раньше ответа
+    // было бы то же, что не дождаться действия вовсе.
+    expect((await read(page)).visible, 'меню ждёт ответа действия').toBe(true);
+    await expect.poll(async () => {
+      return (await read(page)).visible;
+    }, { message: 'меню закрылось после ответа действия' }).toBe(false);
+    const log = await read(page);
+    expect(log.marks, 'действие владельца отработало').toEqual(['Ветка']);
+    expect(log.escapedBy, 'наружу ничего не ушло').toEqual([]);
+  });
+});
+
 test.describe('показ подменю', () => {
   test('переход на соседний пункт отменяет ещё не состоявшийся показ подменю', async ({ page }) => {
     await setup(page, {

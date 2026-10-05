@@ -377,9 +377,11 @@ test.beforeEach(async ({ page }) => {
     }
 
     /**
-     * Корень кейсов: доступный пункт, владелец подменю со своим действием,
-     * разделитель и отключённый пункт — по одному представителю каждого случая,
-     * ради которого отпускание разбирается по целям.
+     * Корень кейсов: доступный пункт, владелец подменю со своим действием, владелец
+     * без своего действия, разделитель и отключённый пункт — по одному представителю
+     * каждого случая, ради которого отпускание разбирается по целям. Владельцев два
+     * именно потому, что отпускание над ними разошлось: своё действие есть — зовётся,
+     * нет — молчит, и один владелец не отличил бы эти два правила ничем.
      *
      * @returns {Array<MenuItem | SeparatorItem>}
      */
@@ -398,6 +400,11 @@ test.beforeEach(async ({ page }) => {
           labelAction: () => 'Заметки',
           action: () => calls.push('Заметки'),
           isEnabledAction: () => false,
+        },
+        {
+          id: 'plain-owner',
+          labelAction: () => 'Ветка без действия',
+          submenuAction: () => [item('Лист', 'leaf')],
         },
       ];
     }
@@ -620,7 +627,7 @@ test.describe('удержание включено', () => {
     expect(after.openCount, 'вся цепочка закрыта').toBe(0);
   });
 
-  test('отпускание над владельцем подменю закрывает, его действие не вызвано', async ({ page }) => {
+  test('отпускание над владельцем подменю исполняет его действие и закрывает всё', async ({ page }) => {
     await enable(page, 'any');
     await pressAt(page, PRESS_POINT, 'left');
     await hoverOwner(page, 'Экспорт');
@@ -629,7 +636,24 @@ test.describe('удержание включено', () => {
     const point = await centerOfItem(page, 'Экспорт');
     await releaseAt(page, point, 'left');
     const after = await readMenu(page);
-    expect(after.calls, 'владелец на отпускании не действие').toEqual([]);
+    // Отпускание разбирает владельца ровно так же, как обычный пункт: своё действие
+    // объявлено, значит оно и исполняется, а закрывает его тот же общий путь.
+    expect(after.calls, 'действие владельца отработало').toEqual(['Экспорт']);
+    expect(after.openCount, 'меню закрылось вместе с подменю').toBe(0);
+  });
+
+  test('отпускание над владельцем без своего действия закрывает молча', async ({ page }) => {
+    await enable(page, 'any');
+    await pressAt(page, PRESS_POINT, 'left');
+    await hoverOwner(page, 'Ветка без действия');
+    expect((await readMenu(page)).openCount, 'подменю открыто наведением').toBe(2);
+
+    const point = await centerOfItem(page, 'Ветка без действия');
+    await releaseAt(page, point, 'left');
+    const after = await readMenu(page);
+    // Звать нечего, и подменю на отпускании не раскрывается: молчание здесь — от
+    // отсутствия действия, а не от того, что пункт чем-то особенный.
+    expect(after.calls, 'действие не звалось — звать нечего').toEqual([]);
     expect(after.openCount, 'меню закрылось вместе с подменю').toBe(0);
   });
 
@@ -834,7 +858,9 @@ test.describe('isArmableAction', () => {
     expect(call.levelsOpen, 'на момент вызова меню ещё не было').toBe(0);
     expect(call.labelsThen, 'подписи корня ещё не построены').toEqual([]);
     expect(shown.openCount, 'меню показано').toBe(1);
-    expect(shown.labels, 'подписи корня есть').toEqual(['Новый', 'Экспорт', 'Заметки']);
+    expect(shown.labels, 'подписи корня есть').toEqual([
+      'Новый', 'Экспорт', 'Заметки', 'Ветка без действия',
+    ]);
   });
 
   test('предикат получает живое событие нажатия с целью и точкой', async ({ page }) => {

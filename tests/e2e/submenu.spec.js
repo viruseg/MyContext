@@ -252,6 +252,20 @@ async function hoverItem(page, label) {
 }
 
 /**
+ * Кликает по пункту по подписи, а не `locator`-ом: у пункта с `aria-disabled`
+ * Playwright считает элемент непригодным, и половине кейсов нужен именно такой
+ * клик, какой сделает живой пользователь.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {string} label
+ * @returns {Promise<void>}
+ */
+async function clickItem(page, label) {
+  const centre = await centreOf(page, label);
+  await page.mouse.click(centre.x, centre.y);
+}
+
+/**
  * Наводит курсор на узел по селектору, а не по подписи. Для строк, у которых
  * подписи нет: разделителя, например, — и потому, что сам пункт может быть
  * непригоден для `locator`-наведения, как отключённый.
@@ -458,6 +472,18 @@ test.beforeEach(async ({ page }) => {
         {
           labelAction: () => 'Второй',
           submenuAction: () => [{ labelAction: () => 'Под вторым' }],
+        },
+      ],
+      // Владелец подменю, чьё действие бросает: отказ на пути активации владельца
+      // обязан разобраться так же, как на пути обычного пункта, и оставить меню
+      // закрытым — иначе «действие звалось» прошло бы на висящем меню.
+      throwingOwner: [
+        {
+          labelAction: () => 'Ломающий владелец',
+          submenuAction: () => [{ labelAction: () => 'Под ним' }],
+          action: () => {
+            throw new Error('действие владельца сломано');
+          },
         },
       ],
       // Владелец с подменю длиннее списка: только у прокручиваемого уровня видны
@@ -1309,14 +1335,13 @@ test.describe('показ подменю', () => {
     const pressed = await readMenu(page);
     expect(isOpen(pressed, ownerId), 'подменю открыто на нажатии').toBe(true);
 
-    // Отпускание доводит дело до клика, а клик по владельцу открывает подменю, а не
-    // зовёт его действие: у «Экспорта` есть `action`, и пустой журнал здесь — не
-    // «обработчика нет», а правило владельца.
+    // Отпускание доводит дело до клика, а клик по владельцу с собственным действием
+    // зовёт его и закрывает всё меню: у «Экспорта» есть `action`, и журнал здесь — не
+    // «обработчика нет». Подменю, раскрытое нажатием, уходит вместе с меню.
     await page.mouse.up();
     const after = await readMenu(page);
-    expect(after.log, 'действие владельца не вызвано').toEqual([]);
-    expect(isOpen(after, ownerId), 'подменю всё ещё открыто').toBe(true);
-    expect(after.openCount, 'открыты корень и подменю').toBe(2);
+    expect(after.log, 'действие владельца вызвано').toEqual(['экспорт']);
+    expect(after.openCount, 'меню закрыто вместе с подменю').toBe(0);
   });
 
   test('нажатие не основной кнопкой подменю не открывает', async ({ page }) => {
@@ -1344,10 +1369,10 @@ test.describe('показ подменю', () => {
     const shown = await readMenu(page);
     expect(isOpen(shown, ownerId), 'подменю открыто по наведению').toBe(true);
     // `auxclick`, а не `click`: у обработчика активации на владельце свой путь,
-    // он уходит в показ подменю и до журнала действий не доходит.
+    // он уходит в действие владельца и до журнала подменю не доходит.
     await page.mouse.up({ button: 'middle' });
     const after = await readMenu(page);
-    expect(after.log, 'действие владельца не вызвано').toEqual([]);
+    expect(after.log, 'средняя кнопка действие владельца не зовёт').toEqual([]);
     expect(isOpen(after, ownerId), 'подменю осталось открытым').toBe(true);
   });
 
@@ -2069,5 +2094,133 @@ test.describe('показ подменю', () => {
     }
     expect(after.log, 'ни одно действие не вызвано').toEqual([]);
     expect(after.errors, 'ошибок страницы нет').toEqual([]);
+  });
+});
+
+/**
+ * Владелец подменю со своим действием.
+ *
+ * У «Экспорта» в наборе `tree` есть и подменю, и `action`, и весь блок держится на
+ * этом различии: раскрытие у него осталось на наведении и на `ArrowRight`, а
+ * активация — кликом, `Enter`/`Space` и отпусканием — зовёт его действие и закрывает
+ * всё меню. Отдельные кейсы нужны потому, что каждый из трёх путей закрывает телом
+ * само по себе, и «один путь сработал» ничего не говорит о двух других.
+ */
+test.describe('активация владельца с действием', () => {
+  test('клик зовёт его действие и закрывает всё меню', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const exportId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Экспорт');
+    });
+
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    // Раскрытое подменю перед кликом — иначе «меню закрыто» можно было бы прочесть
+    // как «подменю и не открывалось, закрывать было нечего».
+    const opened = await readMenu(page);
+    expect(isOpen(opened, exportId), 'подменю открыто наведением').toBe(true);
+
+    await clickItem(page, 'Экспорт');
+    const after = await readMenu(page);
+    expect(after.log, 'действие владельца вызвано').toEqual(['экспорт']);
+    // Закрыто всё, а не только подменю: закрывает обработчик активации, и у него
+    // нет выбора, оставить ли родительский уровень.
+    expect(after.openCount, 'меню закрыто целиком').toBe(0);
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
+  });
+
+  test('наведение раскрывает подменю и не зовёт его действие', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const exportId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Экспорт');
+    });
+
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const after = await readMenu(page);
+    // Раскрытие и действие не конкурируют: у пункта осталось подменю, поэтому
+    // наведение показывает его и не трогает `action`.
+    expect(isOpen(after, exportId), 'подменю открыто').toBe(true);
+    expect(after.log, 'наведение действие не зовёт').toEqual([]);
+    expect(after.openCount, 'открыты корень и подменю').toBe(2);
+  });
+
+  test('Enter зовёт его действие, а ArrowRight раскрывает подменю', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const exportId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Экспорт');
+    });
+
+    // Навигация остаётся только на стрелках: `ArrowDown` доходит до владельца,
+    // `ArrowRight` входит в его подменю.
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowRight');
+    const entered = await readMenu(page);
+    expect(isOpen(entered, exportId), 'ArrowRight раскрыл подменю').toBe(true);
+    expect(entered.log, 'раскрытие действие не зовёт').toEqual([]);
+
+    // `Escape` возвращает фокус на владельца, и `Enter` на нём зовёт уже действие.
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Enter');
+    const after = await readMenu(page);
+    expect(after.log, 'Enter звал действие владельца').toEqual(['экспорт']);
+    expect(after.openCount, 'меню закрыто целиком').toBe(0);
+    expect(after.focusInMenu, 'фокус покинул меню').toBe(false);
+    expect(after.errors, 'ошибок страницы нет').toEqual([]);
+  });
+
+  test('владелец без своего действия по-прежнему раскрывается кликом', async ({ page }) => {
+    await makeMenu(page, 'tree', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const exportId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Экспорт');
+    });
+
+    // «PNG» — владелец подменю внутри «Экспорта» без `action`: контроль на то, что
+    // новое правило не съело прежнее.
+    await hoverItem(page, 'Экспорт');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    await hoverItem(page, 'PNG');
+    await page.clock.fastForward(OPEN_GRACE_MS);
+    const pngId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('PNG');
+    });
+    expect(isOpen(await readMenu(page), pngId), 'подменю «PNG» открыто').toBe(true);
+
+    await clickItem(page, 'PNG');
+    const after = await readMenu(page);
+    expect(after.log, 'действие не звалось — звать нечего').toEqual([]);
+    expect(isOpen(after, pngId), 'подменю осталось открытым').toBe(true);
+    expect(isOpen(after, exportId), 'родительское подменю не закрыто').toBe(true);
+  });
+
+  test('отказ его действия не оставляет меню висеть', async ({ page }) => {
+    await makeMenu(page, 'throwingOwner', 'surface');
+    await openAt(page, OPEN_MIDDLE);
+    const ownerId = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: McProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__mc.submenuIdOf('Ломающий владелец');
+    });
+    expect(ownerId, 'адрес подменю назван').not.toBeNull();
+
+    await clickItem(page, 'Ломающий владелец');
+    const after = await readMenu(page);
+    // Закрытие стоит в `finally` и отказа не зависит, иначе сломанное действие
+    // оставляло бы меню висеть навсегда.
+    expect(after.openCount, 'меню закрыто и после отказа').toBe(0);
+    // Отказ разбирает библиотека и уводит его подписчику `error`, а тоткого нет —
+    // и тогда отказ уходит на страницу, как и у отказа любого другого `action`.
+    expect(after.errors, 'отказ дошёл до страницы').toEqual([
+      'Uncaught Error: действие владельца сломано',
+    ]);
   });
 });

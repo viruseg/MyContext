@@ -108,9 +108,12 @@ test.beforeEach(async ({ page }) => {
      * @param {string} label
      * @param {boolean} [givesAway] собрать ли пункт, отдающий управление.
      * @param {boolean} [enabled]
+     * @param {boolean} [alsoActs] объявить ли рядом с отдачей своё `action`. Отдача
+     *   уводит меню с экрана, и такая пара — единственный способ показать, что
+     *   приоритет у отдачи, а не у собственного действия.
      * @returns {MenuItem}
      */
-    function item(label, givesAway = false, enabled = true) {
+    function item(label, givesAway = false, enabled = true, alsoActs = false) {
       /** @type {Record<string, unknown>} */
       const built = { labelAction: () => label };
       if (givesAway) {
@@ -118,7 +121,8 @@ test.beforeEach(async ({ page }) => {
           /** @type {PointerEvent} */ event,
           /** @type {GestureView} */ gesture,
         ) => handoff('hover', event, gesture);
-      } else {
+      }
+      if (!givesAway || alsoActs) {
         built.action = () => handoffs.push({ how: 'release', point: null, button: 0, menuOpen: false, gesture: null });
       }
       if (!enabled) {
@@ -144,6 +148,7 @@ test.beforeEach(async ({ page }) => {
             item('Первый'),
             item('Отдать', true, input.enabled !== false),
             item('Отключённый отдающий', true, false),
+            item('Отдать и действовать', true, true, true),
             {
               labelAction: () => 'Ветка',
               action: () => handoffs.push({ how: 'release', point: null, button: 0, menuOpen: false, gesture: null }),
@@ -429,6 +434,23 @@ test.describe('пункт с handoffAction', () => {
 
     const after = await readMenu(page);
     expect(after.handoffs.length, 'хендофф позвали').toBe(1);
+    expect(after.openCount, 'меню ушло').toBe(0);
+  });
+
+  test('своё action рядом с отдачей отдачу не вытесняет', async ({ page }) => {
+    // Отдача уводит меню с экрана, и второго действия тому же пункту не отведено:
+    // `action` в паре с `handoffAction` молчит. Журнал один и на оба вызова, так
+    // что «позвали оба» отличить от «позвали оба, но не в том порядке» здесь
+    // нечем — и не нужно: достаточно одного вызова, а он у отдачи.
+    await makeMenu(page, { pressAndHold: 'none', attach: true });
+    await page.mouse.click(PRESS_POINT.x, PRESS_POINT.y, { button: 'right' });
+
+    const target = await centerOfItem(page, 'Отдать и действовать');
+    await page.mouse.click(target.x, target.y);
+
+    const after = await readMenu(page);
+    expect(after.handoffs.length, 'позван один обработчик').toBe(1);
+    expect(after.handoffs[0].how, 'позвали отдачу, а не своё действие').toBe('hover');
     expect(after.openCount, 'меню ушло').toBe(0);
   });
 

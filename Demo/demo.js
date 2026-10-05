@@ -8,6 +8,7 @@ import { scenarios } from './scenarios.js';
 
 /**
  * @typedef {import('./scenarios.js').Scenario} Scenario
+ * @typedef {import('./scenarios.js').DemoItem} DemoItem
  * @typedef {import('../src/renderer.js').MenuItem} MenuItem
  * @typedef {import('../src/renderer.js').SeparatorItem} SeparatorItem
  */
@@ -169,9 +170,10 @@ function logIn(scenarioId, readLabel) {
  * Отдельный проход, а не `action` в описаниях сценариев: описания остаются
  * чистыми, и новый пункт в них сразу получает рабочий клик — расставить
  * действия по всем сценариям вручку значило бы, что следующий пункт про них
- * забудет. Владелец непустого подменю действие тоже получает, но клик по нему
- * его не зовёт: библиотека открывает подменю вместо этого, и обойти это из
- * демо нечем.
+ * забудет. Владелец непустого подменю — единственное исключение, и исключение
+ * это пометка `ownAction` в описании: без неё журнал на владельца не
+ * навешивается, и клик по нему раскрывает подменю, как раскрывал. С пометкой
+ * владелец кликабелен, и журнал пишет его подпись как подпись любого пункта.
  *
  * Глубина не разворачивается заранее: `submenuAction` предъявляет состав при
  * показе, и обёртка навешивает действия на пункты тогда, когда их действительно
@@ -179,7 +181,7 @@ function logIn(scenarioId, readLabel) {
  * разошлась бы с той, что вернул `submenuAction`.
  *
  * @param {string} scenarioId значение `data-scenario` у блока.
- * @param {Array<MenuItem | SeparatorItem> | Promise<Array<MenuItem | SeparatorItem>>} items
+ * @param {Array<DemoItem | SeparatorItem> | Promise<Array<DemoItem | SeparatorItem>>} items
  *   пункты одного уровня; `submenuAction` вправе отдать промис.
  * @returns {Promise<Array<MenuItem | SeparatorItem>>} копия уровня с действиями.
  */
@@ -189,10 +191,15 @@ async function withItemActions(scenarioId, items) {
     if (isSeparator(item)) {
       return item;
     }
-    const { labelAction, submenuAction } = item;
+    const { labelAction, submenuAction, ownAction, ...rest } = item;
+    // `action: undefined` — не то же, что отсутствие поля, но для контракта разницы
+    // нет: предикат доступности владельца всё равно решает по `submenuAction`, а
+    // журнал на пункт без действия не навешивается.
+    const clickable = submenuAction === undefined || ownAction === true;
     return {
-      ...item,
-      action: logIn(scenarioId, labelAction),
+      ...rest,
+      labelAction,
+      action: clickable ? logIn(scenarioId, labelAction) : undefined,
       submenuAction: submenuAction === undefined
         ? undefined
         : async () => {
