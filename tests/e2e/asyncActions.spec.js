@@ -65,6 +65,7 @@ import { expect, test } from '@playwright/test';
  * @property {import('../../src/constants.js').PressAndHoldMode} [pressAndHold]
  * @property {'allow' | 'deny' | 'throw'} [armable] ответ предиката
  *   `isArmableAction`: разрешить, отказать или бросить. Без поля предиката нет.
+ * @property {boolean} [destroyOnClose] разбирать ли экземпляр на закрытии.
  * @property {'removed' | 'twice' | 'rejecting'} [listener] подписка на `open`:
  *   снять её по той же ссылке, подписать одну функцию дважды или вернуть отклонённый
  *   промис.
@@ -74,6 +75,7 @@ import { expect, test } from '@playwright/test';
  * @typedef {object} ActionLog
  * @property {number} openCount событий `open`.
  * @property {number} closeCount событий `close`.
+ * @property {string[]} timeline события `open`, `close`, `error` по порядку.
  * @property {boolean} visible показан ли хоть один уровень.
  * @property {string[]} labels подписи пунктов показанного корня, по порядку.
  * @property {string[]} errorSources `source` из событий `error`, по порядку.
@@ -123,6 +125,7 @@ const PAGE_HTML = `<!doctype html>
 const VIEWPORT = { width: 1000, height: 700 };
 const OPEN_POINT = { x: 400, y: 300 };
 const FAILURE_TEXT = 'сломалось';
+const DESTROYED_MESSAGE = 'MyContext: экземпляр уничтожен';
 /** Задержка действия внутри страницы, мс. */
 const DELAY = 20;
 
@@ -164,6 +167,8 @@ async function setup(page, input = {}) {
     /** @type {number} */
     let listenerCalls = 0;
     let closeCount = 0;
+    /** @type {string[]} */
+    const timeline = [];
 
     // Настоящая задача, а не микротаска: микротаска не отдаёт управление наружу,
     // и тест на `await` не отличил бы ожидание от его отсутствия.
@@ -324,6 +329,7 @@ async function setup(page, input = {}) {
         openCount = 0;
         listenerCalls = 0;
         closeCount = 0;
+        timeline.length = 0;
         marks.length = 0;
         escapedBy.length = 0;
         if (menu !== null) {
@@ -381,6 +387,9 @@ async function setup(page, input = {}) {
         if (setup0.pressAndHold !== undefined) {
           options.pressAndHold = setup0.pressAndHold;
         }
+        if (setup0.destroyOnClose !== undefined) {
+          options.destroyOnClose = setup0.destroyOnClose;
+        }
         if (setup0.armable !== undefined) {
           options.isArmableAction = async () => {
             await wait(delay);
@@ -393,9 +402,11 @@ async function setup(page, input = {}) {
         const live = build0(options);
         live.addEventListener('open', () => {
           openCount += 1;
+          timeline.push('open');
         });
         live.addEventListener('close', () => {
           closeCount += 1;
+          timeline.push('close');
         });
         if (setup0.watch === true) {
           live.addEventListener('error', (event) => {
@@ -408,6 +419,7 @@ async function setup(page, input = {}) {
                 ? custom.detail.reason.message
                 : String(custom.detail.reason),
             );
+            timeline.push('error');
             if (setup0.preventDefault === true) {
               event.preventDefault();
               errorPrevented += 1;
@@ -500,6 +512,7 @@ async function setup(page, input = {}) {
           openCount,
           listenerCalls,
           closeCount,
+          timeline: timeline.slice(),
           visible: document.querySelectorAll('.vc-menu:popover-open').length > 0,
           labels: Array.from(document.querySelectorAll('.vc-menu:popover-open .vc-label'))
             .map((node) => String(node.textContent)),
@@ -616,7 +629,7 @@ test.describe('отказы действий', () => {
 });
 
 test.describe('переоткрытие из действия', () => {
-  test('асинхронное действие переоткрывает меню, и закрытие по клику не сбивает поколение', async ({ page }) => {
+  test('асинхронное действие переоткрывает меню новым показом', async ({ page }) => {
     await setup(page, { mode: 'async-ok', reopen: true });
     await openMenu(page);
     await activateItem(page);
@@ -624,9 +637,9 @@ test.describe('переоткрытие из действия', () => {
       return (await read(page)).openCount;
     }, { message: 'меню переоткрылось вторым показом' }).toBe(2)
     const log = await read(page);
-    // Переоткрытие намеренно отменяет закрытие — так оно вело себя и для
-    // синхронного действия. Значит `close` не рассылается вовсе.
-    expect(log.closeCount, 'закрытие отменено переоткрытием').toBe(0);
+    // Клик закрыл меню, и `open()` из действия — новый показ: событие закрытия
+    // приходит, а не отменяется переоткрытием.
+    expect(log.closeCount, 'клик закрыл меню, переоткрытие — новый показ').toBe(1);
     expect(log.visible).toBe(true);
   });
 
@@ -638,8 +651,103 @@ test.describe('переоткрытие из действия', () => {
       return (await read(page)).openCount;
     }, { message: 'синхронное действие переоткрыло меню' }).toBe(2)
     const log = await read(page);
-    expect(log.closeCount).toBe(0);
+    expect(log.closeCount).toBe(1);
     expect(log.visible).toBe(true);
+  });
+});
+
+test.describe('закрытие до действия', () => {
+  test('долгое действие не удерживает меню на экране', async ({ page }) => {
+    await setup(page, { items: [{ id: 'Медленный', slowAction: true }] });
+    await openMenu(page);
+    await activateItem(page);
+    expect((await read(page)).visible, 'меню закрыто сразу после клика').toBe(false);
+    await expect.poll(async () => {
+      return (await read(page)).marks;
+    }, { message: 'действие доиграло до конца' }).toEqual(['Медленный']);
+  });
+
+  test('destroyOnClose: экземпляр разобран до действия, действие доигрывает', async ({ page }) => {
+    await setup(page, {
+      items: [{ id: 'Медленный', slowAction: true }],
+      destroyOnClose: true,
+    });
+    await openMenu(page);
+    await activateItem(page);
+    expect((await read(page)).visible, 'меню закрыто сразу').toBe(false);
+    await expect.poll(async () => {
+      return (await read(page)).marks;
+    }, { message: 'действие доиграло на разобранном экземпляре' }).toEqual(['Медленный']);
+    expect((await read(page)).closeCount, 'закрытие было одно').toBe(1);
+  });
+
+  test('destroyOnClose: open() из действия бросает и это видно как error', async ({ page }) => {
+    await setup(page, {
+      mode: 'ok',
+      reopen: true,
+      destroyOnClose: true,
+      watch: true,
+      preventDefault: true,
+    });
+    await openMenu(page);
+    await activateItem(page);
+    await expect.poll(async () => {
+      return (await read(page)).errorSources;
+    }, { message: 'отказ действия дошёл до подписчика' }).toEqual(['action']);
+    const log = await read(page);
+    expect(log.errorMessages[0], 'open() на разобранном экземпляре').toContain(DESTROYED_MESSAGE);
+    expect(log.errorPrevented, 'подписчик отменил отказ').toBe(1);
+    expect(log.visible, 'меню осталось закрытым').toBe(false);
+    expect(log.closeCount, 'закрытие было одно').toBe(1);
+    expect(log.escapedBy, 'наружу ничего не ушло').toEqual([]);
+  });
+
+  test('отпускание над пунктом возвращает фокус до конца действия', async ({ page }) => {
+    await setup(page, {
+      attached: true,
+      pressAndHold: 'right',
+      items: [{ id: 'Первый', slowAction: true }],
+    });
+    await page.mouse.move(OPEN_POINT.x, OPEN_POINT.y);
+    await page.mouse.down({ button: 'right' });
+    await expect.poll(async () => {
+      return (await read(page)).visible;
+    }, { message: 'нажатие показало меню' }).toBe(true);
+    const point = await page.evaluate(() => {
+      const item = document.querySelector('.vc-item');
+      if (!(item instanceof HTMLElement)) {
+        throw new Error('пункта нет');
+      }
+      const rect = item.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    });
+    await page.mouse.move(point.x, point.y);
+    await page.mouse.up({ button: 'right' });
+    // Снимок одним запросом: фокус и «действие ещё не отметилось» обязаны читаться
+    // в один момент, иначе проверка ловила бы фокус уже после возврата закрытием.
+    const moment = await page.evaluate(() => {
+      const scope = /** @type {{ __mc: AsyncProbe }} */ (/** @type {unknown} */ (globalThis));
+      return { focus: document.activeElement?.id ?? null, marks: scope.__mc.read().marks };
+    });
+    expect(moment.focus, 'фокус вернулся контейнеру в момент закрытия').toBe('surface');
+    expect(moment.marks, 'действие ещё не закончилось').toEqual([]);
+    await expect.poll(async () => {
+      return (await read(page)).marks;
+    }, { message: 'действие доиграло' }).toEqual(['Первый']);
+  });
+
+  test('close приходит раньше error отказавшего действия', async ({ page }) => {
+    await setup(page, { mode: 'async-throw', watch: true });
+    await openMenu(page);
+    await activateItem(page);
+    await expect.poll(async () => {
+      return (await read(page)).errorMessages;
+    }, { message: 'отказ дошёл до подписчика' }).toEqual([FAILURE_TEXT]);
+    expect((await read(page)).timeline, 'закрытие раньше отказа').toEqual([
+      'open',
+      'close',
+      'error',
+    ]);
   });
 });
 
@@ -772,7 +880,7 @@ test.describe('читающие действия', () => {
   });
 });
 test.describe('действие владельца подменю', () => {
-  test('меню ждёт асинхронное действие владельца и закрывается после него', async ({ page }) => {
+  test('меню закрывается сразу, а не ждёт асинхронное действие владельца', async ({ page }) => {
     await setup(page, {
       items: [{
         id: 'Ветка',
@@ -784,16 +892,13 @@ test.describe('действие владельца подменю', () => {
     await openMenu(page);
     await activateItem(page);
 
-    // Закрытие стоит после `await` действия, иначе асинхронный ответ ушёл бы на
-    // уже закрытое меню: у пункта своё действие, и закрывать его раньше ответа
-    // было бы то же, что не дождаться действия вовсе.
-    expect((await read(page)).visible, 'меню ждёт ответа действия').toBe(true);
+    // Владелец с собственным действием активируется как обычный пункт: меню уходит
+    // с экрана до вызова действия, и асинхронный ответ не держит его на странице.
+    expect((await read(page)).visible, 'меню закрыто до ответа действия').toBe(false);
     await expect.poll(async () => {
-      return (await read(page)).visible;
-    }, { message: 'меню закрылось после ответа действия' }).toBe(false);
-    const log = await read(page);
-    expect(log.marks, 'действие владельца отработало').toEqual(['Ветка']);
-    expect(log.escapedBy, 'наружу ничего не ушло').toEqual([]);
+      return (await read(page)).marks;
+    }, { message: 'действие владельца доиграло' }).toEqual(['Ветка']);
+    expect((await read(page)).escapedBy, 'наружу ничего не ушло').toEqual([]);
   });
 });
 
