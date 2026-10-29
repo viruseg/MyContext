@@ -78,6 +78,7 @@ import { expect, test } from '@playwright/test';
  * @property {boolean} [reopenOnFocus]
  * @property {boolean} [destroyOnFocus] `focusAction` первого пункта разбирает
  *   экземпляр изнутри действия.
+ * @property {boolean} [actionNotes] писать ли вызов `action` первого пункта в журнал.
  * @property {boolean} [noErrorListener] не подписываться на `error`: отказ должен
  *   уйти на страницу, а не быть разобранным подписчиком.
  */
@@ -166,6 +167,8 @@ test.beforeEach(async ({ page }) => {
     /** @type {boolean} */
     let asyncActions = false;
     /** @type {boolean} */
+    let actionNotes = false;
+    /** @type {boolean} */
     let reopenOnFocus = false;
     /** @type {boolean} */
     let destroyOnFocus = false;
@@ -250,7 +253,7 @@ test.beforeEach(async ({ page }) => {
       /** @type {MenuItem} */
       const first = {
         labelAction: () => 'Первый',
-        action: () => {},
+        action: actionNotes ? () => { log.push('action:Первый'); } : () => {},
       };
       if (asyncActions) {
         first.focusAction = async () => {
@@ -340,6 +343,7 @@ test.beforeEach(async ({ page }) => {
         submenuVersion = 0;
         focusCalled = false;
         asyncActions = input.asyncActions === true;
+        actionNotes = input.actionNotes === true;
         reopenOnFocus = input.reopenOnFocus === true;
         destroyOnFocus = input.destroyOnFocus === true;
         swallow = false;
@@ -818,6 +822,31 @@ test.describe('закрытие и снос', () => {
     const after = await readMenu(page);
     expect(after.log).toEqual(['focus:Первый', 'blur:Первый', 'focus:Второй', 'blur:Второй']);
     expect(stillHeld(after.log)).toEqual([]);
+  });
+
+  test('клик закрывает меню до действия, и blur приходит раньше action', async ({ page }) => {
+    await makeMenu(page, { actionNotes: true });
+    await hoverItem(page, 'Первый');
+    await page.evaluate(() => {
+      const scope = /** @type {{ __focus: Probe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__focus.clickItem('Первый');
+    });
+    const after = await readMenu(page);
+    expect(after.log).toEqual(['focus:Первый', 'blur:Первый', 'action:Первый']);
+    expect(after.shown, 'меню закрыто').toBe(0);
+    expect(
+      await page.evaluate(() => document.activeElement?.id),
+      'фокус вернулся контейнеру',
+    ).toBe('surface');
+  });
+
+  test('Enter закрывает меню до действия тем же путём', async ({ page }) => {
+    await makeMenu(page, { actionNotes: true });
+    await hoverItem(page, 'Первый');
+    await press(page, 'Enter');
+    const after = await readMenu(page);
+    expect(after.log).toEqual(['focus:Первый', 'blur:Первый', 'action:Первый']);
+    expect(after.shown, 'меню закрыто').toBe(0);
   });
 
   test('Tab зовёт blur', async ({ page }) => {
