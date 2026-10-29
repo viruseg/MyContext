@@ -619,7 +619,7 @@ test.beforeEach(async ({ page }) => {
     // один, и он достаёт коллбэк по внутреннему ключу пункта из общей карты.
     //
     // Закрытие живёт здесь же, а не в движке: в `MyContext` его делает
-    // `#onLevelClick` в своём `finally`, и после активации движок `closeAll` не
+    // `#runItemAction` до вызова действия, и после активации движок `closeAll` не
     // зовёт — второй вызов был бы двойным закрытием с двойным возвратом фокуса.
     // Фикстура повторяет это разделение: обработчик активации один и закрывает сам.
     document.addEventListener('click', (event) => {
@@ -649,13 +649,13 @@ test.beforeEach(async ({ page }) => {
           const label = labelIn(item.element) ?? '';
           clickLabels.push(label);
           // Активация попадает в тот же журнал, что и вызовы хоста: порядок
-          // «сначала действие, потом закрытие» виден только здесь.
+          // «сначала закрытие, потом действие» виден только здесь.
+          openedLayer().hideAll();
+          calls.order.push('close:activation');
           calls.order.push(`action:${label}`);
           if (definition !== undefined && definition.action !== undefined) {
             definition.action(event);
           }
-          calls.order.push('close:activation');
-          openedLayer().hideAll();
           return;
         }
       }
@@ -2215,12 +2215,12 @@ test.describe('активация', () => {
     // для клавиатуры, и поэтому `action` получает настоящее событие с настоящей
     // целью, а не вызов по внутреннему ключу из обхода дерева.
     expect(result.after.clicks).toEqual(['Открыть']);
-    // Закрытие после активации — отдельное требование: активация пункта гасит
-    // меню. Гасит его обработчик активации, а не движок: `closeAll` здесь ноль, и
-    // «действие, потом закрытие» остаётся единственным порядком, который вообще
+    // Закрытие до действия — отдельное требование: активация пункта гасит меню,
+    // и гасит его обработчик активации, а не движок: `closeAll` здесь ноль, и
+    // «сначала закрытие, потом действие» — единственный порядок, который вообще
     // возможен.
     expect(result.after.calls.closeAll).toBe(0);
-    expect(result.after.calls.order).toEqual(['action:Открыть', 'close:activation']);
+    expect(result.after.calls.order).toEqual(['close:activation', 'action:Открыть']);
     expect(result.after.levels.root.open).toBe(false);
     expect(result.after.levels.root.popoverOpen).toBe(false);
     expect(result.steps[1].prevented).toBe(true);
@@ -2281,10 +2281,11 @@ test.describe('активация', () => {
     expect(result.steps[0].focus.label).toBe('Выход');
     expect(result.after.actions).toEqual(['Выход']);
     expect(result.after.clicks).toEqual(['Выход']);
-    // `Space` ведёт себя как `Enter` во всём, включая место закрытия: его делает
-    // обработчик активации, а не движок, поэтому журнал тот же и `closeAll` ноль.
+    // `Space` ведёт себя как `Enter` во всём, включая порядок и место закрытия: его
+    // делает обработчик активации, а не движок, поэтому журнал тот же и `closeAll`
+    // ноль.
     expect(result.after.calls.closeAll).toBe(0);
-    expect(result.after.calls.order).toEqual(['action:Выход', 'close:activation']);
+    expect(result.after.calls.order).toEqual(['close:activation', 'action:Выход']);
     expect(result.after.levels.root.open).toBe(false);
     // Пробел гасится: иначе страница прокрутилась бы под меню.
     expect(result.steps[1].prevented).toBe(true);
@@ -2334,12 +2335,12 @@ test.describe('активация', () => {
     });
 
     // Владелец подменю активируется ровно как обычный пункт: то же действие, тот же
-    // порядок «действие, потом закрытие» и тот же синтетический клик вместо
+    // порядок «сначала закрытие, потом действие» и тот же синтетический клик вместо
     // прямого вызова коллбэка — событие в действии остаётся настоящим.
     expect(result.after.actions).toEqual(['Владелец с действием']);
     expect(result.after.clicks).toEqual(['Владелец с действием']);
     expect(result.after.calls.order).toEqual([
-      'action:Владелец с действием', 'close:activation',
+      'close:activation', 'action:Владелец с действием',
     ]);
     // Подменю не раскрывалось: раскрытие осталось за `ArrowRight` и наведением.
     expect(result.after.calls.openSubmenu).toBe(0);
@@ -2438,7 +2439,7 @@ test.describe('активация', () => {
     // Пункт без подменю активируется, и закрывает его обработчик активации: журнал
     // тот же, что у `Enter` на обычном пункте, а `closeAll` движка не зовётся.
     expect(result.after.calls.closeAll).toBe(0);
-    expect(result.after.calls.order).toEqual(['action:Без подменю', 'close:activation']);
+    expect(result.after.calls.order).toEqual(['close:activation', 'action:Без подменю']);
     expect(result.after.levels.root.open).toBe(false);
     // Признаков владельца у пункта нет ни одного: ни `aria-haspopup`, ни
     // `aria-owns`, ни `aria-expanded`, ни `hasSubmenu`. Это решение рендерера, и

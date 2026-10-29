@@ -66,6 +66,7 @@ import { expect, test } from '@playwright/test';
  * @property {'allow' | 'deny' | 'throw'} [armable] ответ предиката
  *   `isArmableAction`: разрешить, отказать или бросить. Без поля предиката нет.
  * @property {boolean} [destroyOnClose] разбирать ли экземпляр на закрытии.
+ * @property {number} [delayMs] задержка действий внутри страницы, мс; по умолчанию 20.
  * @property {'removed' | 'twice' | 'rejecting'} [listener] подписка на `open`:
  *   снять её по той же ссылке, подписать одну функцию дважды или вернуть отклонённый
  *   промис.
@@ -172,7 +173,7 @@ async function setup(page, input = {}) {
 
     // Настоящая задача, а не микротаска: микротаска не отдаёт управление наружу,
     // и тест на `await` не отличил бы ожидание от его отсутствия.
-    const delay = 20;
+    const delay = config.delayMs ?? 20;
     const failure = 'сломалось';
 
     // Канал ухода отказа различается намеренно: отказ промиса, который никто не
@@ -707,6 +708,9 @@ test.describe('закрытие до действия', () => {
       attached: true,
       pressAndHold: 'right',
       items: [{ id: 'Первый', slowAction: true }],
+      // Задержка заведомо больше обмена с браузером: снимок ниже обязан попасть
+      // внутрь действия, иначе проверка ловила бы уже закрытое меню без действия.
+      delayMs: 400,
     });
     await page.mouse.move(OPEN_POINT.x, OPEN_POINT.y);
     await page.mouse.down({ button: 'right' });
@@ -734,6 +738,30 @@ test.describe('закрытие до действия', () => {
     await expect.poll(async () => {
       return (await read(page)).marks;
     }, { message: 'действие доиграло' }).toEqual(['Первый']);
+  });
+
+  test('отпускание мимо пунктов не возвращает фокус контейнеру', async ({ page }) => {
+    await setup(page, { attached: true, pressAndHold: 'right' });
+    await page.mouse.move(OPEN_POINT.x, OPEN_POINT.y);
+    await page.mouse.down({ button: 'right' });
+    await expect.poll(async () => {
+      return (await read(page)).visible;
+    }, { message: 'нажатие показало меню' }).toBe(true);
+    const corner = await page.evaluate(() => {
+      const level = document.querySelector('.vc-menu');
+      if (!(level instanceof HTMLElement)) {
+        throw new Error('уровня нет');
+      }
+      const rect = level.getBoundingClientRect();
+      return { x: rect.left + 2, y: rect.top + 2 };
+    });
+    await page.mouse.move(corner.x, corner.y);
+    await page.mouse.up({ button: 'right' });
+    expect((await read(page)).visible, 'меню закрыто').toBe(false);
+    expect(
+      await page.evaluate(() => document.activeElement?.id ?? null),
+      'фокус не забран контейнеру',
+    ).not.toBe('surface');
   });
 
   test('close приходит раньше error отказавшего действия', async ({ page }) => {
