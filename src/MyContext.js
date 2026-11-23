@@ -2601,11 +2601,11 @@ export class MyContext extends EventTarget {
       return;
     }
     this.#root = root;
-    this.#chain.push(root);
     await this.#leadAhead(root);
     if (this.#showCancelled(serial)) {
       return;
     }
+    this.#chain.push(root);
     this.#layer.showRoot(root, params);
     // Позиция страницы запоминается после показа, а не до: событие `scroll` может
     // прийти уже после того, как меню встало на место, и сверять его надо с тем, что

@@ -58,6 +58,14 @@ import { OPEN_GRACE_MS } from '../../src/constants.js';
  */
 
 /**
+ * @typedef {object} PendingProbe
+ * @property {Promise<void>} started
+ * @property {() => void} release
+ * @property {Promise<void>} opening
+ * @property {() => { visible: boolean; openCount: number; closeCount: number }} read
+ */
+
+/**
  * Расстояние от точки до рамки, px. Переписано здесь, а не импортировано из
  * `src/geometry.js`: кейс проверяет правило целиком, и если бы он считал тем же
  * кодом, который проверяет, то ошибка в геометрии прошла бы в обоих направлениях
@@ -580,5 +588,81 @@ test.describe('границы правила', () => {
     const after = await readMenu(page);
     expect(after.openCount, 'подменю не показалось').toBe(0);
     expect(after.errors).toEqual([]);
+  });
+});
+
+test.describe('асинхронный показ', () => {
+  test('pointermove с теми же координатами во время подготовки подменю не отменяет корень', async ({ page }) => {
+    await page.evaluate(async () => {
+      const { MyContext } = await import('../../src/index.js');
+      let markStarted = () => {};
+      const started = new Promise((resolve) => {
+        markStarted = () => resolve(undefined);
+      });
+      let release = () => {};
+      const gate = new Promise((resolve) => {
+        release = () => resolve(undefined);
+      });
+      let openCount = 0;
+      let closeCount = 0;
+      const menu = new MyContext([
+        {
+          labelAction: () => 'Корень',
+          submenuAction: () => [{
+            labelAction: async () => {
+              markStarted();
+              await gate;
+              return 'Пункт подменю';
+            },
+          }],
+        },
+      ], { autoHideDistance: 50, destroyOnClose: true });
+      menu.addEventListener('open', () => {
+        openCount += 1;
+      });
+      menu.addEventListener('close', () => {
+        closeCount += 1;
+      });
+      const opening = menu.open({ x: 70, y: 58 }, { dismissible: true });
+      const scope = /** @type {{ __pending?: PendingProbe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__pending = {
+        started,
+        release,
+        opening,
+        read: () => ({
+          visible: document.querySelectorAll('.vc-menu:popover-open').length > 0,
+          openCount,
+          closeCount,
+        }),
+      };
+    });
+
+    await page.evaluate(() => {
+      const scope = /** @type {{ __pending: PendingProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__pending.started;
+    });
+    await page.evaluate(() => {
+      document.dispatchEvent(new PointerEvent('pointermove', {
+        clientX: 70,
+        clientY: 58,
+        bubbles: true,
+      }));
+    });
+    await page.evaluate(() => {
+      const scope = /** @type {{ __pending: PendingProbe }} */ (/** @type {unknown} */ (globalThis));
+      scope.__pending.release();
+    });
+    await page.evaluate(() => {
+      const scope = /** @type {{ __pending: PendingProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__pending.opening;
+    });
+
+    const state = await page.evaluate(() => {
+      const scope = /** @type {{ __pending: PendingProbe }} */ (/** @type {unknown} */ (globalThis));
+      return scope.__pending.read();
+    });
+    expect(state.visible, 'корень показан после подготовки подменю').toBe(true);
+    expect(state.openCount, 'событие open пришло один раз').toBe(1);
+    expect(state.closeCount, 'до показа меню не закрылось').toBe(0);
   });
 });
